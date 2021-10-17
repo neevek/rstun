@@ -1,13 +1,21 @@
-use crate::ServerConfig;
+use crate::{ServerConfig, TunnelType};
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
-use log::{debug, info};
+use dashmap::DashMap;
+use futures_util::{StreamExt, TryFutureExt};
+use log::{debug, error, info, warn};
 use quinn::{Certificate, CertificateChain, PrivateKey};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 #[derive(Debug)]
 pub struct Server {
     pub config: ServerConfig,
+}
+
+struct Session {
+    downstream: TcpStream,
 }
 
 impl Server {
@@ -54,14 +62,29 @@ impl Server {
         let (endpoint, mut incoming) = endpoint_builder.bind(&addr)?;
         info!("server is bound to: {}", endpoint.local_addr()?);
 
+        let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());
+        for (name, str_addr) in &self.config.downstreams {
+            if let Ok(addr) = str_addr.parse() {
+                downstream_addrs.insert(name.clone(), addr);
+            } else {
+                warn!("failed to parse downstream address: {}", str_addr);
+            }
+        }
+
         while let Some(conn) = incoming.next().await {
-            tokio::spawn(Self::handle_connection(conn));
+            tokio::spawn(
+                Self::handle_connection(conn, downstream_addrs.clone())
+                    .map_err(|e| error!("{}", e)),
+            );
         }
 
         Ok(())
     }
 
-    async fn handle_connection(connnecing: quinn::Connecting) -> Result<()> {
+    async fn handle_connection(
+        connnecing: quinn::Connecting,
+        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
+    ) -> Result<()> {
         let quinn::NewConnection {
             connection,
             mut bi_streams,
@@ -69,6 +92,8 @@ impl Server {
         } = connnecing.await?;
 
         info!("new connection, addr: {}", connection.remote_address());
+
+        //let downstream_map: DashMap<usize, >  = DashMap::new();
 
         async {
             while let Some(stream) = bi_streams.next().await {
@@ -78,10 +103,12 @@ impl Server {
                         return Ok(());
                     }
                     Err(e) => {
-                        debug!("handle_connection failed: {}", e);
                         return Err(e);
                     }
-                    Ok(s) => tokio::spawn(Self::handle_stream(s)),
+                    Ok(s) => tokio::spawn(
+                        Self::handle_stream(s, downstream_addrs.clone())
+                            .map_err(|e| error!("{}", e)),
+                    ),
                 };
             }
             Ok(())
@@ -91,12 +118,34 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_stream((mut send, recv): (quinn::SendStream, quinn::RecvStream)) -> Result<()> {
-        let buf = recv.read_to_end(64 * 1024).await?;
-        let s = String::from_utf8(buf);
-        debug!("from client: {}", s.unwrap());
+    async fn handle_stream(
+        (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
+    ) -> Result<()> {
+        let mut login_info_len = [0_u8; 2];
+        recv.read_exact(&mut login_info_len)
+            .await
+            .context("read login_info_len failed")?;
 
-        send.write_all(b"hello from server").await?;
+        let login_info_len = ((login_info_len[0] as usize) << 8) | (login_info_len[1] as usize);
+        let mut login_info = vec![0; login_info_len];
+        recv.read_exact(&mut login_info)
+            .await
+            .context("read login_info failed")?;
+
+        let tun_type = bincode::deserialize::<TunnelType>(&login_info)?;
+
+        match tun_type {
+            TunnelType::Forward(i) => {
+                debug!("password: {}", i.password);
+                send.write_all(b"ok").await?;
+            }
+            TunnelType::Reverse(i) => {
+                debug!("password: {}", i.password);
+                send.write_all(b"ok").await?;
+            }
+        }
+
         send.finish().await?;
         Ok(())
     }

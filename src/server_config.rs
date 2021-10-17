@@ -12,7 +12,7 @@ pub struct ServerConfig {
     /// traffics to the rstun server will be relayed to servers
     /// specified by upstreams, each client must specify a target
     /// server when it connects to the rstun server.
-    pub upstreams: HashMap<String, SocketAddr>,
+    pub downstreams: HashMap<String, String>,
 
     /// 0.0.0.0:3515
     pub dashboard_server: String,

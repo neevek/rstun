@@ -1,4 +1,4 @@
-use crate::ClientConfig;
+use crate::{ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{Context, Result};
 use log::{debug, error, info};
 use quinn::crypto::rustls::TLSError;
@@ -6,6 +6,7 @@ use quinn::Certificate;
 use rustls::ServerCertVerified;
 use std::io::{Read, Write};
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 
@@ -61,10 +62,14 @@ impl Client {
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
             .unwrap();
 
-        send.write_all(b"hello world")
-            .await
-            .context("write failed")?;
-        send.finish().await?;
+        let tun_type = TunnelType::Forward(ForwardLoginInfo {
+            password: "hello world!".to_string(),
+            remote_downstream_name: "http".to_string(),
+        });
+
+        let tun_type = bincode::serialize(&tun_type).unwrap();
+        send.write_u16(tun_type.len() as u16).await?;
+        send.write_all(&tun_type).await?;
 
         let buf = recv
             .read_to_end(usize::max_value())
