@@ -2,6 +2,7 @@ use anyhow::Result;
 use colored::Colorize;
 use rstun::Server;
 use rstun::ServerConfig;
+use std::collections::HashMap;
 use std::io::Write;
 
 extern crate colored;
@@ -28,8 +29,13 @@ fn main() {
 }
 
 async fn run() -> Result<()> {
+    let mut downstreams = HashMap::new();
+    downstreams.insert("http".to_string(), "127.0.0.1:1081".to_string());
+
     let mut config = ServerConfig::default();
     config.addr = "127.0.0.1:3515".into();
+    config.password = "password".to_string();
+    config.downstreams = downstreams;
     config.cert_path = "/Users/neevek/dev/bb/rstun/localhost.crt.pem".to_string();
     config.key_path = "/Users/neevek/dev/bb/rstun/localhost.key.pem".to_string();
 

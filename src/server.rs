@@ -1,17 +1,18 @@
 use crate::{ServerConfig, TunnelType};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use quinn::{Certificate, CertificateChain, PrivateKey};
+use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 #[derive(Debug)]
 pub struct Server {
-    pub config: ServerConfig,
+    pub config: Arc<ServerConfig>,
 }
 
 struct Session {
@@ -20,7 +21,9 @@ struct Session {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Server { config }
+        Server {
+            config: Arc::new(config),
+        }
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -72,8 +75,9 @@ impl Server {
         }
 
         while let Some(conn) = incoming.next().await {
+            let server_config = self.config.clone();
             tokio::spawn(
-                Self::handle_connection(conn, downstream_addrs.clone())
+                Self::handle_connection(conn, downstream_addrs.clone(), server_config)
                     .map_err(|e| error!("{}", e)),
             );
         }
@@ -84,6 +88,7 @@ impl Server {
     async fn handle_connection(
         connnecing: quinn::Connecting,
         downstream_addrs: Arc<DashMap<String, SocketAddr>>,
+        server_config: Arc<ServerConfig>,
     ) -> Result<()> {
         let quinn::NewConnection {
             connection,
@@ -91,7 +96,7 @@ impl Server {
             ..
         } = connnecing.await?;
 
-        info!("new connection, addr: {}", connection.remote_address());
+        info!("accepted connection, addr: {}", connection.remote_address());
 
         //let downstream_map: DashMap<usize, >  = DashMap::new();
 
@@ -106,7 +111,7 @@ impl Server {
                         return Err(e);
                     }
                     Ok(s) => tokio::spawn(
-                        Self::handle_stream(s, downstream_addrs.clone())
+                        Self::handle_stream(s, downstream_addrs.clone(), server_config.clone())
                             .map_err(|e| error!("{}", e)),
                     ),
                 };
@@ -121,6 +126,7 @@ impl Server {
     async fn handle_stream(
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addrs: Arc<DashMap<String, SocketAddr>>,
+        server_config: Arc<ServerConfig>,
     ) -> Result<()> {
         let mut login_info_len = [0_u8; 2];
         recv.read_exact(&mut login_info_len)
@@ -135,18 +141,76 @@ impl Server {
 
         let tun_type = bincode::deserialize::<TunnelType>(&login_info)?;
 
+        info!("incoming stream logged in, stream_id: {}", send.id());
+
         match tun_type {
             TunnelType::Forward(i) => {
-                debug!("password: {}", i.password);
-                send.write_all(b"ok").await?;
+                Self::check_password(server_config.password.as_str(), i.password.as_str())?;
+                if downstream_addrs.contains_key(i.remote_downstream_name.as_str()) {
+                    let addr = downstream_addrs
+                        .get(i.remote_downstream_name.as_str())
+                        .unwrap();
+                    if let Ok(mut downstream_conn) = TcpStream::connect(&*addr).await {
+                        send.write_all(b"ok").await?;
+
+                        loop {
+                            let (mut down_read, mut down_write) = downstream_conn.split();
+                            tokio::select! {
+                                result =  Self::upstream_to_downstream(&mut recv, &mut down_write) => {
+                                    if let Err(e) = result {
+                                        debug!("upstream_to_downstream failed, err: {}", e);
+                                        break;
+                                    }
+                                }
+                                result = Self::downstream_to_upstream(&mut down_read, &mut send) => {
+                                    if let Err(e) = result {
+                                        debug!("downstream_to_upstream failed, err: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        send.write_all(b"failed to connect to downstream").await?;
+                    }
+                } else {
+                    send.write_all(b"downstream_name not found").await?;
+                }
             }
             TunnelType::Reverse(i) => {
-                debug!("password: {}", i.password);
+                Self::check_password(server_config.password.as_str(), i.password.as_str())?;
                 send.write_all(b"ok").await?;
             }
         }
 
         send.finish().await?;
+        Ok(())
+    }
+
+    fn check_password(password1: &str, password2: &str) -> Result<()> {
+        if password1 != password2 {
+            bail!("passwords don't match!");
+        }
+        Ok(())
+    }
+
+    async fn downstream_to_upstream<'a>(
+        down_read: &'a mut ReadHalf<'a>,
+        up_send: &'a mut SendStream,
+    ) -> Result<()> {
+        let mut buffer = vec![0_u8; 8192];
+        down_read.read(&mut buffer[..]).await?;
+        up_send.write_all(&buffer).await?;
+        Ok(())
+    }
+
+    async fn upstream_to_downstream<'a>(
+        up_recv: &'a mut RecvStream,
+        down_write: &'a mut WriteHalf<'a>,
+    ) -> Result<()> {
+        let mut buffer = vec![0_u8; 8192];
+        up_recv.read(&mut buffer[..]).await?;
+        down_write.write_all(&buffer).await?;
         Ok(())
     }
 

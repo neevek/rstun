@@ -1,3 +1,4 @@
+use anyhow::Result;
 use colored::Colorize;
 use rstun::Client;
 use rstun::ClientConfig;
@@ -6,7 +7,8 @@ use std::io::Write;
 extern crate colored;
 extern crate pretty_env_logger;
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::TRACE)
@@ -16,15 +18,20 @@ fn main() {
     .unwrap();
 
     init_logger();
-    run();
+    run().await?;
+    Ok(())
 }
 
-#[tokio::main]
-async fn run() {
+async fn run() -> Result<()> {
     let mut config = ClientConfig::default();
-    config.addr = "127.0.0.1:3515".into();
+    config.server_addr = "127.0.0.1:3515".into();
+    config.local_access_server_addr = "127.0.0.1:3618".into();
+    config.password = "password".to_string();
+    config.remote_downstream_name = "http".to_string();
     config.cert_path = "/Users/neevek/dev/bb/rstun/localhost.crt.pem".to_string();
-    let mut client = Client::connect(config).await.unwrap();
+    let client = Client::connect(config).await.unwrap();
+    client.run().await?;
+    Ok(())
 }
 
 fn init_logger() {

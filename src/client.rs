@@ -1,24 +1,18 @@
 use crate::{AccessServer, ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
-use futures_util::AsyncWriteExt as FuturesAsyncWriteExt;
-use log::{error, info};
+use log::{debug, error, info};
 use quinn::crypto::rustls::TLSError;
-use quinn::{Certificate, Connection, RecvStream, SendStream, VarInt};
+use quinn::{Certificate, Connection, RecvStream, SendStream};
 use rustls::ServerCertVerified;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::tcp::ReadHalf;
-use tokio::net::tcp::WriteHalf;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{ReadHalf, WriteHalf};
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 
 pub struct Client {
     config: ClientConfig,
     conn: Connection,
-    send_stream: SendStream,
-    recv_stream: RecvStream,
-    acc_server: AccessServer,
 }
 
 impl Client {
@@ -39,13 +33,11 @@ impl Client {
         cfg_builder.enable_keylog();
 
         let remote_addr = config
-            .addr
+            .server_addr
             .parse()
-            .with_context(|| format!("invalid address: {}", config.addr))?;
+            .with_context(|| format!("invalid address: {}", config.server_addr))?;
 
-        let local_addr = LOCAL_ADDR_STR
-            .parse()
-            .with_context(|| format!("invalid address: {}", config.addr))?;
+        let local_addr = LOCAL_ADDR_STR.parse().unwrap();
 
         let mut endpoint_builder = quinn::Endpoint::builder();
         endpoint_builder.default_client_config(cfg_builder.build());
@@ -69,47 +61,53 @@ impl Client {
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
             .unwrap();
 
-        Self::send_login_info(&mut send, &mut recv).await?;
+        info!("logging in... server: {}", remote_addr);
 
-        info!("connected! server: {}", remote_addr);
+        Self::send_login_info(&config, &mut send, &mut recv).await?;
 
-        let mut acc_server = AccessServer::new(config.access_server_addr.clone());
-        acc_server.bind().await?;
+        info!("logged in! server: {}", remote_addr);
 
         Ok(Client {
             config,
             conn: connection,
-            send_stream: send,
-            recv_stream: recv,
-            acc_server,
         })
     }
 
-    async fn run(&self) -> Result<()> {
-        let mut acc_server = AccessServer::new(self.config.access_server_addr.clone());
-        acc_server.bind().await?;
+    pub async fn run(&self) -> Result<()> {
+        info!("start serving...");
 
+        // start the access server to accept local connections
+        let mut acc_server = AccessServer::new(self.config.local_access_server_addr.clone());
+        acc_server.bind().await?;
         let (sender, mut receiver) = tokio::sync::mpsc::channel(500);
         acc_server.start(sender).await?;
 
+        // accept local connections and build tunnel to remote for accepted connections
         while let Some(mut local_conn) = receiver.recv().await {
             match self.conn.open_bi().await {
-                Ok((mut remote_send, mut remote_recv)) => {
+                Ok((mut remote_send, mut remote_recv)) => loop {
                     let (mut local_read, mut local_write) = local_conn.split();
-                    //Self::local_to_remote(&mut local_read, &mut remote_send).await?;
-
                     tokio::select! {
-                        _ = Self::local_to_remote(&mut local_read, &mut remote_send) => (),
-                        _ = Self::remote_to_local(&mut remote_recv, &mut local_write) => ()
+                        result = Self::local_to_remote(&mut local_read, &mut remote_send) => {
+                            if let Err(e) = result {
+                                debug!("local to remote failed, err: {}", e);
+                                break;
+                            }
+                        }
+                        result = Self::remote_to_local(&mut remote_recv, &mut local_write) => {
+                            if let Err(e) = result {
+                                debug!("remote to local failed, err: {}", e);
+                                break;
+                            }
+                        }
                     }
-                }
-                Err(e) => {
-                    error!("failed to connect to remote server: {}", e);
-                    // local_conn will be dropped here
-                }
+                },
+
+                Err(e) => bail!("failed to open_bi on remote connection: {}", e),
             }
         }
 
+        info!("quit!");
         Ok(())
     }
 
@@ -118,14 +116,8 @@ impl Client {
         remote_send: &'a mut SendStream,
     ) -> Result<()> {
         let mut buffer = vec![0_u8; 8192];
-        match local_read.read(&mut buffer[..]).await {
-            Ok(len_read) => {
-                if remote_send.write_all(&buffer).await.is_err() {
-                    remote_send.close().await.unwrap_or(());
-                }
-            }
-            Err(e) => bail!("failed"),
-        }
+        local_read.read(&mut buffer[..]).await?;
+        remote_send.write_all(&buffer).await?;
         Ok(())
     }
 
@@ -134,14 +126,8 @@ impl Client {
         local_write: &'a mut WriteHalf<'a>,
     ) -> Result<()> {
         let mut buffer = vec![0_u8; 8192];
-        match remote_recv.read(&mut buffer[..]).await {
-            Ok(len_read) => {
-                if local_write.write_all(&buffer).await.is_err() {
-                    remote_recv.stop(VarInt::from_u32(1)).unwrap_or(());
-                }
-            }
-            Err(e) => bail!("failed"),
-        }
+        remote_recv.read(&mut buffer[..]).await?;
+        local_write.write_all(&buffer).await?;
         Ok(())
     }
 
@@ -151,10 +137,14 @@ impl Client {
     //Ok(())
     //}
 
-    async fn send_login_info(send: &mut SendStream, recv: &mut RecvStream) -> Result<()> {
+    async fn send_login_info(
+        config: &ClientConfig,
+        send: &mut SendStream,
+        recv: &mut RecvStream,
+    ) -> Result<()> {
         let tun_type = TunnelType::Forward(ForwardLoginInfo {
-            password: "hello world!".to_string(),
-            remote_downstream_name: "http".to_string(),
+            password: config.password.clone(),
+            remote_downstream_name: config.remote_downstream_name.clone(),
         });
 
         let tun_type = bincode::serialize(&tun_type).unwrap();
@@ -162,12 +152,19 @@ impl Client {
         send.write_all(&tun_type).await?;
 
         let mut resp = [0_u8; 2];
-        recv.read_exact(&mut resp)
+        recv.read(&mut resp)
             .await
             .context("read login response failed")?;
 
         if resp[0] != b'o' && resp[1] != b'k' {
-            anyhow::bail!("failed to login!");
+            let mut err_buf = vec![0_u8; 128];
+            recv.read_to_end(&mut err_buf).await?;
+            anyhow::bail!(
+                "failed to login, err: {}{}{}",
+                resp[0] as char,
+                resp[1] as char,
+                String::from_utf8_lossy(&err_buf)
+            );
         }
 
         Ok(())

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use log::error;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Sender;
@@ -39,8 +40,20 @@ impl AccessServer {
         let listener = self.tcp_listener.take().unwrap();
         tokio::spawn(async move {
             loop {
-                if let Ok((socket, _addr)) = listener.accept().await {
-                    conn_sender.send(socket).await;
+                match listener.accept().await {
+                    Ok((socket, _addr)) => {
+                        conn_sender
+                            .send(socket)
+                            .await
+                            .map_err(|e| {
+                                error!("failed to send connection over channel, err: {}", e);
+                            })
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        error!("access server failed, err: {}", e);
+                        break;
+                    }
                 }
             }
         });
