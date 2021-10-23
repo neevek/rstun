@@ -8,6 +8,8 @@ mod server;
 pub use server::Server;
 mod client;
 pub use client::Client;
+mod access_server;
+pub use access_server::AccessServer;
 
 #[macro_use]
 extern crate serde_derive;
