@@ -59,7 +59,7 @@ impl Server {
             .max_concurrent_bidi_streams(2000)?;
 
         let mut cfg_builder = quinn::ServerConfigBuilder::new(cfg);
-        cfg_builder.protocols(&[b"\x05rstun"]);
+        //cfg_builder.protocols(&[b"\x05rstun"]);
         cfg_builder.use_stateless_retry(true);
         cfg_builder.enable_keylog();
 

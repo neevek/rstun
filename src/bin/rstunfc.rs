@@ -1,8 +1,11 @@
 use anyhow::Result;
 use colored::Colorize;
-use rstun::Client;
+use log::info;
+use log::{debug, error};
 use rstun::ClientConfig;
+use rstun::{AccessServer, Client};
 use std::io::Write;
+use tokio::time::Duration;
 
 extern crate colored;
 extern crate pretty_env_logger;
@@ -29,8 +32,47 @@ async fn run() -> Result<()> {
     config.password = "password".to_string();
     config.remote_downstream_name = "http".to_string();
     config.cert_path = "/Users/neevek/dev/bb/rstun/localhost.crt.pem".to_string();
-    let client = Client::connect(config).await.unwrap();
-    client.run().await?;
+    config.connect_max_retry = 0;
+    config.wait_before_retry_ms = 5 * 1000;
+    config.max_idle_timeout_ms = 5 * 1000;
+    config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
+
+    let mut access_server = AccessServer::new(config.local_access_server_addr.clone());
+    access_server.bind().await?;
+    access_server.start().await?;
+
+    let mut connect_retry_count = 0;
+    let connect_max_retry = config.connect_max_retry;
+    let wait_before_retry_ms = config.wait_before_retry_ms;
+    let mut client = Client::new(config);
+
+    loop {
+        match client.connect().await {
+            Ok(_) => {
+                connect_retry_count = 0;
+                client.serve(access_server.tcp_receiver()).await.unwrap();
+            }
+            Err(e) => {
+                error!("connect failed, err: {}", e);
+                if connect_max_retry > 0 {
+                    connect_retry_count += 1;
+                    if connect_retry_count >= connect_max_retry {
+                        info!(
+                            "quit after having retried for {} times",
+                            connect_retry_count
+                        );
+                        break;
+                    }
+                }
+
+                debug!(
+                    "will wait for {}ms before retrying...",
+                    wait_before_retry_ms
+                );
+                tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
+            }
+        }
+    }
     Ok(())
 }
 

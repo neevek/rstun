@@ -1,38 +1,48 @@
 use crate::ReadResult;
-use crate::{AccessServer, ClientConfig, ForwardLoginInfo, TunnelType};
+use crate::{ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
 use quinn::crypto::rustls::TLSError;
 use quinn::TransportConfig;
-use quinn::{Certificate, Connection, RecvStream, SendStream};
+use quinn::{Certificate, RecvStream, SendStream};
 use rustls::ServerCertVerified;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
-const IDLE_TIMEOUT: u64 = 30 * 1000;
 
 pub struct Client {
     config: ClientConfig,
-    conn: Connection,
+    remote_conn: Option<quinn::Connection>,
 }
 
 impl Client {
-    pub async fn connect(config: ClientConfig) -> Result<Self> {
+    pub fn new(config: ClientConfig) -> Self {
+        Client {
+            config,
+            remote_conn: None,
+        }
+    }
+
+    pub async fn connect(&mut self) -> Result<()> {
         let mut transport_cfg = TransportConfig::default();
         transport_cfg
-            .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
+            .max_idle_timeout(Some(Duration::from_millis(self.config.max_idle_timeout_ms)))
             .unwrap();
-        transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+        transport_cfg.keep_alive_interval(Some(Duration::from_millis(
+            self.config.keep_alive_interval_ms,
+        )));
 
         let mut cfg = quinn::ClientConfig::default();
         cfg.transport = Arc::new(transport_cfg);
 
-        info!("using cert: {}", config.cert_path);
+        info!("using cert: {}", self.config.cert_path);
 
-        let cert = Client::read_cert(config.cert_path.as_str())?;
+        let cert = Client::read_cert(self.config.cert_path.as_str())?;
         let tls_cfg = Arc::get_mut(&mut cfg.crypto).unwrap();
         tls_cfg
             .dangerous()
@@ -40,13 +50,14 @@ impl Client {
 
         let mut cfg_builder = quinn::ClientConfigBuilder::new(cfg);
         cfg_builder.add_certificate_authority(cert)?;
-        cfg_builder.protocols(&[b"\x05rstun"]);
+        //cfg_builder.protocols(&[b"\x05rstun"]);
         cfg_builder.enable_keylog();
 
-        let remote_addr = config
+        let remote_addr = self
+            .config
             .server_addr
             .parse()
-            .with_context(|| format!("invalid address: {}", config.server_addr))?;
+            .with_context(|| format!("invalid address: {}", self.config.server_addr))?;
 
         let local_addr = LOCAL_ADDR_STR.parse().unwrap();
 
@@ -74,56 +85,23 @@ impl Client {
 
         info!("logging in... server: {}", remote_addr);
 
-        Self::send_login_info(&config, &mut send, &mut recv).await?;
+        Self::send_login_info(&self.config, &mut send, &mut recv).await?;
 
         info!("logged in! server: {}", remote_addr);
 
-        Ok(Client {
-            config,
-            conn: connection,
-        })
+        self.remote_conn = Some(connection);
+        Ok(())
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn serve(&mut self, local_conn_receiver: &mut Receiver<TcpStream>) -> Result<()> {
         info!("start serving...");
 
-        // start the access server to accept local connections
-        let mut acc_server = AccessServer::new(self.config.local_access_server_addr.clone());
-        acc_server.bind().await?;
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(500);
-        acc_server.start(sender).await?;
-
+        let remote_conn = &self.remote_conn.as_ref().unwrap();
         // accept local connections and build a tunnel to remote for accepted connections
-        while let Some(mut local_conn) = receiver.recv().await {
-            match self.conn.open_bi().await {
-                Ok((mut remote_send, mut remote_recv)) => {
-                    info!("open new stream, id: {}", remote_send.id().index());
-                    tokio::spawn(async move {
-                        let mut local_read_result = ReadResult::Succeeded;
-                        loop {
-                            let (mut local_read, mut local_write) = local_conn.split();
-                            let local2remote =
-                                Self::local_to_remote(&mut local_read, &mut remote_send);
-                            let remote2local =
-                                Self::remote_to_local(&mut remote_recv, &mut local_write);
-
-                            tokio::select! {
-                                Ok(result) = local2remote, if !local_read_result.is_eof() => {
-                                    local_read_result = result;
-                                }
-                                Ok(result) = remote2local => {
-                                    if let ReadResult::EOF = result {
-                                        info!("quit stream after hitting EOF, stream_id: {}", remote_send.id().index());
-                                        break;
-                                    }
-                                }
-                                else => {
-                                    info!("quit unexpectedly, stream_id: {}", remote_send.id().index());
-                                    break;
-                                }
-                            };
-                        }
-                    });
+        while let Some(local_conn) = local_conn_receiver.recv().await {
+            match remote_conn.open_bi().await {
+                Ok((remote_send, remote_recv)) => {
+                    tokio::spawn(Self::handle_stream(local_conn, remote_send, remote_recv));
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
@@ -133,6 +111,38 @@ impl Client {
         }
 
         info!("quit!");
+        Ok(())
+    }
+
+    async fn handle_stream(
+        mut local_conn: TcpStream,
+        mut remote_send: SendStream,
+        mut remote_recv: RecvStream,
+    ) -> Result<()> {
+        info!("open new stream, id: {}", remote_send.id().index());
+
+        let mut local_read_result = ReadResult::Succeeded;
+        loop {
+            let (mut local_read, mut local_write) = local_conn.split();
+            let local2remote = Self::local_to_remote(&mut local_read, &mut remote_send);
+            let remote2local = Self::remote_to_local(&mut remote_recv, &mut local_write);
+
+            tokio::select! {
+                Ok(result) = local2remote, if !local_read_result.is_eof() => {
+                    local_read_result = result;
+                }
+                Ok(result) = remote2local => {
+                    if let ReadResult::EOF = result {
+                        info!("quit stream after hitting EOF, stream_id: {}", remote_send.id().index());
+                        break;
+                    }
+                }
+                else => {
+                    info!("quit unexpectedly, stream_id: {}", remote_send.id().index());
+                    break;
+                }
+            };
+        }
         Ok(())
     }
 
@@ -163,12 +173,6 @@ impl Client {
         }
         Ok(ReadResult::EOF)
     }
-
-    //async fn serve(&self, local_conn: &mut TcpStream) -> Result<()> {
-    //let (read_stream, write_stream) = local_conn.split();
-    ////self.conn.open_bi().await
-    //Ok(())
-    //}
 
     async fn send_login_info(
         config: &ClientConfig,
@@ -235,7 +239,7 @@ impl rustls::ServerCertVerifier for CertVerifier {
             )));
         }
 
-        info!("pass!");
+        info!("certificate verified!");
         Ok(ServerCertVerified::assertion())
     }
 }
