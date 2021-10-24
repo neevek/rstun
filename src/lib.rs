@@ -1,4 +1,5 @@
 pub mod server_config;
+use quinn::Read;
 pub use server_config::ServerConfig;
 pub mod client_config;
 pub use client_config::ClientConfig;
@@ -32,4 +33,19 @@ pub(crate) struct ReverseLoginInfo {
     password: String,
     remote_upstream_port: u16,
     allow_public_access: bool,
+}
+
+pub(crate) enum ReadResult {
+    Succeeded,
+    EOF,
+}
+
+impl ReadResult {
+    pub fn is_eof(&self) -> bool {
+        if let Self::EOF = self {
+            true
+        } else {
+            false
+        }
+    }
 }

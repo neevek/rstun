@@ -1,8 +1,9 @@
-use crate::{ServerConfig, TunnelType};
+use crate::{ReadResult, ServerConfig, TunnelType};
 use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
+use quinn::TransportConfig;
 use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,13 +12,11 @@ use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
+const IDLE_TIMEOUT: u64 = 30 * 1000;
+
 #[derive(Debug)]
 pub struct Server {
     pub config: Arc<ServerConfig>,
-}
-
-struct Session {
-    downstream: TcpStream,
 }
 
 impl Server {
@@ -46,6 +45,14 @@ impl Server {
 
         let cert_chain = CertificateChain::from_certs(vec![cert]);
         let mut cfg = quinn::ServerConfig::default();
+
+        let mut transport_cfg = TransportConfig::default();
+        transport_cfg
+            .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
+            .unwrap();
+        transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+        cfg.transport = Arc::new(transport_cfg);
+
         cfg.certificate(cert_chain, key)?;
         Arc::get_mut(&mut cfg.transport)
             .unwrap()
@@ -90,6 +97,8 @@ impl Server {
             });
         }
 
+        info!("quit!");
+
         Ok(())
     }
 
@@ -100,17 +109,16 @@ impl Server {
     ) -> Result<(quinn::NewConnection, SocketAddr)> {
         let mut conn = connnecing.await?;
 
+        let remote_addr = &conn.connection.remote_address();
+
         info!(
-            "authenticating connection({})...",
-            conn.connection.remote_address()
+            ">>> received connection, authenticating... addr:{ }",
+            remote_addr
         );
 
         let mut stream = conn.bi_streams.next().await;
         if stream.is_none() {
-            bail!(
-                "login request not received in time from addr: {}",
-                conn.connection.remote_address()
-            )
+            bail!("login request not received in time, addr: {}", remote_addr)
         }
 
         if let Ok((mut send, mut recv)) = stream.take().unwrap() {
@@ -154,67 +162,63 @@ impl Server {
                 bail!("downstream_name not found");
             }
 
-            tokio::spawn(async move {
-                let heartbeat_out = [0_u8; 1];
-                let mut heartbeat_in = [0_u8; 1];
-                let mut fail_count = 0;
-                let exchange_heartbeat_interval: Duration = Duration::from_secs(5);
-                loop {
-                    tokio::time::sleep(exchange_heartbeat_interval).await;
-                    tokio::select! {
-                        Ok(_) = send.write_all(&heartbeat_out) => {}
-                        Ok(_) = recv.read(&mut heartbeat_in) => {}
-                        else => {
-                            fail_count += 1;
-                            if fail_count > 10 {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
+            //tokio::spawn(async move {
+            //let heartbeat_out = [0_u8; 1];
+            //let mut heartbeat_in = [0_u8; 1];
+            //let mut fail_count = 0;
+            //let exchange_heartbeat_interval: Duration = Duration::from_secs(1);
+            //loop {
+            //debug!("sending heartbeat...");
+            //tokio::time::sleep(exchange_heartbeat_interval).await;
+            //tokio::select! {
+            //Ok(_) = send.write_all(&heartbeat_out) => {}
+            //Ok(_) = recv.read(&mut heartbeat_in) => {}
+            //else => {
+            //fail_count += 1;
+            //warn!("heartbeat failed, count: {}", fail_count);
+            //if fail_count > 10 {
+            //break;
+            //}
+            //}
+            //}
+            //}
+            //});
 
-            info!(
-                "authenticated connection({})",
-                conn.connection.remote_address()
-            );
+            info!(">>> connection authenticated! addr: {}", remote_addr);
 
             return Ok((conn, downstream_addr.unwrap()));
         }
 
-        bail!(
-            "failed to authenticate connection({})",
-            conn.connection.remote_address()
-        )
+        bail!("failed to authenticate connection({})", remote_addr)
     }
 
     async fn handle_connection(
         mut conn: quinn::NewConnection,
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        info!(
-            "enter tunnel streaming with remote: {}",
-            conn.connection.remote_address()
-        );
+        let remote_addr = &conn.connection.remote_address();
+
+        info!(">>> enter tunnel streaming mode <<< addr: {}", remote_addr);
 
         while let Some(stream) = conn.bi_streams.next().await {
             match stream {
+                Err(quinn::ConnectionError::TimedOut { .. }) => {
+                    debug!("connection timeout, addr: {}", remote_addr);
+                    return Ok(());
+                }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!(
-                        "connection closed, addr: {}",
-                        conn.connection.remote_address()
-                    );
+                    debug!("connection closed, addr: {}", remote_addr);
                     return Ok(());
                 }
                 Err(e) => {
                     bail!(
-                        "failed to open streams on connection({}), err: {}",
-                        conn.connection.remote_address(),
+                        "failed to open bi_streams, addr: {}, err: {}",
+                        remote_addr,
                         e
                     );
                 }
                 Ok(s) => tokio::spawn(
-                    Self::handle_stream(s, downstream_addr).map_err(|e| error!("{}", e)),
+                    Self::handle_stream(s, downstream_addr).map_err(|e| debug!("{}", e)),
                 ),
             };
         }
@@ -227,26 +231,29 @@ impl Server {
         downstream_addr: SocketAddr,
     ) -> Result<()> {
         if let Ok(mut downstream_conn) = TcpStream::connect(&downstream_addr).await {
+            let mut up_read_result = ReadResult::Succeeded;
             loop {
                 let (mut down_read, mut down_write) = downstream_conn.split();
+                let up2down = Self::upstream_to_downstream(&mut recv, &mut down_write);
+                let down2up = Self::downstream_to_upstream(&mut down_read, &mut send);
                 tokio::select! {
-                    result =  Self::upstream_to_downstream(&mut recv, &mut down_write) => {
-                        if let Err(e) = result {
-                            debug!("upstream_to_downstream failed, err: {}", e);
+                    Ok(result) = up2down, if !up_read_result.is_eof() => {
+                        up_read_result = result;
+                    }
+                    Ok(result) = down2up => {
+                        if let ReadResult::EOF = result {
+                        debug!(">>>>>>>>>> quit2");
                             break;
                         }
                     }
-                    result = Self::downstream_to_upstream(&mut down_read, &mut send) => {
-                        if let Err(e) = result {
-                            debug!("downstream_to_upstream failed, err: {}", e);
-                            break;
-                        }
+                    else => {
+                        debug!(">>>>>>>>>> quit");
+                        break;
                     }
-                }
+                };
             }
         }
 
-        send.finish().await?;
         Ok(())
     }
 
@@ -260,21 +267,35 @@ impl Server {
     async fn downstream_to_upstream<'a>(
         down_read: &'a mut ReadHalf<'a>,
         up_send: &'a mut SendStream,
-    ) -> Result<()> {
+    ) -> Result<ReadResult> {
+        info!(">>>>>>>>>>>>>>>> enter down2up");
         let mut buffer = vec![0_u8; 8192];
-        down_read.read(&mut buffer[..]).await?;
-        up_send.write_all(&buffer).await?;
-        Ok(())
+        let len_read = down_read.read(&mut buffer[..]).await?;
+
+        if len_read > 0 {
+            up_send.write_all(&buffer[..len_read]).await?;
+            warn!("<<< down to up: {}", len_read);
+            Ok(ReadResult::Succeeded)
+        } else {
+            warn!(">>> down to up: >>> 1111");
+            Ok(ReadResult::EOF)
+        }
     }
 
     async fn upstream_to_downstream<'a>(
         up_recv: &'a mut RecvStream,
         down_write: &'a mut WriteHalf<'a>,
-    ) -> Result<()> {
+    ) -> Result<ReadResult> {
+        info!(">>>>>>>>>>>>>>>> enter up2down");
         let mut buffer = vec![0_u8; 8192];
-        up_recv.read(&mut buffer[..]).await?;
-        down_write.write_all(&buffer).await?;
-        Ok(())
+        let result = up_recv.read(&mut buffer[..]).await?;
+        if let Some(len_read) = result {
+            down_write.write_all(&buffer[..len_read]).await?;
+            warn!(">>> up to down: {}", len_read);
+            return Ok(ReadResult::Succeeded);
+        }
+        warn!(">>> up to down: >>> 000");
+        return Ok(ReadResult::EOF);
     }
 
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {

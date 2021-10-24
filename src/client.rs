@@ -1,7 +1,9 @@
+use crate::ReadResult;
 use crate::{AccessServer, ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use quinn::crypto::rustls::TLSError;
+use quinn::TransportConfig;
 use quinn::{Certificate, Connection, RecvStream, SendStream};
 use rustls::ServerCertVerified;
 use std::sync::Arc;
@@ -10,6 +12,7 @@ use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::time::Duration;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
+const IDLE_TIMEOUT: u64 = 30 * 1000;
 
 pub struct Client {
     config: ClientConfig,
@@ -18,7 +21,14 @@ pub struct Client {
 
 impl Client {
     pub async fn connect(config: ClientConfig) -> Result<Self> {
+        let mut transport_cfg = TransportConfig::default();
+        transport_cfg
+            .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
+            .unwrap();
+        transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+
         let mut cfg = quinn::ClientConfig::default();
+        cfg.transport = Arc::new(transport_cfg);
 
         info!("using cert: {}", config.cert_path);
 
@@ -68,25 +78,27 @@ impl Client {
 
         info!("logged in! server: {}", remote_addr);
 
-        tokio::spawn(async move {
-            let heartbeat_out = [0_u8; 1];
-            let mut heartbeat_in = [0_u8; 1];
-            let mut fail_count = 0;
-            let exchange_heartbeat_interval: Duration = Duration::from_secs(5);
-            loop {
-                tokio::time::sleep(exchange_heartbeat_interval).await;
-                tokio::select! {
-                    Ok(_) = send.write_all(&heartbeat_out) => {}
-                    Ok(_) = recv.read(&mut heartbeat_in) => {}
-                    else => {
-                        fail_count += 1;
-                        if fail_count > 10 {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
+        //tokio::spawn(async move {
+        //let heartbeat_out = [0_u8; 1];
+        //let mut heartbeat_in = [0_u8; 1];
+        //let mut fail_count = 0;
+        //let exchange_heartbeat_interval: Duration = Duration::from_secs(1);
+        //loop {
+        //tokio::time::sleep(exchange_heartbeat_interval).await;
+        //debug!("sending heartbeat...");
+        //tokio::select! {
+        //Ok(_) = send.write_all(&heartbeat_out) => {}
+        //Ok(_) = recv.read(&mut heartbeat_in) => {}
+        //else => {
+        //fail_count += 1;
+        //warn!("heartbeat failed, count: {}", fail_count);
+        //if fail_count > 10 {
+        //break;
+        //}
+        //}
+        //}
+        //}
+        //});
 
         Ok(Client {
             config,
@@ -103,28 +115,41 @@ impl Client {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(500);
         acc_server.start(sender).await?;
 
-        // accept local connections and build tunnel to remote for accepted connections
+        // accept local connections and build a tunnel to remote for accepted connections
         while let Some(mut local_conn) = receiver.recv().await {
             match self.conn.open_bi().await {
-                Ok((mut remote_send, mut remote_recv)) => loop {
-                    let (mut local_read, mut local_write) = local_conn.split();
-                    tokio::select! {
-                        result = Self::local_to_remote(&mut local_read, &mut remote_send) => {
-                            if let Err(e) = result {
-                                debug!("local to remote failed, err: {}", e);
-                                break;
-                            }
-                        }
-                        result = Self::remote_to_local(&mut remote_recv, &mut local_write) => {
-                            if let Err(e) = result {
-                                debug!("remote to local failed, err: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                },
+                Ok((mut remote_send, mut remote_recv)) => {
+                    tokio::spawn(async move {
+                        let mut local_read_result = ReadResult::Succeeded;
+                        loop {
+                            let (mut local_read, mut local_write) = local_conn.split();
+                            let local2remote =
+                                Self::local_to_remote(&mut local_read, &mut remote_send);
+                            let remote2local =
+                                Self::remote_to_local(&mut remote_recv, &mut local_write);
 
-                Err(e) => bail!("failed to open_bi on remote connection: {}", e),
+                            tokio::select! {
+                                Ok(result) = local2remote, if !local_read_result.is_eof() => {
+                                    local_read_result = result;
+                                }
+                                Ok(result) = remote2local => {
+                                    if let ReadResult::EOF = result {
+                                        debug!(">>>>>>>>>> quit2");
+                                        break;
+                                    }
+                                }
+                                else => {
+                                    debug!(">>>>>>>>>> quit");
+                                    break;
+                                }
+                            };
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("failed to open_bi on remote connection: {}", e);
+                    break;
+                }
             }
         }
 
@@ -135,21 +160,33 @@ impl Client {
     async fn local_to_remote<'a>(
         local_read: &'a mut ReadHalf<'a>,
         remote_send: &'a mut SendStream,
-    ) -> Result<()> {
+    ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        local_read.read(&mut buffer[..]).await?;
-        remote_send.write_all(&buffer).await?;
-        Ok(())
+        let len_read = local_read.read(&mut buffer[..]).await?;
+
+        if len_read > 0 {
+            remote_send.write_all(&buffer[..len_read]).await?;
+            debug!("<<< local to remote: {}", len_read);
+            Ok(ReadResult::Succeeded)
+        } else {
+            debug!(">>> local to remote: >>> 1111");
+            Ok(ReadResult::EOF)
+        }
     }
 
     async fn remote_to_local<'a>(
         remote_recv: &'a mut RecvStream,
         local_write: &'a mut WriteHalf<'a>,
-    ) -> Result<()> {
+    ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        remote_recv.read(&mut buffer[..]).await?;
-        local_write.write_all(&buffer).await?;
-        Ok(())
+        let result = remote_recv.read(&mut buffer[..]).await?;
+        if let Some(len_read) = result {
+            local_write.write_all(&buffer[..len_read]).await?;
+            debug!(">>> up to down: {}", len_read);
+            return Ok(ReadResult::Succeeded);
+        }
+        debug!(">>> up to down: >>> 000");
+        Ok(ReadResult::EOF)
     }
 
     //async fn serve(&self, local_conn: &mut TcpStream) -> Result<()> {
