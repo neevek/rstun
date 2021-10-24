@@ -112,7 +112,7 @@ impl Server {
         let remote_addr = &conn.connection.remote_address();
 
         info!(
-            ">>> received connection, authenticating... addr:{ }",
+            "received connection, authenticating... addr:{ }",
             remote_addr
         );
 
@@ -162,29 +162,7 @@ impl Server {
                 bail!("downstream_name not found");
             }
 
-            //tokio::spawn(async move {
-            //let heartbeat_out = [0_u8; 1];
-            //let mut heartbeat_in = [0_u8; 1];
-            //let mut fail_count = 0;
-            //let exchange_heartbeat_interval: Duration = Duration::from_secs(1);
-            //loop {
-            //debug!("sending heartbeat...");
-            //tokio::time::sleep(exchange_heartbeat_interval).await;
-            //tokio::select! {
-            //Ok(_) = send.write_all(&heartbeat_out) => {}
-            //Ok(_) = recv.read(&mut heartbeat_in) => {}
-            //else => {
-            //fail_count += 1;
-            //warn!("heartbeat failed, count: {}", fail_count);
-            //if fail_count > 10 {
-            //break;
-            //}
-            //}
-            //}
-            //}
-            //});
-
-            info!(">>> connection authenticated! addr: {}", remote_addr);
+            info!("connection authenticated! addr: {}", remote_addr);
 
             return Ok((conn, downstream_addr.unwrap()));
         }
@@ -198,12 +176,12 @@ impl Server {
     ) -> Result<()> {
         let remote_addr = &conn.connection.remote_address();
 
-        info!(">>> enter tunnel streaming mode <<< addr: {}", remote_addr);
+        info!("enter tunnel streaming mode, addr: {}", remote_addr);
 
         while let Some(stream) = conn.bi_streams.next().await {
             match stream {
                 Err(quinn::ConnectionError::TimedOut { .. }) => {
-                    debug!("connection timeout, addr: {}", remote_addr);
+                    info!("connection timeout, addr: {}", remote_addr);
                     return Ok(());
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
@@ -218,7 +196,8 @@ impl Server {
                     );
                 }
                 Ok(s) => tokio::spawn(
-                    Self::handle_stream(s, downstream_addr).map_err(|e| debug!("{}", e)),
+                    Self::handle_stream(s, downstream_addr)
+                        .map_err(|e| debug!("stream ended, err: {}", e)),
                 ),
             };
         }
@@ -230,6 +209,7 @@ impl Server {
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
     ) -> Result<()> {
+        info!("received new stream, id: {}", send.id().index());
         if let Ok(mut downstream_conn) = TcpStream::connect(&downstream_addr).await {
             let mut up_read_result = ReadResult::Succeeded;
             loop {
@@ -242,12 +222,12 @@ impl Server {
                     }
                     Ok(result) = down2up => {
                         if let ReadResult::EOF = result {
-                        debug!(">>>>>>>>>> quit2");
+                            info!("quit stream after hitting EOF, stream_id: {}", send.id().index());
                             break;
                         }
                     }
                     else => {
-                        debug!(">>>>>>>>>> quit");
+                        info!("quit unexpectedly, stream_id: {}", send.id().index());
                         break;
                     }
                 };
@@ -268,16 +248,13 @@ impl Server {
         down_read: &'a mut ReadHalf<'a>,
         up_send: &'a mut SendStream,
     ) -> Result<ReadResult> {
-        info!(">>>>>>>>>>>>>>>> enter down2up");
         let mut buffer = vec![0_u8; 8192];
         let len_read = down_read.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
             up_send.write_all(&buffer[..len_read]).await?;
-            warn!("<<< down to up: {}", len_read);
             Ok(ReadResult::Succeeded)
         } else {
-            warn!(">>> down to up: >>> 1111");
             Ok(ReadResult::EOF)
         }
     }
@@ -286,15 +263,12 @@ impl Server {
         up_recv: &'a mut RecvStream,
         down_write: &'a mut WriteHalf<'a>,
     ) -> Result<ReadResult> {
-        info!(">>>>>>>>>>>>>>>> enter up2down");
         let mut buffer = vec![0_u8; 8192];
         let result = up_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             down_write.write_all(&buffer[..len_read]).await?;
-            warn!(">>> up to down: {}", len_read);
             return Ok(ReadResult::Succeeded);
         }
-        warn!(">>> up to down: >>> 000");
         return Ok(ReadResult::EOF);
     }
 

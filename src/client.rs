@@ -1,7 +1,7 @@
 use crate::ReadResult;
 use crate::{AccessServer, ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use quinn::crypto::rustls::TLSError;
 use quinn::TransportConfig;
 use quinn::{Certificate, Connection, RecvStream, SendStream};
@@ -78,28 +78,6 @@ impl Client {
 
         info!("logged in! server: {}", remote_addr);
 
-        //tokio::spawn(async move {
-        //let heartbeat_out = [0_u8; 1];
-        //let mut heartbeat_in = [0_u8; 1];
-        //let mut fail_count = 0;
-        //let exchange_heartbeat_interval: Duration = Duration::from_secs(1);
-        //loop {
-        //tokio::time::sleep(exchange_heartbeat_interval).await;
-        //debug!("sending heartbeat...");
-        //tokio::select! {
-        //Ok(_) = send.write_all(&heartbeat_out) => {}
-        //Ok(_) = recv.read(&mut heartbeat_in) => {}
-        //else => {
-        //fail_count += 1;
-        //warn!("heartbeat failed, count: {}", fail_count);
-        //if fail_count > 10 {
-        //break;
-        //}
-        //}
-        //}
-        //}
-        //});
-
         Ok(Client {
             config,
             conn: connection,
@@ -119,6 +97,7 @@ impl Client {
         while let Some(mut local_conn) = receiver.recv().await {
             match self.conn.open_bi().await {
                 Ok((mut remote_send, mut remote_recv)) => {
+                    info!("open new stream, id: {}", remote_send.id().index());
                     tokio::spawn(async move {
                         let mut local_read_result = ReadResult::Succeeded;
                         loop {
@@ -134,12 +113,12 @@ impl Client {
                                 }
                                 Ok(result) = remote2local => {
                                     if let ReadResult::EOF = result {
-                                        debug!(">>>>>>>>>> quit2");
+                                        info!("quit stream after hitting EOF, stream_id: {}", remote_send.id().index());
                                         break;
                                     }
                                 }
                                 else => {
-                                    debug!(">>>>>>>>>> quit");
+                                    info!("quit unexpectedly, stream_id: {}", remote_send.id().index());
                                     break;
                                 }
                             };
@@ -166,10 +145,8 @@ impl Client {
 
         if len_read > 0 {
             remote_send.write_all(&buffer[..len_read]).await?;
-            debug!("<<< local to remote: {}", len_read);
             Ok(ReadResult::Succeeded)
         } else {
-            debug!(">>> local to remote: >>> 1111");
             Ok(ReadResult::EOF)
         }
     }
@@ -182,10 +159,8 @@ impl Client {
         let result = remote_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             local_write.write_all(&buffer[..len_read]).await?;
-            debug!(">>> up to down: {}", len_read);
             return Ok(ReadResult::Succeeded);
         }
-        debug!(">>> up to down: >>> 000");
         Ok(ReadResult::EOF)
     }
 
@@ -217,7 +192,7 @@ impl Client {
         if resp[0] != b'o' && resp[1] != b'k' {
             let mut err_buf = vec![0_u8; 128];
             recv.read_to_end(&mut err_buf).await?;
-            anyhow::bail!(
+            bail!(
                 "failed to login, err: {}{}{}",
                 resp[0] as char,
                 resp[1] as char,

@@ -30,7 +30,8 @@ fn main() {
 
 async fn run() -> Result<()> {
     let mut downstreams = HashMap::new();
-    downstreams.insert("http".to_string(), "127.0.0.1:1081".to_string());
+    //downstreams.insert("http".to_string(), "127.0.0.1:1081".to_string());
+    downstreams.insert("http".to_string(), "127.0.0.1:1091".to_string());
 
     let mut config = ServerConfig::default();
     config.addr = "127.0.0.1:3515".into();
