@@ -7,6 +7,7 @@ use rustls::ServerCertVerified;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::time::Duration;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 
@@ -66,6 +67,26 @@ impl Client {
         Self::send_login_info(&config, &mut send, &mut recv).await?;
 
         info!("logged in! server: {}", remote_addr);
+
+        tokio::spawn(async move {
+            let heartbeat_out = [0_u8; 1];
+            let mut heartbeat_in = [0_u8; 1];
+            let mut fail_count = 0;
+            let exchange_heartbeat_interval: Duration = Duration::from_secs(5);
+            loop {
+                tokio::time::sleep(exchange_heartbeat_interval).await;
+                tokio::select! {
+                    Ok(_) = send.write_all(&heartbeat_out) => {}
+                    Ok(_) = recv.read(&mut heartbeat_in) => {}
+                    else => {
+                        fail_count += 1;
+                        if fail_count > 10 {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         Ok(Client {
             config,

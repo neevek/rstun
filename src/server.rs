@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+use tokio::time::Duration;
 
 #[derive(Debug)]
 pub struct Server {
@@ -76,110 +77,172 @@ impl Server {
 
         while let Some(conn) = incoming.next().await {
             let server_config = self.config.clone();
-            tokio::spawn(
-                Self::handle_connection(conn, downstream_addrs.clone(), server_config)
-                    .map_err(|e| error!("{}", e)),
-            );
+            let downstream_addrs = downstream_addrs.clone();
+            tokio::spawn(async move {
+                if let Ok((conn, addr)) =
+                    Self::authenticate_connection(conn, server_config, downstream_addrs).await
+                {
+                    Self::handle_connection(conn, addr)
+                        .await
+                        .map_err(|e| error!("handle_connection failed: {}", e))
+                        .ok();
+                }
+            });
         }
 
         Ok(())
     }
 
-    async fn handle_connection(
+    async fn authenticate_connection(
         connnecing: quinn::Connecting,
-        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
         server_config: Arc<ServerConfig>,
-    ) -> Result<()> {
-        let quinn::NewConnection {
-            connection,
-            mut bi_streams,
-            ..
-        } = connnecing.await?;
+        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
+    ) -> Result<(quinn::NewConnection, SocketAddr)> {
+        let mut conn = connnecing.await?;
 
-        info!("accepted connection, addr: {}", connection.remote_address());
+        info!(
+            "authenticating connection({})...",
+            conn.connection.remote_address()
+        );
 
-        //let downstream_map: DashMap<usize, >  = DashMap::new();
-
-        async {
-            while let Some(stream) = bi_streams.next().await {
-                match stream {
-                    Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                        debug!("connection closed, addr: {}", connection.remote_address());
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                    Ok(s) => tokio::spawn(
-                        Self::handle_stream(s, downstream_addrs.clone(), server_config.clone())
-                            .map_err(|e| error!("{}", e)),
-                    ),
-                };
-            }
-            Ok(())
+        let mut stream = conn.bi_streams.next().await;
+        if stream.is_none() {
+            bail!(
+                "login request not received in time from addr: {}",
+                conn.connection.remote_address()
+            )
         }
-        .await?;
+
+        if let Ok((mut send, mut recv)) = stream.take().unwrap() {
+            let mut login_info_len = [0_u8; 2];
+            recv.read_exact(&mut login_info_len)
+                .await
+                .context("read login_info_len failed")?;
+
+            let login_info_len = ((login_info_len[0] as usize) << 8) | (login_info_len[1] as usize);
+            let mut login_info = vec![0; login_info_len];
+            recv.read_exact(&mut login_info)
+                .await
+                .context("read login_info failed")?;
+
+            let tun_type = bincode::deserialize::<TunnelType>(&login_info)?;
+
+            let mut downstream_addr = None;
+            match tun_type {
+                TunnelType::Forward(i) => {
+                    Self::check_password(server_config.password.as_str(), i.password.as_str())?;
+
+                    if downstream_addrs.contains_key(i.remote_downstream_name.as_str()) {
+                        downstream_addr = Some(
+                            *downstream_addrs
+                                .get(i.remote_downstream_name.as_str())
+                                .unwrap()
+                                .value(),
+                        );
+                        send.write_all(b"ok").await?;
+                    } else {
+                        send.write_all(b"downstream_name not found").await?;
+                    }
+                }
+                TunnelType::Reverse(i) => {
+                    Self::check_password(server_config.password.as_str(), i.password.as_str())?;
+                    send.write_all(b"ok").await?;
+                }
+            }
+
+            if downstream_addr.is_none() {
+                bail!("downstream_name not found");
+            }
+
+            tokio::spawn(async move {
+                let heartbeat_out = [0_u8; 1];
+                let mut heartbeat_in = [0_u8; 1];
+                let mut fail_count = 0;
+                let exchange_heartbeat_interval: Duration = Duration::from_secs(5);
+                loop {
+                    tokio::time::sleep(exchange_heartbeat_interval).await;
+                    tokio::select! {
+                        Ok(_) = send.write_all(&heartbeat_out) => {}
+                        Ok(_) = recv.read(&mut heartbeat_in) => {}
+                        else => {
+                            fail_count += 1;
+                            if fail_count > 10 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            info!(
+                "authenticated connection({})",
+                conn.connection.remote_address()
+            );
+
+            return Ok((conn, downstream_addr.unwrap()));
+        }
+
+        bail!(
+            "failed to authenticate connection({})",
+            conn.connection.remote_address()
+        )
+    }
+
+    async fn handle_connection(
+        mut conn: quinn::NewConnection,
+        downstream_addr: SocketAddr,
+    ) -> Result<()> {
+        info!(
+            "enter tunnel streaming with remote: {}",
+            conn.connection.remote_address()
+        );
+
+        while let Some(stream) = conn.bi_streams.next().await {
+            match stream {
+                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                    debug!(
+                        "connection closed, addr: {}",
+                        conn.connection.remote_address()
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    bail!(
+                        "failed to open streams on connection({}), err: {}",
+                        conn.connection.remote_address(),
+                        e
+                    );
+                }
+                Ok(s) => tokio::spawn(
+                    Self::handle_stream(s, downstream_addr).map_err(|e| error!("{}", e)),
+                ),
+            };
+        }
 
         Ok(())
     }
 
     async fn handle_stream(
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
-        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
-        server_config: Arc<ServerConfig>,
+        downstream_addr: SocketAddr,
     ) -> Result<()> {
-        let mut login_info_len = [0_u8; 2];
-        recv.read_exact(&mut login_info_len)
-            .await
-            .context("read login_info_len failed")?;
-
-        let login_info_len = ((login_info_len[0] as usize) << 8) | (login_info_len[1] as usize);
-        let mut login_info = vec![0; login_info_len];
-        recv.read_exact(&mut login_info)
-            .await
-            .context("read login_info failed")?;
-
-        let tun_type = bincode::deserialize::<TunnelType>(&login_info)?;
-
-        info!("incoming stream logged in, stream_id: {}", send.id());
-
-        match tun_type {
-            TunnelType::Forward(i) => {
-                Self::check_password(server_config.password.as_str(), i.password.as_str())?;
-                if downstream_addrs.contains_key(i.remote_downstream_name.as_str()) {
-                    let addr = downstream_addrs
-                        .get(i.remote_downstream_name.as_str())
-                        .unwrap();
-                    if let Ok(mut downstream_conn) = TcpStream::connect(&*addr).await {
-                        send.write_all(b"ok").await?;
-
-                        loop {
-                            let (mut down_read, mut down_write) = downstream_conn.split();
-                            tokio::select! {
-                                result =  Self::upstream_to_downstream(&mut recv, &mut down_write) => {
-                                    if let Err(e) = result {
-                                        debug!("upstream_to_downstream failed, err: {}", e);
-                                        break;
-                                    }
-                                }
-                                result = Self::downstream_to_upstream(&mut down_read, &mut send) => {
-                                    if let Err(e) = result {
-                                        debug!("downstream_to_upstream failed, err: {}", e);
-                                        break;
-                                    }
-                                }
-                            }
+        if let Ok(mut downstream_conn) = TcpStream::connect(&downstream_addr).await {
+            loop {
+                let (mut down_read, mut down_write) = downstream_conn.split();
+                tokio::select! {
+                    result =  Self::upstream_to_downstream(&mut recv, &mut down_write) => {
+                        if let Err(e) = result {
+                            debug!("upstream_to_downstream failed, err: {}", e);
+                            break;
                         }
-                    } else {
-                        send.write_all(b"failed to connect to downstream").await?;
                     }
-                } else {
-                    send.write_all(b"downstream_name not found").await?;
+                    result = Self::downstream_to_upstream(&mut down_read, &mut send) => {
+                        if let Err(e) = result {
+                            debug!("downstream_to_upstream failed, err: {}", e);
+                            break;
+                        }
+                    }
                 }
-            }
-            TunnelType::Reverse(i) => {
-                Self::check_password(server_config.password.as_str(), i.password.as_str())?;
-                send.write_all(b"ok").await?;
             }
         }
 

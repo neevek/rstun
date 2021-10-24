@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use log::error;
+use log::{error, info};
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::Sender;
@@ -28,6 +28,8 @@ impl AccessServer {
             .context("failed to start AccessServer")?;
 
         self.tcp_listener = Some(tcp_listener);
+
+        info!("started access server: {}", addr);
 
         Ok(())
     }
