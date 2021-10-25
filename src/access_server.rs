@@ -37,10 +37,9 @@ impl AccessServer {
             .context("failed to start AccessServer")?;
 
         self.tcp_listener = Some(Arc::new(tcp_listener));
+        self.running = true;
 
         info!("started access server: {}", addr);
-
-        self.running = true;
 
         Ok(())
     }
@@ -55,7 +54,8 @@ impl AccessServer {
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
-                    Ok((socket, _addr)) => {
+                    Ok((socket, addr)) => {
+                        info!("received new local connection, addr: {}", addr);
                         tcp_sender
                             .send(socket)
                             .await

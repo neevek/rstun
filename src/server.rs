@@ -47,6 +47,8 @@ impl Server {
         let mut cfg = quinn::ServerConfig::default();
 
         let mut transport_cfg = TransportConfig::default();
+        transport_cfg.receive_window(1024 * 1024).unwrap();
+        transport_cfg.send_window(1024 * 1024);
         transport_cfg
             .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
             .unwrap();

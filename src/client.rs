@@ -30,6 +30,8 @@ impl Client {
 
     pub async fn connect(&mut self) -> Result<()> {
         let mut transport_cfg = TransportConfig::default();
+        transport_cfg.receive_window(1024 * 1024).unwrap();
+        transport_cfg.send_window(1024 * 1024);
         transport_cfg
             .max_idle_timeout(Some(Duration::from_millis(self.config.max_idle_timeout_ms)))
             .unwrap();
