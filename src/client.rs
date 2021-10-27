@@ -8,9 +8,10 @@ use quinn::{Certificate, RecvStream, SendStream};
 use rustls::ServerCertVerified;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
@@ -30,8 +31,11 @@ impl Client {
 
     pub async fn connect(&mut self) -> Result<()> {
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(1024 * 1024).unwrap();
-        transport_cfg.send_window(1024 * 1024);
+        transport_cfg
+            .stream_receive_window(1024 * 1024 * 5)
+            .unwrap();
+        transport_cfg.receive_window(1024 * 1024 * 200).unwrap();
+        transport_cfg.send_window(1024 * 1024 * 200);
         transport_cfg
             .max_idle_timeout(Some(Duration::from_millis(self.config.max_idle_timeout_ms)))
             .unwrap();
@@ -117,30 +121,43 @@ impl Client {
     }
 
     async fn handle_stream(
-        mut local_conn: TcpStream,
-        mut remote_send: SendStream,
-        mut remote_recv: RecvStream,
+        local_conn: TcpStream,
+        remote_send: SendStream,
+        remote_recv: RecvStream,
     ) -> Result<()> {
-        info!("open new stream, id: {}", remote_send.id().index());
+        let stream_id = remote_send.id().index();
+        info!("open new stream, id: {}", stream_id);
+
+        let (local_read, local_write) = tokio::io::split(local_conn);
+        let local_read = Arc::new(Mutex::new(local_read));
+        let local_write = Arc::new(Mutex::new(local_write));
+        let remote_send = Arc::new(Mutex::new(remote_send));
+        let remote_recv = Arc::new(Mutex::new(remote_recv));
 
         let mut local_read_result = ReadResult::Succeeded;
+
         loop {
-            let (mut local_read, mut local_write) = local_conn.split();
-            let local2remote = Self::local_to_remote(&mut local_read, &mut remote_send);
-            let remote2local = Self::remote_to_local(&mut remote_recv, &mut local_write);
+            let local_read = local_read.clone();
+            let local_write = local_write.clone();
+            let remote_send = remote_send.clone();
+            let remote_recv = remote_recv.clone();
+            let h1 =
+                tokio::spawn(async move { Self::local_to_remote(local_read, remote_send).await });
+            let h2 =
+                tokio::spawn(async move { Self::remote_to_local(remote_recv, local_write).await });
 
             tokio::select! {
-                Ok(result) = local2remote, if !local_read_result.is_eof() => {
+                Ok(Ok(result)) = h1, if !local_read_result.is_eof() => {
                     local_read_result = result;
                 }
-                Ok(result) = remote2local => {
+                Ok(Ok(result)) = h2 => {
                     if let ReadResult::EOF = result {
-                        info!("quit stream after hitting EOF, stream_id: {}", remote_send.id().index());
+                        info!("quit stream after hitting EOF, stream_id: {}", stream_id);
                         break;
                     }
                 }
                 else => {
-                    info!("quit unexpectedly, stream_id: {}", remote_send.id().index());
+                    info!("quit unexpectedly, stream_id: {}", stream_id);
                     break;
                 }
             };
@@ -148,29 +165,37 @@ impl Client {
         Ok(())
     }
 
-    async fn local_to_remote<'a>(
-        local_read: &'a mut ReadHalf<'a>,
-        remote_send: &'a mut SendStream,
+    async fn local_to_remote(
+        local_read: Arc<Mutex<ReadHalf<TcpStream>>>,
+        remote_send: Arc<Mutex<SendStream>>,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        let len_read = local_read.read(&mut buffer[..]).await?;
+        let len_read = local_read.lock().await.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
-            remote_send.write_all(&buffer[..len_read]).await?;
+            remote_send
+                .lock()
+                .await
+                .write_all(&buffer[..len_read])
+                .await?;
             Ok(ReadResult::Succeeded)
         } else {
             Ok(ReadResult::EOF)
         }
     }
 
-    async fn remote_to_local<'a>(
-        remote_recv: &'a mut RecvStream,
-        local_write: &'a mut WriteHalf<'a>,
+    async fn remote_to_local(
+        remote_recv: Arc<Mutex<RecvStream>>,
+        local_write: Arc<Mutex<WriteHalf<TcpStream>>>,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        let result = remote_recv.read(&mut buffer[..]).await?;
+        let result = remote_recv.lock().await.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
-            local_write.write_all(&buffer[..len_read]).await?;
+            local_write
+                .lock()
+                .await
+                .write_all(&buffer[..len_read])
+                .await?;
             return Ok(ReadResult::Succeeded);
         }
         Ok(ReadResult::EOF)

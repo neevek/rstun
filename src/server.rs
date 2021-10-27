@@ -8,8 +8,9 @@ use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 const IDLE_TIMEOUT: u64 = 30 * 1000;
@@ -208,28 +209,48 @@ impl Server {
     }
 
     async fn handle_stream(
-        (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
+        (send, recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        info!("received new stream, id: {}", send.id().index());
-        if let Ok(mut downstream_conn) = TcpStream::connect(&downstream_addr).await {
+        let stream_id = send.id().index();
+        info!("received new stream, id: {}", stream_id);
+
+        if let Ok(downstream_conn) = TcpStream::connect(&downstream_addr).await {
+            let (down_read, down_write) = tokio::io::split(downstream_conn);
+            let down_read = Arc::new(Mutex::new(down_read));
+            let down_write = Arc::new(Mutex::new(down_write));
+            let send = Arc::new(Mutex::new(send));
+            let recv = Arc::new(Mutex::new(recv));
+
             let mut up_read_result = ReadResult::Succeeded;
+
             loop {
-                let (mut down_read, mut down_write) = downstream_conn.split();
-                let up2down = Self::upstream_to_downstream(&mut recv, &mut down_write);
-                let down2up = Self::downstream_to_upstream(&mut down_read, &mut send);
+                let down_read = down_read.clone();
+                let down_write = down_write.clone();
+                let send = send.clone();
+                let recv = recv.clone();
+
+                let h1 =
+                    tokio::spawn(
+                        async move { Self::upstream_to_downstream(recv, down_write).await },
+                    );
+                let h2 =
+                    tokio::spawn(
+                        async move { Self::downstream_to_upstream(down_read, send).await },
+                    );
+
                 tokio::select! {
-                    Ok(result) = up2down, if !up_read_result.is_eof() => {
+                    Ok(Ok(result)) = h1, if !up_read_result.is_eof() => {
                         up_read_result = result;
                     }
-                    Ok(result) = down2up => {
-                        if let ReadResult::EOF = result {
-                            info!("quit stream after hitting EOF, stream_id: {}", send.id().index());
+                    Ok(result) = h2 => {
+                        if let Ok(ReadResult::EOF) = result {
+                            info!("quit stream after hitting EOF, stream_id: {}", stream_id);
                             break;
                         }
                     }
                     else => {
-                        info!("quit unexpectedly, stream_id: {}", send.id().index());
+                        info!("quit unexpectedly, stream_id: {}", stream_id);
                         break;
                     }
                 };
@@ -246,29 +267,33 @@ impl Server {
         Ok(())
     }
 
-    async fn downstream_to_upstream<'a>(
-        down_read: &'a mut ReadHalf<'a>,
-        up_send: &'a mut SendStream,
+    async fn downstream_to_upstream(
+        down_read: Arc<Mutex<ReadHalf<TcpStream>>>,
+        up_send: Arc<Mutex<SendStream>>,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        let len_read = down_read.read(&mut buffer[..]).await?;
+        let len_read = down_read.lock().await.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
-            up_send.write_all(&buffer[..len_read]).await?;
+            up_send.lock().await.write_all(&buffer[..len_read]).await?;
             Ok(ReadResult::Succeeded)
         } else {
             Ok(ReadResult::EOF)
         }
     }
 
-    async fn upstream_to_downstream<'a>(
-        up_recv: &'a mut RecvStream,
-        down_write: &'a mut WriteHalf<'a>,
+    async fn upstream_to_downstream(
+        up_recv: Arc<Mutex<RecvStream>>,
+        down_write: Arc<Mutex<WriteHalf<TcpStream>>>,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        let result = up_recv.read(&mut buffer[..]).await?;
+        let result = up_recv.lock().await.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
-            down_write.write_all(&buffer[..len_read]).await?;
+            down_write
+                .lock()
+                .await
+                .write_all(&buffer[..len_read])
+                .await?;
             return Ok(ReadResult::Succeeded);
         }
         return Ok(ReadResult::EOF);

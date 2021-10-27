@@ -37,8 +37,8 @@ async fn run() -> Result<()> {
     config.addr = "127.0.0.1:3515".into();
     config.password = "password".to_string();
     config.downstreams = downstreams;
-    config.cert_path = "/Users/neevek/dev/bb/rstun/localhost.crt.pem".to_string();
-    config.key_path = "/Users/neevek/dev/bb/rstun/localhost.key.pem".to_string();
+    config.cert_path = "/Users/neevek/dev/github/rstun/localhost.crt.pem".to_string();
+    config.key_path = "/Users/neevek/dev/github/rstun/localhost.key.pem".to_string();
 
     let mut server = Server::new(config);
     server.start().await?;
