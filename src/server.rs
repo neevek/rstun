@@ -255,6 +255,7 @@ impl Server {
                     }
                 };
             }
+            send.lock().await.finish().await.ok();
         }
 
         Ok(())

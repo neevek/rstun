@@ -162,6 +162,8 @@ impl Client {
                 }
             };
         }
+
+        remote_send.lock().await.finish().await.ok();
         Ok(())
     }
 
