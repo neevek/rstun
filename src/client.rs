@@ -157,8 +157,19 @@ impl Client {
 
         if len_read > 0 {
             remote_send.write_all(&buffer[..len_read]).await?;
+            remote_send.flush().await?;
+            info!(
+                ">>>>>>>>>>>> LOCAL 2 REMOTE, id:{}, bytes:{}",
+                remote_send.id().index(),
+                len_read
+            );
             Ok(ReadResult::Succeeded)
         } else {
+            remote_send.finish().await?;
+            info!(
+                ">>>>>>>>>>>> LOCAL 2 REMOTE DONE, id:{}",
+                remote_send.id().index(),
+            );
             Ok(ReadResult::EOF)
         }
     }
@@ -171,9 +182,20 @@ impl Client {
         let result = remote_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             local_write.write_all(&buffer[..len_read]).await?;
-            return Ok(ReadResult::Succeeded);
+            info!(
+                ">>>>>>>>>>>> REMOTE 2 LOCAL, id:{}, bytes:{}",
+                remote_recv.id().index(),
+                len_read
+            );
+            local_write.flush().await?;
+            Ok(ReadResult::Succeeded)
+        } else {
+            info!(
+                ">>>>>>>>>>>> REMOTE 2 LOCAL DONE, id:{}",
+                remote_recv.id().index(),
+            );
+            Ok(ReadResult::EOF)
         }
-        Ok(ReadResult::EOF)
     }
 
     async fn send_login_info(

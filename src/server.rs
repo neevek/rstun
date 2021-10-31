@@ -255,8 +255,14 @@ impl Server {
 
         if len_read > 0 {
             up_send.write_all(&buffer[..len_read]).await?;
+            info!(
+                ">>>>>>>>>>>> down 2 up, id:{}, bytes:{}",
+                up_send.id().index(),
+                len_read
+            );
             Ok(ReadResult::Succeeded)
         } else {
+            up_send.finish().await?;
             Ok(ReadResult::EOF)
         }
     }
@@ -269,9 +275,15 @@ impl Server {
         let result = up_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             down_write.write_all(&buffer[..len_read]).await?;
-            return Ok(ReadResult::Succeeded);
+            info!(
+                ">>>>>>>>>>>> up 2 down, id:{}, bytes:{}",
+                up_recv.id().index(),
+                len_read
+            );
+            Ok(ReadResult::Succeeded)
+        } else {
+            Ok(ReadResult::EOF)
         }
-        return Ok(ReadResult::EOF);
     }
 
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {

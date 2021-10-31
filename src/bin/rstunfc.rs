@@ -10,8 +10,7 @@ use tokio::time::Duration;
 extern crate colored;
 extern crate pretty_env_logger;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() {
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::TRACE)
@@ -21,8 +20,15 @@ async fn main() -> Result<()> {
     .unwrap();
 
     init_logger();
-    run().await?;
-    Ok(())
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(16)
+        .build()
+        .unwrap()
+        .block_on(async {
+            run().await.unwrap();
+        });
 }
 
 async fn run() -> Result<()> {
@@ -31,7 +37,7 @@ async fn run() -> Result<()> {
     config.local_access_server_addr = "127.0.0.1:3618".into();
     config.password = "password".to_string();
     config.remote_downstream_name = "http".to_string();
-    config.cert_path = "/Users/neevek/dev/bb/rstun/localhost.crt.pem".to_string();
+    config.cert_path = "localhost.crt.pem".to_string();
     config.connect_max_retry = 0;
     config.wait_before_retry_ms = 5 * 1000;
     config.max_idle_timeout_ms = 5 * 1000;
