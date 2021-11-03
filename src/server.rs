@@ -6,6 +6,7 @@ use log::{debug, error, info, warn};
 use quinn::TransportConfig;
 use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
 use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
@@ -65,14 +66,50 @@ impl Server {
         cfg_builder.use_stateless_retry(true);
         cfg_builder.enable_keylog();
 
-        let addr = config
+        let addr: SocketAddr = config
             .addr
             .parse()
             .with_context(|| format!("invalid address: {}", config.addr))?;
 
         let mut endpoint_builder = quinn::Endpoint::builder();
         endpoint_builder.listen(cfg_builder.build());
-        let (endpoint, mut incoming) = endpoint_builder.bind(&addr)?;
+
+        let udp_socket = std::net::UdpSocket::bind(&addr)?;
+
+        unsafe {
+            let optval: libc::c_int = 1024 * 1024 * 3;
+            let ret = libc::setsockopt(
+                udp_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                error!(
+                    "failed to set SO_SNDBUF, err: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            let optval: libc::c_int = 1024 * 1024 * 3;
+            let ret = libc::setsockopt(
+                udp_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                error!(
+                    "failed to set SO_RCVBUF, err: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        //let (endpoint, mut incoming) = endpoint_builder.bind(&addr)?;
+        let (endpoint, mut incoming) = endpoint_builder.with_socket(udp_socket)?;
         info!("server is bound to: {}", endpoint.local_addr()?);
 
         let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());

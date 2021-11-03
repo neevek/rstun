@@ -6,12 +6,15 @@ use quinn::crypto::rustls::TLSError;
 use quinn::TransportConfig;
 use quinn::{Certificate, RecvStream, SendStream};
 use rustls::ServerCertVerified;
+use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
+extern crate libc;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 
@@ -61,12 +64,47 @@ impl Client {
             .parse()
             .with_context(|| format!("invalid address: {}", self.config.server_addr))?;
 
-        let local_addr = LOCAL_ADDR_STR.parse().unwrap();
+        let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
 
         let mut endpoint_builder = quinn::Endpoint::builder();
         endpoint_builder.default_client_config(cfg_builder.build());
 
-        let (endpoint, _) = endpoint_builder.bind(&local_addr)?;
+        let udp_socket = std::net::UdpSocket::bind(&local_addr)?;
+
+        unsafe {
+            let optval: libc::c_int = 1024 * 1024 * 3;
+            let ret = libc::setsockopt(
+                udp_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                error!(
+                    "failed to set SO_SNDBUF, err: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+
+            let optval: libc::c_int = 1024 * 1024 * 3;
+            let ret = libc::setsockopt(
+                udp_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            );
+            if ret != 0 {
+                error!(
+                    "failed to set SO_RCVBUF, err: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        //let (endpoint, _) = endpoint_builder.bind(&local_addr)?;
+        let (endpoint, _) = endpoint_builder.with_socket(udp_socket)?;
 
         info!(
             "connecting to {}, local_addr: {}",
