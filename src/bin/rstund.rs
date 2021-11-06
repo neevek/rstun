@@ -31,15 +31,15 @@ fn main() {
 
 async fn run() -> Result<()> {
     let mut downstreams = HashMap::new();
-    //downstreams.insert("http".to_string(), "127.0.0.1:1081".to_string());
+    //downstreams.insert("http".to_string(), "127.0.0.1:1091".to_string());
     downstreams.insert("http".to_string(), "127.0.0.1:9800".to_string());
 
     let mut config = ServerConfig::default();
     config.addr = "0.0.0.0:3515".into();
     config.password = "password".to_string();
     config.downstreams = downstreams;
-    config.cert_path = "localhost.crt.pem".to_string();
-    config.key_path = "localhost.key.pem".to_string();
+    config.cert_path = "localhost.crt.der".to_string();
+    config.key_path = "localhost.key.der".to_string();
 
     let mut server = Server::new(config);
     server.start().await?;

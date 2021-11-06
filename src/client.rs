@@ -2,13 +2,17 @@ use crate::ReadResult;
 use crate::{ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
-use quinn::crypto::rustls::TLSError;
+//use quinn::crypto::rustls::TLSError;
 use quinn::TransportConfig;
-use quinn::{Certificate, RecvStream, SendStream};
-use rustls::ServerCertVerified;
+use quinn::{RecvStream, SendStream};
+use quinn_proto::{IdleTimeout, VarInt, VarIntBoundsExceeded};
+use rustls::client::ServerCertVerified;
+use rustls::client::ServerName;
+use rustls::Certificate;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -33,30 +37,37 @@ impl Client {
 
     pub async fn connect(&mut self) -> Result<()> {
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(1024 * 1024).unwrap();
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
-        transport_cfg
-            .max_idle_timeout(Some(Duration::from_millis(self.config.max_idle_timeout_ms)))
-            .unwrap();
+
+        let timeout = IdleTimeout::from(VarInt::from_u32(self.config.max_idle_timeout_ms as u32));
+        transport_cfg.max_idle_timeout(Some(timeout));
         transport_cfg.keep_alive_interval(Some(Duration::from_millis(
             self.config.keep_alive_interval_ms,
         )));
 
-        let mut cfg = quinn::ClientConfig::default();
-        cfg.transport = Arc::new(transport_cfg);
-
         info!("using cert: {}", self.config.cert_path);
 
-        let cert = Client::read_cert(self.config.cert_path.as_str())?;
-        let tls_cfg = Arc::get_mut(&mut cfg.crypto).unwrap();
-        tls_cfg
-            .dangerous()
-            .set_certificate_verifier(Arc::new(CertVerifier { cert: cert.clone() }));
+        let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
+        //let mut tls_cfg = Arc::get_mut(&mut cfg.crypto).unwrap();
+        //tls_cfg
+        //.dangerous()
+        //.set_certificate_verifier(Arc::new(CertVerifier { cert: cert.clone() }));
 
-        let mut cfg_builder = quinn::ClientConfigBuilder::new(cfg);
-        cfg_builder.add_certificate_authority(cert)?;
-        //cfg_builder.protocols(&[b"\x05rstun"]);
-        cfg_builder.enable_keylog();
+        let crypto = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(CertVerifier { cert: cert.clone() }))
+            .with_no_client_auth();
+
+        let cfg = quinn::ClientConfig {
+            crypto: Arc::new(crypto),
+            transport: Arc::new(transport_cfg),
+        };
+
+        //let mut cfg_builder = quinn::ClientConfigBuilder::new(cfg);
+        //cfg_builder.add_certificate_authority(cert)?;
+        ////cfg_builder.protocols(&[b"\x05rstun"]);
+        //cfg_builder.enable_keylog();
 
         let remote_addr = self
             .config
@@ -66,46 +77,48 @@ impl Client {
 
         let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
 
-        let mut endpoint_builder = quinn::Endpoint::builder();
-        endpoint_builder.default_client_config(cfg_builder.build());
+        //endpoint_builder.default_client_config(cfg_builder.build());
+        //endpoint_builder.set_default_client_config(cfg);
 
-        let udp_socket = std::net::UdpSocket::bind(&local_addr)?;
+        //let udp_socket = std::net::UdpSocket::bind(&local_addr)?;
 
-        unsafe {
-            let optval: libc::c_int = 1024 * 1024 * 3;
-            let ret = libc::setsockopt(
-                udp_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            );
-            if ret != 0 {
-                error!(
-                    "failed to set SO_SNDBUF, err: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+        //unsafe {
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_SNDBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_SNDBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
 
-            let optval: libc::c_int = 1024 * 1024 * 3;
-            let ret = libc::setsockopt(
-                udp_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            );
-            if ret != 0 {
-                error!(
-                    "failed to set SO_RCVBUF, err: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_RCVBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_RCVBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
+        //}
 
         //let (endpoint, _) = endpoint_builder.bind(&local_addr)?;
-        let (endpoint, _) = endpoint_builder.with_socket(udp_socket)?;
+        //let (endpoint, _) = endpoint_builder.with_socket(udp_socket)?;
 
+        let mut endpoint = quinn::Endpoint::client(local_addr)?;
+        endpoint.set_default_client_config(cfg);
         info!(
             "connecting to {}, local_addr: {}",
             remote_addr,
@@ -113,7 +126,7 @@ impl Client {
         );
 
         let quinn::NewConnection { connection, .. } = endpoint
-            .connect(&remote_addr, "localhost")?
+            .connect(remote_addr, "localhost")?
             .await
             .context("connect failed!")?;
 
@@ -141,6 +154,7 @@ impl Client {
         while let Some(local_conn) = local_conn_receiver.recv().await {
             match remote_conn.open_bi().await {
                 Ok((remote_send, remote_recv)) => {
+                    info!("current rtt: {:?}", remote_conn.rtt());
                     tokio::spawn(Self::handle_stream(local_conn, remote_send, remote_recv));
                 }
                 Err(e) => {
@@ -195,7 +209,6 @@ impl Client {
 
         if len_read > 0 {
             remote_send.write_all(&buffer[..len_read]).await?;
-            remote_send.flush().await?;
             info!(
                 ">>>>>>>>>>>> LOCAL 2 REMOTE, id:{}, bytes:{}",
                 remote_send.id().index(),
@@ -225,7 +238,6 @@ impl Client {
                 remote_recv.id().index(),
                 len_read
             );
-            local_write.flush().await?;
             Ok(ReadResult::Succeeded)
         } else {
             info!(
@@ -269,9 +281,9 @@ impl Client {
         Ok(())
     }
 
-    fn read_cert(cert_path: &str) -> Result<Certificate> {
+    fn read_cert(cert_path: &str) -> Result<rustls::Certificate> {
         let cert = std::fs::read(cert_path).context("failed to read cert file")?;
-        let cert = Certificate::from_pem(&cert[..]).context("failed to create Certificate")?;
+        let cert = rustls::Certificate(cert.into());
 
         Ok(cert)
     }
@@ -281,27 +293,39 @@ struct CertVerifier {
     cert: Certificate,
 }
 
-impl rustls::ServerCertVerifier for CertVerifier {
+impl rustls::client::ServerCertVerifier for CertVerifier {
     fn verify_server_cert(
         &self,
-        _: &rustls::RootCertStore,
-        presented_certs: &[rustls::Certificate],
-        _: webpki::DNSNameRef,
-        _: &[u8],
-    ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
-        if presented_certs.len() != 1 {
-            return Err(TLSError::General(format!(
-                "server sent {} certificates, expected one",
-                presented_certs.len()
-            )));
-        }
-        if presented_certs[0].0 != self.cert.as_der() {
-            return Err(TLSError::General(format!(
-                "server certificates doesn't match ours"
-            )));
-        }
-
-        info!("certificate verified!");
+        end_entity: &Certificate,
+        intermediates: &[Certificate],
+        server_name: &ServerName,
+        scts: &mut dyn Iterator<Item = &[u8]>,
+        ocsp_response: &[u8],
+        now: SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
+
+    //fn verify_server_cert(
+    //&self,
+    //_: &rustls::RootCertStore,
+    //presented_certs: &[rustls::Certificate],
+    //_: webpki::DNSNameRef,
+    //_: &[u8],
+    //) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+    //if presented_certs.len() != 1 {
+    //return Err(TLSError::General(format!(
+    //"server sent {} certificates, expected one",
+    //presented_certs.len()
+    //)));
+    //}
+    //if presented_certs[0].0 != self.cert.as_der() {
+    //return Err(TLSError::General(format!(
+    //"server certificates doesn't match ours"
+    //)));
+    //}
+
+    //info!("certificate verified!");
+    //Ok(ServerCertVerified::assertion())
+    //}
 }

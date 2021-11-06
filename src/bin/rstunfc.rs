@@ -34,10 +34,10 @@ fn main() {
 async fn run() -> Result<()> {
     let mut config = ClientConfig::default();
     config.server_addr = "127.0.0.1:3515".into();
-    config.local_access_server_addr = "127.0.0.1:3618".into();
+    config.local_access_server_addr = "0.0.0.0:3618".into();
     config.password = "password".to_string();
     config.remote_downstream_name = "http".to_string();
-    config.cert_path = "localhost.crt.pem".to_string();
+    config.cert_path = "localhost.crt.der".to_string();
     config.connect_max_retry = 0;
     config.wait_before_retry_ms = 5 * 1000;
     config.max_idle_timeout_ms = 5 * 1000;

@@ -4,7 +4,11 @@ use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
 use quinn::TransportConfig;
-use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
+use quinn::{RecvStream, SendStream};
+use quinn_proto::{IdleTimeout, VarInt, VarIntBoundsExceeded};
+use rustls::client::ServerCertVerified;
+use rustls::client::ServerName;
+use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
@@ -14,6 +18,11 @@ use tokio::net::TcpStream;
 use tokio::time::Duration;
 
 const IDLE_TIMEOUT: u64 = 30 * 1000;
+static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
+    rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+];
 
 #[derive(Debug)]
 pub struct Server {
@@ -36,80 +45,90 @@ impl Server {
                     info!("generate temporary cert and key");
                     let cert =
                         rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                    let key = cert.serialize_private_key_pem();
-                    let cert = cert.serialize_pem().unwrap();
-                    let cert = Certificate::from_pem(cert.as_bytes()).unwrap();
-                    let key = PrivateKey::from_pem(key.as_bytes()).unwrap();
+                    let key = cert.serialize_private_key_der();
+                    let cert = cert.serialize_der().unwrap();
+                    let cert = Certificate(cert.into());
+                    let key = PrivateKey(key.into());
                     (cert, key)
                 }
             };
 
-        let cert_chain = CertificateChain::from_certs(vec![cert]);
-        let mut cfg = quinn::ServerConfig::default();
+        //let cert_chain = CertificateChain::from_certs(vec![cert]);
+        //let mut cfg = quinn::ServerConfig::builder();
+
+        let crypto = rustls::ServerConfig::builder()
+            .with_cipher_suites(PERF_CIPHER_SUITES)
+            .with_safe_default_kx_groups()
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        //crypto.alpn_protocols = vec![b"perf".to_vec()];
+
+        let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(1024 * 1024).unwrap();
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
-        transport_cfg
-            .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
-            .unwrap();
+        let timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT as u32));
+        transport_cfg.max_idle_timeout(Some(timeout));
         transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
         cfg.transport = Arc::new(transport_cfg);
 
-        cfg.certificate(cert_chain, key)?;
-        Arc::get_mut(&mut cfg.transport)
-            .unwrap()
-            .max_concurrent_bidi_streams(2000)?;
+        //cfg.certificate(cert_chain, key)?;
+        //Arc::get_mut(&mut cfg.transport)
+        //.unwrap()
+        //.max_concurrent_bidi_streams(2000)?;
 
-        let mut cfg_builder = quinn::ServerConfigBuilder::new(cfg);
-        //cfg_builder.protocols(&[b"\x05rstun"]);
-        cfg_builder.use_stateless_retry(true);
-        cfg_builder.enable_keylog();
+        //let mut cfg_builder = quinn::ServerConfigBuilder::new(cfg);
+        ////cfg_builder.protocols(&[b"\x05rstun"]);
+        //cfg_builder.use_stateless_retry(true);
+        //cfg_builder.enable_keylog();
 
         let addr: SocketAddr = config
             .addr
             .parse()
             .with_context(|| format!("invalid address: {}", config.addr))?;
 
-        let mut endpoint_builder = quinn::Endpoint::builder();
-        endpoint_builder.listen(cfg_builder.build());
+        let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
 
-        let udp_socket = std::net::UdpSocket::bind(&addr)?;
+        //let udp_socket = std::net::UdpSocket::bind(&addr)?;
 
-        unsafe {
-            let optval: libc::c_int = 1024 * 1024 * 3;
-            let ret = libc::setsockopt(
-                udp_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            );
-            if ret != 0 {
-                error!(
-                    "failed to set SO_SNDBUF, err: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+        //unsafe {
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_SNDBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_SNDBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
 
-            let optval: libc::c_int = 1024 * 1024 * 3;
-            let ret = libc::setsockopt(
-                udp_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            );
-            if ret != 0 {
-                error!(
-                    "failed to set SO_RCVBUF, err: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_RCVBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_RCVBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
+        //}
 
-        //let (endpoint, mut incoming) = endpoint_builder.bind(&addr)?;
-        let (endpoint, mut incoming) = endpoint_builder.with_socket(udp_socket)?;
+        //let (endpoint, mut incoming) = endpoint.bind(&addr)?;
+        //let (endpoint, mut incoming) = endpoint.with_socket(udp_socket)?;
         info!("server is bound to: {}", endpoint.local_addr()?);
 
         let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());
@@ -326,8 +345,8 @@ impl Server {
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
         let cert = std::fs::read(cert_path).context("failed to read cert file")?;
         let key = std::fs::read(key_path).context("failed to read key file")?;
-        let cert = Certificate::from_pem(&cert[..]).context("failed to create Certificate")?;
-        let key = PrivateKey::from_pem(&key[..]).context("failed to create PrivateKey")?;
+        let cert = Certificate(cert.into());
+        let key = PrivateKey(key.into());
 
         Ok((cert, key))
     }
