@@ -5,22 +5,19 @@ use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
 use quinn::TransportConfig;
 use quinn::{RecvStream, SendStream};
-use quinn_proto::{IdleTimeout, VarInt, VarIntBoundsExceeded};
-use rustls::client::ServerCertVerified;
-use rustls::client::ServerName;
+use quinn_proto::{IdleTimeout, VarInt};
 use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
 const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
-    rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    //rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
 ];
 
@@ -53,9 +50,6 @@ impl Server {
                 }
             };
 
-        //let cert_chain = CertificateChain::from_certs(vec![cert]);
-        //let mut cfg = quinn::ServerConfig::builder();
-
         let crypto = rustls::ServerConfig::builder()
             .with_cipher_suites(PERF_CIPHER_SUITES)
             .with_safe_default_kx_groups()
@@ -64,9 +58,6 @@ impl Server {
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)
             .unwrap();
-        //crypto.alpn_protocols = vec![b"perf".to_vec()];
-
-        let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
@@ -74,17 +65,10 @@ impl Server {
         let timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT as u32));
         transport_cfg.max_idle_timeout(Some(timeout));
         transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+
+        let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         cfg.transport = Arc::new(transport_cfg);
-
-        //cfg.certificate(cert_chain, key)?;
-        //Arc::get_mut(&mut cfg.transport)
-        //.unwrap()
-        //.max_concurrent_bidi_streams(2000)?;
-
-        //let mut cfg_builder = quinn::ServerConfigBuilder::new(cfg);
-        ////cfg_builder.protocols(&[b"\x05rstun"]);
-        //cfg_builder.use_stateless_retry(true);
-        //cfg_builder.enable_keylog();
 
         let addr: SocketAddr = config
             .addr
@@ -92,8 +76,6 @@ impl Server {
             .with_context(|| format!("invalid address: {}", config.addr))?;
 
         let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
-
-        //let udp_socket = std::net::UdpSocket::bind(&addr)?;
 
         //unsafe {
         //let optval: libc::c_int = 1024 * 1024 * 3;
@@ -127,8 +109,6 @@ impl Server {
         //}
         //}
 
-        //let (endpoint, mut incoming) = endpoint.bind(&addr)?;
-        //let (endpoint, mut incoming) = endpoint.with_socket(udp_socket)?;
         info!("server is bound to: {}", endpoint.local_addr()?);
 
         let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());
@@ -267,30 +247,31 @@ impl Server {
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        info!("received new stream, id: {}", send.id().index());
-        if let Ok(mut downstream_conn) = TcpStream::connect(&downstream_addr).await {
-            let mut up_read_result = ReadResult::Succeeded;
+        let downstream_conn = TcpStream::connect(&downstream_addr).await?;
+        let (mut down_read, mut down_write) = downstream_conn.into_split();
+
+        info!(
+            "open new stream for local conn, {} -> {}",
+            send.id().index(),
+            down_read.local_addr().unwrap(),
+        );
+
+        tokio::spawn(async move {
             loop {
-                let (mut down_read, mut down_write) = downstream_conn.split();
-                let up2down = Self::upstream_to_downstream(&mut recv, &mut down_write);
-                let down2up = Self::downstream_to_upstream(&mut down_read, &mut send);
-                tokio::select! {
-                    Ok(result) = up2down, if !up_read_result.is_eof() => {
-                        up_read_result = result;
-                    }
-                    Ok(result) = down2up => {
-                        if let ReadResult::EOF = result {
-                            info!("quit stream after hitting EOF, stream_id: {}", send.id().index());
-                            break;
-                        }
-                    }
-                    else => {
-                        info!("quit unexpectedly, stream_id: {}", send.id().index());
-                        break;
-                    }
-                };
+                let result = Self::upstream_to_downstream(&mut recv, &mut down_write).await;
+                if let Ok(ReadResult::EOF) | Err(_) = result {
+                    break;
+                }
             }
-        }
+        });
+        tokio::spawn(async move {
+            loop {
+                let result = Self::downstream_to_upstream(&mut down_read, &mut send).await;
+                if let Ok(ReadResult::EOF) | Err(_) = result {
+                    break;
+                }
+            }
+        });
 
         Ok(())
     }
@@ -302,20 +283,15 @@ impl Server {
         Ok(())
     }
 
-    async fn downstream_to_upstream<'a>(
-        down_read: &'a mut ReadHalf<'a>,
-        up_send: &'a mut SendStream,
+    async fn downstream_to_upstream(
+        down_read: &mut OwnedReadHalf,
+        up_send: &mut SendStream,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
         let len_read = down_read.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
             up_send.write_all(&buffer[..len_read]).await?;
-            info!(
-                ">>>>>>>>>>>> down 2 up, id:{}, bytes:{}",
-                up_send.id().index(),
-                len_read
-            );
             Ok(ReadResult::Succeeded)
         } else {
             up_send.finish().await?;
@@ -323,19 +299,14 @@ impl Server {
         }
     }
 
-    async fn upstream_to_downstream<'a>(
-        up_recv: &'a mut RecvStream,
-        down_write: &'a mut WriteHalf<'a>,
+    async fn upstream_to_downstream(
+        up_recv: &mut RecvStream,
+        down_write: &mut OwnedWriteHalf,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
         let result = up_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             down_write.write_all(&buffer[..len_read]).await?;
-            info!(
-                ">>>>>>>>>>>> up 2 down, id:{}, bytes:{}",
-                up_recv.id().index(),
-                len_read
-            );
             Ok(ReadResult::Succeeded)
         } else {
             Ok(ReadResult::EOF)

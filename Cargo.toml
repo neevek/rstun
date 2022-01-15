@@ -6,20 +6,20 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.15.0", features = ["full"] }
 pretty_env_logger = "0.4.0"
 ring = "0.16.20"
 log = "0.4.14"
 chrono = "0.4.19"
 anyhow = "1.0.44"
 tracing = "0.1.29"
-quinn = { git = "https://github.com/quinn-rs/quinn", rev = "25d9a40bf97b020661659d752501c3597a65deca"}
-quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "25d9a40bf97b020661659d752501c3597a65deca" }
+quinn = "0.8.0"
+quinn-proto = "0.8.0"
 tracing-subscriber = { version = "0.2.5", default-features = false, features = ["env-filter", "fmt", "ansi", "chrono"]}
 rcgen = "0.8.14"
 futures-util = "0.3.17"
 colored = "2.0.0"
-rustls = { version = "0.20.0", features = ["dangerous_configuration", "quic"] }
+rustls = { version = "0.20.2", features = ["dangerous_configuration", "quic"] }
 webpki = "*"
 dashmap = "4.0.2"
 bytes = "1.1.0"

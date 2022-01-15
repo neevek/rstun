@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use log::{error, info};
+use log::{error, info, trace};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -15,7 +15,7 @@ pub struct AccessServer {
 
 impl AccessServer {
     pub fn new(addr: String) -> Self {
-        let (sender, receiver) = channel(500);
+        let (sender, receiver) = channel(50000);
 
         AccessServer {
             addr,
@@ -55,7 +55,7 @@ impl AccessServer {
             loop {
                 match listener.accept().await {
                     Ok((socket, addr)) => {
-                        info!("received new local connection, addr: {}", addr);
+                        //trace!("received new local connection, addr: {}", addr);
                         tcp_sender
                             .send(socket)
                             .await
@@ -66,7 +66,6 @@ impl AccessServer {
                     }
                     Err(e) => {
                         error!("access server failed, err: {}", e);
-                        break;
                     }
                 }
             }
