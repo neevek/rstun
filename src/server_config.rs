@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 
 #[derive(Default, Debug)]
 pub struct ServerConfig {

@@ -16,9 +16,9 @@ use tokio::time::Duration;
 
 const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
+    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
     //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
     //rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
-    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
 ];
 
 #[derive(Debug)]
@@ -251,7 +251,7 @@ impl Server {
         let (mut down_read, mut down_write) = downstream_conn.into_split();
 
         info!(
-            "open new stream for local conn, {} -> {}",
+            "open stream for remote conn, {} -> {}",
             send.id().index(),
             down_read.local_addr().unwrap(),
         );

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use log::{error, info, trace};
+use log::{debug, error, info};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -55,7 +55,7 @@ impl AccessServer {
             loop {
                 match listener.accept().await {
                     Ok((socket, addr)) => {
-                        //trace!("received new local connection, addr: {}", addr);
+                        debug!("received new local connection, addr: {}", addr);
                         tcp_sender
                             .send(socket)
                             .await

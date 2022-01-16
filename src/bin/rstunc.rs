@@ -1,10 +1,10 @@
 use anyhow::Result;
-use colored::Colorize;
+use clap::Parser;
 use log::info;
 use log::{debug, error};
 use rstun::ClientConfig;
+use rstun::LogHelper;
 use rstun::{AccessServer, Client};
-use std::io::Write;
 use tokio::time::Duration;
 
 extern crate colored;
@@ -12,6 +12,10 @@ extern crate pretty_env_logger;
 
 fn main() {
     //raise_fd_limit();
+
+    let args = RstuncArgs::parse();
+
+    LogHelper::init_logger(args.loglevel.as_str());
 
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
@@ -21,25 +25,24 @@ fn main() {
     )
     .unwrap();
 
-    init_logger();
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(16)
         .build()
         .unwrap()
         .block_on(async {
-            run().await.unwrap();
+            run(args).await.unwrap();
         });
 }
 
-async fn run() -> Result<()> {
+async fn run(args: RstuncArgs) -> Result<()> {
     let mut config = ClientConfig::default();
-    config.server_addr = "127.0.0.1:3515".into();
-    config.local_access_server_addr = "0.0.0.0:3618".into();
-    config.password = "password".to_string();
-    config.remote_downstream_name = "http".to_string();
-    config.cert_path = "localhost.crt.der".to_string();
+
+    config.server_addr = args.server_addr;
+    config.local_access_server_addr = args.addr;
+    config.password = args.password;
+    config.remote_downstream_name = args.remote_downstream_name;
+    config.cert_path = args.cert;
     config.connect_max_retry = 0;
     config.wait_before_retry_ms = 5 * 1000;
     config.max_idle_timeout_ms = 5 * 1000;
@@ -84,37 +87,36 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
-fn init_logger() {
-    pretty_env_logger::formatted_timed_builder()
-        .format(|buf, record| {
-            let level = record.level();
-            let level = match level {
-                log::Level::Trace => "T".white(),
-                log::Level::Debug => "D".green(),
-                log::Level::Info => "I".blue(),
-                log::Level::Warn => "W".yellow(),
-                log::Level::Error => "E".red(),
-            };
-            let filename = record.file().unwrap_or("unknown");
-            let filename = &filename[filename.rfind('/').map(|pos| pos + 1).unwrap_or(0)..];
-            writeln!(
-                buf,
-                "{} [{}:{}] [{}] - {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S.%3f"),
-                filename,
-                record.line().unwrap_or(0),
-                level,
-                record.args()
-            )
-        })
-        .filter(Some("rstun"), log::LevelFilter::Trace)
-        .init();
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct RstuncArgs {
+    /// Address (ip:port pair) to listen on
+    #[clap(short, long, display_order = 1)]
+    addr: String,
+
+    /// Address (ip:port pair) of rstund
+    #[clap(short, long, display_order = 2)]
+    server_addr: String,
+
+    /// Name of the remote downstream server the traffic will be relayed to
+    #[clap(short, long, required = true, display_order = 3)]
+    remote_downstream_name: String,
+
+    /// Password of the tunnel server
+    #[clap(short, long, required = true, display_order = 4)]
+    password: String,
+
+    /// Path to the certificate file in DER format
+    #[clap(short, long, required = true, display_order = 5)]
+    cert: String,
+
+    #[clap(short, long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
+    loglevel: String,
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 #[allow(non_camel_case_types)]
 pub fn raise_fd_limit() -> Option<u64> {
-    use std::cmp;
     use std::io;
     use std::mem::size_of_val;
     use std::ptr::null_mut;

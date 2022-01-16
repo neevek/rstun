@@ -109,10 +109,8 @@ impl Client {
             endpoint.local_addr().unwrap()
         );
 
-        let quinn::NewConnection { connection, .. } = endpoint
-            .connect(remote_addr, "localhost")?
-            .await
-            .context("connect failed!")?;
+        let quinn::NewConnection { connection, .. } =
+            endpoint.connect(remote_addr, "localhost")?.await?;
 
         let (mut send, mut recv) = connection
             .open_bi()
@@ -152,13 +150,13 @@ impl Client {
     }
 
     async fn handle_stream(
-        mut local_conn: TcpStream,
+        local_conn: TcpStream,
         mut remote_send: SendStream,
         mut remote_recv: RecvStream,
     ) -> Result<()> {
         let (mut local_read, mut local_write) = local_conn.into_split();
         info!(
-            "open new stream for local conn, {} -> {}",
+            "open stream for local conn, {} -> {}",
             remote_send.id().index(),
             local_read.peer_addr().unwrap(),
         );
@@ -259,11 +257,11 @@ impl rustls::client::ServerCertVerifier for CertVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &Certificate,
-        intermediates: &[Certificate],
-        server_name: &ServerName,
-        scts: &mut dyn Iterator<Item = &[u8]>,
-        ocsp_response: &[u8],
-        now: SystemTime,
+        _intermediates: &[Certificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         if end_entity.0 != self.cert.0 {
             return Err(rustls::Error::General(format!(
