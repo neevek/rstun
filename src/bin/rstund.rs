@@ -1,14 +1,19 @@
-use anyhow::Result;
-use colored::Colorize;
+use anyhow::{bail, Result};
+use clap::Parser;
+use rstun::LogHelper;
 use rstun::Server;
 use rstun::ServerConfig;
 use std::collections::HashMap;
-use std::io::Write;
 
-extern crate colored;
 extern crate pretty_env_logger;
 
 fn main() {
+    // usage: ./target/debug/rstund -a 0.0.0.0:3333 -d http=127.0.0.1:9800 -k localhost.key.der -c localhost.crt.der -p password
+
+    let args = RstundArgs::parse();
+
+    LogHelper::init_logger(args.loglevel.as_str());
+
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_max_level(tracing::Level::TRACE)
@@ -17,57 +22,63 @@ fn main() {
     )
     .unwrap();
 
-    init_logger();
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(16)
         .build()
         .unwrap()
         .block_on(async {
-            run().await.unwrap();
+            run(args).await.unwrap();
         })
 }
 
-async fn run() -> Result<()> {
+async fn run(args: RstundArgs) -> Result<()> {
     let mut downstreams = HashMap::new();
-    //downstreams.insert("http".to_string(), "127.0.0.1:1081".to_string());
-    downstreams.insert("http".to_string(), "127.0.0.1:1091".to_string());
+
+    for d in args.downstream.iter() {
+        let split = d.split("=");
+        let pair: Vec<&str> = split.collect();
+        if pair.len() != 2 {
+            bail!("invalid downstream: {}", d);
+        }
+        downstreams.insert(pair[0].into(), pair[1].into());
+    }
 
     let mut config = ServerConfig::default();
-    config.addr = "127.0.0.1:3515".into();
-    config.password = "password".to_string();
+    config.addr = args.addr;
+    config.password = args.password;
+    config.cert_path = args.cert;
+    config.key_path = args.key;
     config.downstreams = downstreams;
-    config.cert_path = "/Users/neevek/dev/github/rstun/localhost.crt.pem".to_string();
-    config.key_path = "/Users/neevek/dev/github/rstun/localhost.key.pem".to_string();
 
     let mut server = Server::new(config);
     server.start().await?;
     Ok(())
 }
 
-fn init_logger() {
-    pretty_env_logger::formatted_timed_builder()
-        .format(|buf, record| {
-            let level = record.level();
-            let level = match level {
-                log::Level::Trace => "T".white(),
-                log::Level::Debug => "D".green(),
-                log::Level::Info => "I".blue(),
-                log::Level::Warn => "W".yellow(),
-                log::Level::Error => "E".red(),
-            };
-            let filename = record.file().unwrap_or("unknown");
-            let filename = &filename[filename.rfind('/').map(|pos| pos + 1).unwrap_or(0)..];
-            writeln!(
-                buf,
-                "{} [{}:{}] [{}] - {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S.%3f"),
-                filename,
-                record.line().unwrap_or(0),
-                level,
-                record.args()
-            )
-        })
-        .filter(Some("rstun"), log::LevelFilter::Trace)
-        .init();
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct RstundArgs {
+    /// Address (ip:port pair) to listen on
+    #[clap(short, long, display_order = 1)]
+    addr: String,
+
+    /// Downstream as the receiving end of the tunnel, e.g. -d name1=ip:port
+    #[clap(short, long, required = true, min_values = 1, display_order = 2)]
+    downstream: Vec<String>,
+
+    /// Password of the tunnel server
+    #[clap(short, long, required = true, display_order = 3)]
+    password: String,
+
+    /// Path to the certificate file in DER format
+    #[clap(short, long, required = true, display_order = 4)]
+    cert: String,
+
+    /// Path to the key file in DER format
+    #[clap(short, long, required = true, display_order = 5)]
+    key: String,
+
+    #[clap(short, long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
+    loglevel: String,
 }

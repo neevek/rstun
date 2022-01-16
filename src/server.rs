@@ -4,16 +4,22 @@ use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
 use quinn::TransportConfig;
-use quinn::{Certificate, CertificateChain, PrivateKey, RecvStream, SendStream};
+use quinn::{RecvStream, SendStream};
+use quinn_proto::{IdleTimeout, VarInt};
+use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::time::Duration;
 
 const IDLE_TIMEOUT: u64 = 30 * 1000;
+static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
+    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+    //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    //rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+];
 
 #[derive(Debug)]
 pub struct Server {
@@ -36,44 +42,73 @@ impl Server {
                     info!("generate temporary cert and key");
                     let cert =
                         rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                    let key = cert.serialize_private_key_pem();
-                    let cert = cert.serialize_pem().unwrap();
-                    let cert = Certificate::from_pem(cert.as_bytes()).unwrap();
-                    let key = PrivateKey::from_pem(key.as_bytes()).unwrap();
+                    let key = cert.serialize_private_key_der();
+                    let cert = cert.serialize_der().unwrap();
+                    let cert = Certificate(cert.into());
+                    let key = PrivateKey(key.into());
                     (cert, key)
                 }
             };
 
-        let cert_chain = CertificateChain::from_certs(vec![cert]);
-        let mut cfg = quinn::ServerConfig::default();
+        let crypto = rustls::ServerConfig::builder()
+            .with_cipher_suites(PERF_CIPHER_SUITES)
+            .with_safe_default_kx_groups()
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(1024 * 1024).unwrap();
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
-        transport_cfg
-            .max_idle_timeout(Some(Duration::from_millis(IDLE_TIMEOUT)))
-            .unwrap();
+        let timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT as u32));
+        transport_cfg.max_idle_timeout(Some(timeout));
         transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+
+        let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         cfg.transport = Arc::new(transport_cfg);
 
-        cfg.certificate(cert_chain, key)?;
-        Arc::get_mut(&mut cfg.transport)
-            .unwrap()
-            .max_concurrent_bidi_streams(2000)?;
-
-        let mut cfg_builder = quinn::ServerConfigBuilder::new(cfg);
-        //cfg_builder.protocols(&[b"\x05rstun"]);
-        cfg_builder.use_stateless_retry(true);
-        cfg_builder.enable_keylog();
-
-        let addr = config
+        let addr: SocketAddr = config
             .addr
             .parse()
             .with_context(|| format!("invalid address: {}", config.addr))?;
 
-        let mut endpoint_builder = quinn::Endpoint::builder();
-        endpoint_builder.listen(cfg_builder.build());
-        let (endpoint, mut incoming) = endpoint_builder.bind(&addr)?;
+        let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
+
+        //unsafe {
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_SNDBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_SNDBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
+
+        //let optval: libc::c_int = 1024 * 1024 * 3;
+        //let ret = libc::setsockopt(
+        //udp_socket.as_raw_fd(),
+        //libc::SOL_SOCKET,
+        //libc::SO_RCVBUF,
+        //&optval as *const _ as *const libc::c_void,
+        //std::mem::size_of_val(&optval) as libc::socklen_t,
+        //);
+        //if ret != 0 {
+        //error!(
+        //"failed to set SO_RCVBUF, err: {}",
+        //std::io::Error::last_os_error()
+        //);
+        //}
+        //}
+
         info!("server is bound to: {}", endpoint.local_addr()?);
 
         let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());
@@ -209,54 +244,34 @@ impl Server {
     }
 
     async fn handle_stream(
-        (send, recv): (quinn::SendStream, quinn::RecvStream),
+        (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        let stream_id = send.id().index();
-        info!("received new stream, id: {}", stream_id);
+        let downstream_conn = TcpStream::connect(&downstream_addr).await?;
+        let (mut down_read, mut down_write) = downstream_conn.into_split();
 
-        if let Ok(downstream_conn) = TcpStream::connect(&downstream_addr).await {
-            let (down_read, down_write) = tokio::io::split(downstream_conn);
-            let down_read = Arc::new(Mutex::new(down_read));
-            let down_write = Arc::new(Mutex::new(down_write));
-            let send = Arc::new(Mutex::new(send));
-            let recv = Arc::new(Mutex::new(recv));
+        info!(
+            "open stream for remote conn, {} -> {}",
+            send.id().index(),
+            down_read.local_addr().unwrap(),
+        );
 
-            let mut up_read_result = ReadResult::Succeeded;
-
+        tokio::spawn(async move {
             loop {
-                let down_read = down_read.clone();
-                let down_write = down_write.clone();
-                let send = send.clone();
-                let recv = recv.clone();
-
-                let h1 =
-                    tokio::spawn(
-                        async move { Self::upstream_to_downstream(recv, down_write).await },
-                    );
-                let h2 =
-                    tokio::spawn(
-                        async move { Self::downstream_to_upstream(down_read, send).await },
-                    );
-
-                tokio::select! {
-                    Ok(Ok(result)) = h1, if !up_read_result.is_eof() => {
-                        up_read_result = result;
-                    }
-                    Ok(result) = h2 => {
-                        if let Ok(ReadResult::EOF) = result {
-                            info!("quit stream after hitting EOF, stream_id: {}", stream_id);
-                            break;
-                        }
-                    }
-                    else => {
-                        info!("quit unexpectedly, stream_id: {}", stream_id);
-                        break;
-                    }
-                };
+                let result = Self::upstream_to_downstream(&mut recv, &mut down_write).await;
+                if let Ok(ReadResult::EOF) | Err(_) = result {
+                    break;
+                }
             }
-            send.lock().await.finish().await.ok();
-        }
+        });
+        tokio::spawn(async move {
+            loop {
+                let result = Self::downstream_to_upstream(&mut down_read, &mut send).await;
+                if let Ok(ReadResult::EOF) | Err(_) = result {
+                    break;
+                }
+            }
+        });
 
         Ok(())
     }
@@ -269,42 +284,40 @@ impl Server {
     }
 
     async fn downstream_to_upstream(
-        down_read: Arc<Mutex<ReadHalf<TcpStream>>>,
-        up_send: Arc<Mutex<SendStream>>,
+        down_read: &mut OwnedReadHalf,
+        up_send: &mut SendStream,
     ) -> Result<ReadResult> {
         let mut buffer = vec![0_u8; 8192];
-        let len_read = down_read.lock().await.read(&mut buffer[..]).await?;
+        let len_read = down_read.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
-            up_send.lock().await.write_all(&buffer[..len_read]).await?;
+            up_send.write_all(&buffer[..len_read]).await?;
+            Ok(ReadResult::Succeeded)
+        } else {
+            up_send.finish().await?;
+            Ok(ReadResult::EOF)
+        }
+    }
+
+    async fn upstream_to_downstream(
+        up_recv: &mut RecvStream,
+        down_write: &mut OwnedWriteHalf,
+    ) -> Result<ReadResult> {
+        let mut buffer = vec![0_u8; 8192];
+        let result = up_recv.read(&mut buffer[..]).await?;
+        if let Some(len_read) = result {
+            down_write.write_all(&buffer[..len_read]).await?;
             Ok(ReadResult::Succeeded)
         } else {
             Ok(ReadResult::EOF)
         }
     }
 
-    async fn upstream_to_downstream(
-        up_recv: Arc<Mutex<RecvStream>>,
-        down_write: Arc<Mutex<WriteHalf<TcpStream>>>,
-    ) -> Result<ReadResult> {
-        let mut buffer = vec![0_u8; 8192];
-        let result = up_recv.lock().await.read(&mut buffer[..]).await?;
-        if let Some(len_read) = result {
-            down_write
-                .lock()
-                .await
-                .write_all(&buffer[..len_read])
-                .await?;
-            return Ok(ReadResult::Succeeded);
-        }
-        return Ok(ReadResult::EOF);
-    }
-
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
         let cert = std::fs::read(cert_path).context("failed to read cert file")?;
         let key = std::fs::read(key_path).context("failed to read key file")?;
-        let cert = Certificate::from_pem(&cert[..]).context("failed to create Certificate")?;
-        let key = PrivateKey::from_pem(&key[..]).context("failed to create PrivateKey")?;
+        let cert = Certificate(cert.into());
+        let key = PrivateKey(key.into());
 
         Ok((cert, key))
     }
