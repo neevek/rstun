@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
-use quinn::TransportConfig;
+use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
 use rustls::{Certificate, PrivateKey};
@@ -62,6 +62,7 @@ impl Server {
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
+        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         let timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT as u32));
         transport_cfg.max_idle_timeout(Some(timeout));
         transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
@@ -278,6 +279,7 @@ impl Server {
 
     fn check_password(password1: &str, password2: &str) -> Result<()> {
         if password1 != password2 {
+            warn!("passwords don't match!");
             bail!("passwords don't match!");
         }
         Ok(())
