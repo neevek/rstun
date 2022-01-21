@@ -1,6 +1,7 @@
 use crate::ReadResult;
 use crate::{ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
+use byte_pool::BytePool;
 use log::{error, info};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
@@ -19,10 +20,12 @@ use tokio::time::Duration;
 extern crate libc;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
+type BufferPool = Arc<BytePool<Vec<u8>>>;
 
 pub struct Client {
     config: ClientConfig,
     remote_conn: Option<quinn::Connection>,
+    buffer_pool: BufferPool,
 }
 
 impl Client {
@@ -30,6 +33,7 @@ impl Client {
         Client {
             config,
             remote_conn: None,
+            buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
         }
     }
 
@@ -136,7 +140,12 @@ impl Client {
         while let Some(local_conn) = local_conn_receiver.recv().await {
             match remote_conn.open_bi().await {
                 Ok((remote_send, remote_recv)) => {
-                    tokio::spawn(Self::handle_stream(local_conn, remote_send, remote_recv));
+                    tokio::spawn(Self::handle_stream(
+                        local_conn,
+                        remote_send,
+                        remote_recv,
+                        self.buffer_pool.clone(),
+                    ));
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
@@ -153,6 +162,7 @@ impl Client {
         local_conn: TcpStream,
         mut remote_send: SendStream,
         mut remote_recv: RecvStream,
+        buffer_pool: BufferPool,
     ) -> Result<()> {
         let (mut local_read, mut local_write) = local_conn.into_split();
         info!(
@@ -160,9 +170,11 @@ impl Client {
             remote_send.id().index(),
             local_read.peer_addr().unwrap(),
         );
+        let bp_clone = buffer_pool.clone();
         tokio::spawn(async move {
             loop {
-                let result = Self::local_to_remote(&mut local_read, &mut remote_send).await;
+                let result =
+                    Self::local_to_remote(&mut local_read, &mut remote_send, &bp_clone).await;
                 if let Ok(ReadResult::EOF) | Err(_) = result {
                     break;
                 }
@@ -170,7 +182,8 @@ impl Client {
         });
         tokio::spawn(async move {
             loop {
-                let result = Self::remote_to_local(&mut remote_recv, &mut local_write).await;
+                let result =
+                    Self::remote_to_local(&mut remote_recv, &mut local_write, &buffer_pool).await;
                 if let Ok(ReadResult::EOF) | Err(_) = result {
                     break;
                 }
@@ -182,8 +195,9 @@ impl Client {
     async fn local_to_remote(
         local_read: &mut OwnedReadHalf,
         remote_send: &mut SendStream,
+        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = vec![0_u8; 8192];
+        let mut buffer = buffer_pool.alloc(8192);
         let len_read = local_read.read(&mut buffer[..]).await?;
         if len_read > 0 {
             remote_send.write_all(&buffer[..len_read]).await?;
@@ -197,9 +211,10 @@ impl Client {
     async fn remote_to_local(
         remote_recv: &mut RecvStream,
         local_write: &mut OwnedWriteHalf,
+        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = vec![0_u8; 8192];
-        let result = remote_recv.read(&mut buffer[..8192]).await?;
+        let mut buffer = buffer_pool.alloc(8192);
+        let result = remote_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             local_write.write_all(&buffer[..len_read]).await?;
             Ok(ReadResult::Succeeded)

@@ -1,5 +1,6 @@
 use crate::{ReadResult, ServerConfig, TunnelType};
 use anyhow::{bail, Context, Result};
+use byte_pool::BytePool;
 use dashmap::DashMap;
 use futures_util::{StreamExt, TryFutureExt};
 use log::{debug, error, info, warn};
@@ -14,6 +15,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
+type BufferPool = Arc<BytePool<Vec<u8>>>;
 const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -24,12 +26,14 @@ static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
 #[derive(Debug)]
 pub struct Server {
     pub config: Arc<ServerConfig>,
+    buffer_pool: BufferPool,
 }
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
         Server {
             config: Arc::new(config),
+            buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
         }
     }
 
@@ -124,11 +128,12 @@ impl Server {
         while let Some(conn) = incoming.next().await {
             let server_config = self.config.clone();
             let downstream_addrs = downstream_addrs.clone();
+            let buffer_pool = self.buffer_pool.clone();
             tokio::spawn(async move {
                 if let Ok((conn, addr)) =
                     Self::authenticate_connection(conn, server_config, downstream_addrs).await
                 {
-                    Self::handle_connection(conn, addr)
+                    Self::handle_connection(conn, addr, buffer_pool)
                         .await
                         .map_err(|e| error!("handle_connection failed: {}", e))
                         .ok();
@@ -212,6 +217,7 @@ impl Server {
     async fn handle_connection(
         mut conn: quinn::NewConnection,
         downstream_addr: SocketAddr,
+        buffer_pool: BufferPool,
     ) -> Result<()> {
         let remote_addr = &conn.connection.remote_address();
 
@@ -235,7 +241,7 @@ impl Server {
                     );
                 }
                 Ok(s) => tokio::spawn(
-                    Self::handle_stream(s, downstream_addr)
+                    Self::handle_stream(s, downstream_addr, buffer_pool.clone())
                         .map_err(|e| debug!("stream ended, err: {}", e)),
                 ),
             };
@@ -247,6 +253,7 @@ impl Server {
     async fn handle_stream(
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
+        buffer_pool: BufferPool,
     ) -> Result<()> {
         let downstream_conn = TcpStream::connect(&downstream_addr).await?;
         let (mut down_read, mut down_write) = downstream_conn.into_split();
@@ -257,9 +264,11 @@ impl Server {
             down_read.local_addr().unwrap(),
         );
 
+        let bp_clone = buffer_pool.clone();
         tokio::spawn(async move {
             loop {
-                let result = Self::upstream_to_downstream(&mut recv, &mut down_write).await;
+                let result =
+                    Self::upstream_to_downstream(&mut recv, &mut down_write, &bp_clone).await;
                 if let Ok(ReadResult::EOF) | Err(_) = result {
                     break;
                 }
@@ -267,7 +276,8 @@ impl Server {
         });
         tokio::spawn(async move {
             loop {
-                let result = Self::downstream_to_upstream(&mut down_read, &mut send).await;
+                let result =
+                    Self::downstream_to_upstream(&mut down_read, &mut send, &buffer_pool).await;
                 if let Ok(ReadResult::EOF) | Err(_) = result {
                     break;
                 }
@@ -288,8 +298,9 @@ impl Server {
     async fn downstream_to_upstream(
         down_read: &mut OwnedReadHalf,
         up_send: &mut SendStream,
+        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = vec![0_u8; 8192];
+        let mut buffer = buffer_pool.alloc(8192);
         let len_read = down_read.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
@@ -304,8 +315,9 @@ impl Server {
     async fn upstream_to_downstream(
         up_recv: &mut RecvStream,
         down_write: &mut OwnedWriteHalf,
+        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = vec![0_u8; 8192];
+        let mut buffer = buffer_pool.alloc(8192);
         let result = up_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             down_write.write_all(&buffer[..len_read]).await?;
