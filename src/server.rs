@@ -181,7 +181,7 @@ impl Server {
 
             let mut downstream_addr = None;
             match tun_type {
-                TunnelType::Forward(i) => {
+                TunnelType::Out(i) => {
                     Self::check_password(server_config.password.as_str(), i.password.as_str())?;
 
                     if downstream_addrs.contains_key(i.remote_downstream_name.as_str()) {
@@ -196,7 +196,7 @@ impl Server {
                         send.write_all(b"downstream_name not found").await?;
                     }
                 }
-                TunnelType::Reverse(i) => {
+                TunnelType::In(i) => {
                     Self::check_password(server_config.password.as_str(), i.password.as_str())?;
                     send.write_all(b"ok").await?;
                 }

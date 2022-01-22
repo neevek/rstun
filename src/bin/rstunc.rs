@@ -1,10 +1,8 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{AppSettings, Parser, Subcommand};
 use log::info;
 use log::{debug, error};
-use rstun::ClientConfig;
-use rstun::LogHelper;
-use rstun::{AccessServer, Client};
+use rstun::*;
 use tokio::time::Duration;
 
 extern crate colored;
@@ -13,9 +11,8 @@ extern crate pretty_env_logger;
 fn main() {
     //raise_fd_limit();
 
-    let args = RstuncArgs::parse();
-
-    LogHelper::init_logger(args.loglevel.as_str());
+    let config = parse_command_line_args();
+    LogHelper::init_logger(config.loglevel.as_ref());
 
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
@@ -27,27 +24,77 @@ fn main() {
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(16)
+        .worker_threads(8)
         .build()
         .unwrap()
         .block_on(async {
-            run(args).await.unwrap();
+            run(config).await.unwrap();
         });
 }
 
-async fn run(args: RstuncArgs) -> Result<()> {
-    let mut config = ClientConfig::default();
+fn parse_command_line_args() -> ClientConfig {
+    let mut config: ClientConfig;
 
-    config.server_addr = args.server_addr;
-    config.local_access_server_addr = args.addr;
-    config.password = args.password;
-    config.remote_downstream_name = args.remote_downstream_name;
-    config.cert_path = args.cert;
-    config.connect_max_retry = 0;
-    config.wait_before_retry_ms = 5 * 1000;
-    config.max_idle_timeout_ms = 5 * 1000;
-    config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
+    let args = Cli::parse();
+    match &args.command {
+        Commands::In {
+            local_access_server_addr,
+            server_addr,
+            cert,
+            loglevel,
+            ..
+        }
+        | Commands::Out {
+            local_access_server_addr,
+            server_addr,
+            cert,
+            loglevel,
+            ..
+        } => {
+            let max_idle_timeout_ms = 5 * 1000;
+            config = ClientConfig {
+                local_access_server_addr: local_access_server_addr.clone(),
+                cert_path: cert.clone(),
+                server_addr: server_addr.clone(),
+                connect_max_retry: 0,
+                wait_before_retry_ms: 5 * 1000,
+                max_idle_timeout_ms,
+                keep_alive_interval_ms: max_idle_timeout_ms / 2,
+                tun_type: None,
+                loglevel: loglevel.clone(),
+            };
+        }
+    }
 
+    match &args.command {
+        Commands::In {
+            password,
+            remote_access_port,
+            allow_public_access,
+            ..
+        } => {
+            config.tun_type = Some(TunnelType::In(InLoginInfo {
+                password: password.clone(),
+                remote_access_port: remote_access_port.clone(),
+                allow_public_access: allow_public_access.clone(),
+            }));
+        }
+        Commands::Out {
+            password,
+            remote_downstream_name,
+            ..
+        } => {
+            config.tun_type = Some(TunnelType::Out(OutLoginInfo {
+                password: password.clone(),
+                remote_downstream_name: remote_downstream_name.clone(),
+            }));
+        }
+    }
+
+    config
+}
+
+async fn run(config: ClientConfig) -> Result<()> {
     let mut access_server = AccessServer::new(config.local_access_server_addr.clone());
     access_server.bind().await?;
     access_server.start().await?;
@@ -88,30 +135,73 @@ async fn run(args: RstuncArgs) -> Result<()> {
 }
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct RstuncArgs {
-    /// Address (ip:port pair) to listen on
-    #[clap(short, long, display_order = 1)]
-    addr: String,
+#[clap(name = "rstunc", author, version, about, long_about = None)]
+struct Cli {
+    #[clap(subcommand)]
+    command: Commands,
+}
 
-    /// Address (ip:port pair) of rstund
-    #[clap(short, long, display_order = 2)]
-    server_addr: String,
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Connect to rstund in [IN] mode, which may expose local network to internet
+    #[clap(setting(AppSettings::ArgRequiredElseHelp))]
+    In {
+        /// ip:port pair of the local downstream server the traffic from remote will be relayed to
+        #[clap(short = 'l', long, display_order = 1)]
+        local_access_server_addr: String,
 
-    /// Name of the remote downstream server the traffic will be relayed to
-    #[clap(short, long, required = true, display_order = 3)]
-    remote_downstream_name: String,
+        /// Address (ip:port pair) of rstund
+        #[clap(short = 'r', long, display_order = 2)]
+        server_addr: String,
 
-    /// Password of the tunnel server
-    #[clap(short, long, required = true, display_order = 4)]
-    password: String,
+        /// Password to connect with rstund
+        #[clap(short = 'p', long, required = true, display_order = 3)]
+        password: String,
 
-    /// Path to the certificate file in DER format
-    #[clap(short, long, required = true, display_order = 5)]
-    cert: String,
+        /// Path to the certificate file in DER format
+        #[clap(short = 'c', long, required = true, display_order = 4)]
+        cert: String,
 
-    #[clap(short, long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
-    loglevel: String,
+        /// Log level
+        #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 5)]
+        loglevel: String,
+
+        /// ip:port pair of the local downstream server the traffic from remote will be relayed to
+        #[clap(short = 'a', long, required = true, display_order = 6)]
+        remote_access_port: u16,
+
+        /// ip:port pair of the local downstream server the traffic from remote will be relayed to
+        #[clap(short = 'A', long, display_order = 8)]
+        allow_public_access: bool,
+    },
+
+    /// Connect to rstund in [OUT] mode, which acts as a local proxy
+    #[clap(setting(AppSettings::ArgRequiredElseHelp))]
+    Out {
+        /// The local access point of the tunnel
+        #[clap(short = 'a', long, required = true, display_order = 7)]
+        local_access_server_addr: String,
+
+        /// Address (ip:port pair) of rstund
+        #[clap(short = 'r', long, display_order = 2)]
+        server_addr: String,
+
+        /// Password to connect with rstund
+        #[clap(short = 'p', long, required = true, display_order = 3)]
+        password: String,
+
+        /// Path to the certificate file in DER format
+        #[clap(short = 'c', long, required = true, display_order = 4)]
+        cert: String,
+
+        /// Log level
+        #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 5)]
+        loglevel: String,
+
+        /// Name of the remote downstream server the traffic will be relayed to
+        #[clap(short = 'd', long, required = true, display_order = 6)]
+        remote_downstream_name: String,
+    },
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

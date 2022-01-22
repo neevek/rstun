@@ -1,13 +1,11 @@
-pub mod server_config;
-pub use server_config::ServerConfig;
-pub mod client_config;
-pub use client_config::ClientConfig;
 mod server;
 pub use server::Server;
 mod client;
 pub use client::Client;
 mod access_server;
 pub use access_server::AccessServer;
+use enum_as_inner::EnumAsInner;
+use std::collections::HashMap;
 
 use colored::Colorize;
 use std::io::Write;
@@ -18,23 +16,55 @@ extern crate pretty_env_logger;
 extern crate serde_derive;
 extern crate bincode;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub(crate) enum TunnelType {
-    Forward(ForwardLoginInfo),
-    Reverse(ReverseLoginInfo),
+#[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq)]
+pub enum TunnelType {
+    In(InLoginInfo),
+    Out(OutLoginInfo),
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub(crate) struct ForwardLoginInfo {
-    password: String,
-    remote_downstream_name: String,
+pub struct OutLoginInfo {
+    pub password: String,
+    pub remote_downstream_name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub(crate) struct ReverseLoginInfo {
-    password: String,
-    remote_upstream_port: u16,
-    allow_public_access: bool,
+pub struct InLoginInfo {
+    pub password: String,
+    pub remote_access_port: u16,
+    pub allow_public_access: bool,
+}
+
+#[derive(Debug)]
+pub struct ClientConfig {
+    pub local_access_server_addr: String,
+    pub cert_path: String,
+    pub server_addr: String,
+    pub connect_max_retry: usize,
+    pub wait_before_retry_ms: u64,
+    pub max_idle_timeout_ms: u64,
+    pub keep_alive_interval_ms: u64,
+    pub tun_type: Option<TunnelType>,
+    pub loglevel: String,
+}
+
+#[derive(Default, Debug)]
+pub struct ServerConfig {
+    pub addr: String,
+    pub password: String,
+    pub cert_path: String,
+    pub key_path: String,
+
+    /// name1=127.0.0.1:8080,name2=192.168.0.101:8899
+    /// traffics to the rstun server will be relayed to servers
+    /// specified by upstreams, each client must specify a target
+    /// server when it connects to the rstun server.
+    pub downstreams: HashMap<String, String>,
+
+    /// 0.0.0.0:3515
+    pub dashboard_server: String,
+    /// user:password
+    pub dashboard_server_credential: String,
 }
 
 pub(crate) enum ReadResult {

@@ -60,25 +60,25 @@ async fn run(args: RstundArgs) -> Result<()> {
 #[clap(author, version, about, long_about = None)]
 struct RstundArgs {
     /// Address (ip:port pair) to listen on
-    #[clap(short, long, display_order = 1)]
+    #[clap(short = 'l', long, display_order = 1)]
     addr: String,
 
     /// Downstream as the receiving end of the tunnel, e.g. -d name1=ip:port
-    #[clap(short, long, required = true, min_values = 1, display_order = 2)]
+    #[clap(short = 'd', long, required = true, min_values = 1, display_order = 2)]
     downstream: Vec<String>,
 
     /// Password of the tunnel server
-    #[clap(short, long, required = true, display_order = 3)]
+    #[clap(short = 'p', long, required = true, display_order = 3)]
     password: String,
 
     /// Path to the certificate file in DER format
-    #[clap(short, long, required = true, display_order = 4)]
+    #[clap(short = 'c', long, required = true, display_order = 4)]
     cert: String,
 
     /// Path to the key file in DER format
-    #[clap(short, long, required = true, display_order = 5)]
+    #[clap(short = 'k', long, required = true, display_order = 5)]
     key: String,
 
-    #[clap(short, long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
+    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
     loglevel: String,
 }

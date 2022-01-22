@@ -1,5 +1,5 @@
+use crate::ClientConfig;
 use crate::ReadResult;
-use crate::{ClientConfig, ForwardLoginInfo, TunnelType};
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 use log::{error, info};
@@ -228,12 +228,8 @@ impl Client {
         send: &mut SendStream,
         recv: &mut RecvStream,
     ) -> Result<()> {
-        let tun_type = TunnelType::Forward(ForwardLoginInfo {
-            password: config.password.clone(),
-            remote_downstream_name: config.remote_downstream_name.clone(),
-        });
-
-        let tun_type = bincode::serialize(&tun_type).unwrap();
+        let tun_type = config.tun_type.as_ref().unwrap();
+        let tun_type = bincode::serialize(tun_type).unwrap();
         send.write_u16(tun_type.len() as u16).await?;
         send.write_all(&tun_type).await?;
 
