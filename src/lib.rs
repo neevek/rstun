@@ -5,7 +5,7 @@ pub use client::Client;
 mod access_server;
 pub use access_server::AccessServer;
 use enum_as_inner::EnumAsInner;
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr};
 
 use colored::Colorize;
 use std::io::Write;
@@ -17,25 +17,24 @@ extern crate serde_derive;
 extern crate bincode;
 
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq)]
-pub enum TunnelType {
-    In(InLoginInfo),
-    Out(OutLoginInfo),
+pub enum TunnelMessage {
+    InLoginRequest(LoginInfo),
+    OutLoginRequest(LoginInfo),
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct OutLoginInfo {
+pub struct LoginInfo {
     pub password: String,
-    pub remote_downstream_name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct InLoginInfo {
-    pub password: String,
-    pub remote_access_port: u16,
-    pub allow_public_access: bool,
+    pub access_server_addr: String, // ip:port tuple
 }
 
 #[derive(Debug)]
+pub enum TunnelType {
+    Out((quinn::NewConnection, SocketAddr)),
+    In((quinn::NewConnection, AccessServer)),
+}
+
+#[derive(Debug, Default)]
 pub struct ClientConfig {
     pub local_access_server_addr: String,
     pub cert_path: String,
@@ -44,7 +43,7 @@ pub struct ClientConfig {
     pub wait_before_retry_ms: u64,
     pub max_idle_timeout_ms: u64,
     pub keep_alive_interval_ms: u64,
-    pub tun_type: Option<TunnelType>,
+    pub login_msg: Option<TunnelMessage>,
     pub loglevel: String,
 }
 

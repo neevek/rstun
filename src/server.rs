@@ -1,4 +1,4 @@
-use crate::{AccessServer, ReadResult, ServerConfig, TunnelType};
+use crate::{AccessServer, ReadResult, ServerConfig, TunnelMessage, TunnelType};
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 use dashmap::DashMap;
@@ -26,7 +26,7 @@ static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
 pub struct Server {
     config: ServerConfig,
     downstream_addrs: DashMap<String, SocketAddr>,
-    access_servers: DashMap<u16, AccessServer>,
+    access_servers: DashMap<String, AccessServer>,
     buffer_pool: BytePool<Vec<u8>>,
 }
 
@@ -95,14 +95,37 @@ impl Server {
             }
         }
 
-        while let Some(conn) = incoming.next().await {
+        while let Some(client_conn) = incoming.next().await {
             let this = self.clone();
             tokio::spawn(async move {
-                if let Ok((conn, addr)) = this.authenticate_connection(conn).await {
-                    this.handle_connection(conn, addr)
-                        .await
-                        .map_err(|e| error!("handle_connection failed: {}", e))
-                        .ok();
+                if let Ok(tun_type) = this.authenticate_connection(client_conn).await {
+                    match tun_type {
+                        TunnelType::Out((client_conn, addr)) => {
+                            info!(
+                                "start tunnel streaming in OUT mode, {} -> {}",
+                                client_conn.connection.remote_address(),
+                                addr
+                            );
+
+                            this.handle_tunnel_out_connection(client_conn, addr)
+                                .await
+                                .map_err(|e| error!("handle_tunnel_out_connection failed: {}", e))
+                                .ok();
+                        }
+
+                        TunnelType::In((client_conn, access_server)) => {
+                            info!(
+                                "start tunnel streaming in IN mode, {} -> {}",
+                                access_server.addr(),
+                                client_conn.connection.remote_address(),
+                            );
+
+                            this.handle_tunnel_in_connection(client_conn, access_server)
+                                .await
+                                .map_err(|e| error!("handle_tunnel_in_connection failed: {}", e))
+                                .ok();
+                        }
+                    }
                 }
             });
         }
@@ -115,17 +138,17 @@ impl Server {
     async fn authenticate_connection(
         self: &Arc<Self>,
         connnecing: quinn::Connecting,
-    ) -> Result<(quinn::NewConnection, SocketAddr)> {
-        let mut conn = connnecing.await?;
+    ) -> Result<TunnelType> {
+        let mut client_conn = connnecing.await?;
 
-        let remote_addr = &conn.connection.remote_address();
+        let remote_addr = &client_conn.connection.remote_address();
 
         info!(
             "received connection, authenticating... addr:{ }",
             remote_addr
         );
 
-        let mut stream = conn.bi_streams.next().await;
+        let mut stream = client_conn.bi_streams.next().await;
         if stream.is_none() {
             bail!("login request not received in time, addr: {}", remote_addr)
         }
@@ -142,78 +165,59 @@ impl Server {
                 .await
                 .context("read login_info failed")?;
 
-            let tun_type = bincode::deserialize::<TunnelType>(&login_info)?;
+            let tun_msg = bincode::deserialize::<TunnelMessage>(&login_info)?;
 
-            let mut downstream_addr = None;
-            match tun_type {
-                TunnelType::Out(i) => {
+            let tunnel_type;
+            match tun_msg {
+                TunnelMessage::OutLoginRequest(i) => {
                     Self::check_password(self.config.password.as_str(), i.password.as_str())?;
-
-                    if !self
-                        .downstream_addrs
-                        .contains_key(i.remote_downstream_name.as_str())
-                    {
-                        send.write_all(b"downstream_name not found").await?;
-                        bail!("downstream_name not found");
-                    }
-
-                    downstream_addr = Some(
-                        *self
-                            .downstream_addrs
-                            .get(i.remote_downstream_name.as_str())
-                            .unwrap()
-                            .value(),
-                    );
+                    let downstream_addr = i.access_server_addr.parse().with_context(|| {
+                        format!("invalid access server address: {}", i.access_server_addr)
+                    })?;
                     send.write_all(b"ok").await?;
+                    tunnel_type = TunnelType::Out((client_conn, downstream_addr));
                 }
 
-                TunnelType::In(i) => {
+                TunnelMessage::InLoginRequest(i) => {
                     Self::check_password(self.config.password.as_str(), i.password.as_str())?;
-                    if self.access_servers.contains_key(&i.remote_access_port) {
-                        send.write_all(b"remote access port is in use").await?;
-                        error!("remote access port is in use");
-                        bail!("remote access port is in use");
+                    if self.access_servers.contains_key(&i.access_server_addr) {
+                        Self::send_msg_and_bail(&mut send, "remote access port is in use").await?;
                     }
 
-                    let addr = if i.allow_public_access {
-                        format!("0.0.0.0:{}", i.remote_access_port)
-                    } else {
-                        format!("127.0.0.1:{}", i.remote_access_port)
-                    };
-
-                    let mut access_server = AccessServer::new(addr);
+                    let mut access_server = AccessServer::new(i.access_server_addr);
                     if access_server.bind().await.is_err() {
-                        send.write_all(b"access server failed to bind").await?;
-                        error!("access server failed to bind");
-                        bail!("access server failed to bind");
+                        Self::send_msg_and_bail(&mut send, "access server failed to bind").await?;
                     }
                     if access_server.start().await.is_err() {
-                        send.write_all(b"access server failed to start").await?;
-                        error!("access server failed to start");
-                        bail!("access server failed to start");
+                        Self::send_msg_and_bail(&mut send, "access server failed to start").await?;
                     }
                     send.write_all(b"ok").await?;
+                    tunnel_type = TunnelType::In((client_conn, access_server));
                 }
             }
 
             info!("connection authenticated! addr: {}", remote_addr);
 
-            return Ok((conn, downstream_addr.unwrap()));
+            return Ok(tunnel_type);
         }
 
         bail!("failed to authenticate connection({})", remote_addr)
     }
 
-    async fn handle_connection(
+    async fn send_msg_and_bail(send: &mut quinn::SendStream, msg: &'static str) -> Result<()> {
+        send.write_all(msg.as_bytes()).await?;
+        error!("{}", msg);
+        bail!(msg);
+    }
+
+    async fn handle_tunnel_out_connection(
         self: &Arc<Self>,
-        mut conn: quinn::NewConnection,
+        mut client_conn: quinn::NewConnection,
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        let remote_addr = &conn.connection.remote_address();
+        let remote_addr = &client_conn.connection.remote_address();
 
-        info!("enter tunnel streaming mode, addr: {}", remote_addr);
-
-        while let Some(stream) = conn.bi_streams.next().await {
+        while let Some(stream) = client_conn.bi_streams.next().await {
             match stream {
                 Err(quinn::ConnectionError::TimedOut { .. }) => {
                     info!("connection timeout, addr: {}", remote_addr);
@@ -230,13 +234,27 @@ impl Server {
                         e
                     );
                 }
-                Ok(s) => {
+                Ok((send, recv)) => {
                     let this = self.clone();
                     tokio::spawn(async move {
-                        this.handle_stream(s, downstream_addr)
-                            .map_err(|e| debug!("stream ended, err: {}", e))
-                            .await
-                            .ok();
+                        match TcpStream::connect(&downstream_addr).await {
+                            Ok(peer_stream) => {
+                                info!(
+                                    "[Out] open stream for conn, {} -> {}",
+                                    send.id().index(),
+                                    downstream_addr,
+                                );
+
+                                this.handle_stream((send, recv), peer_stream)
+                                    .map_err(|e| debug!("stream ended, err: {}", e))
+                                    .await
+                                    .ok();
+                            }
+
+                            Err(e) => {
+                                error!("failed to connect to {}, err: {}", downstream_addr, e);
+                            }
+                        }
                     })
                 }
             };
@@ -245,19 +263,43 @@ impl Server {
         Ok(())
     }
 
+    async fn handle_tunnel_in_connection(
+        self: &Arc<Self>,
+        client_conn: quinn::NewConnection,
+        mut access_server: AccessServer,
+    ) -> Result<()> {
+        let client_conn = client_conn.connection;
+
+        while let Some(access_conn) = access_server.tcp_receiver().recv().await {
+            match client_conn.open_bi().await {
+                Ok((send, recv)) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        info!(
+                            "[In] open stream for conn, {} -> {}",
+                            send.id().index(),
+                            access_conn.local_addr().unwrap()
+                        );
+                        this.handle_stream((send, recv), access_conn).await
+                    });
+                }
+
+                Err(e) => {
+                    error!("failed to open_bi on client connection: {}", e);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn handle_stream(
         self: &Arc<Self>,
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
-        downstream_addr: SocketAddr,
+        peer_stream: TcpStream,
     ) -> Result<()> {
-        let downstream_conn = TcpStream::connect(&downstream_addr).await?;
-        let (mut down_read, mut down_write) = downstream_conn.into_split();
-
-        info!(
-            "open stream for remote conn, {} -> {}",
-            send.id().index(),
-            down_read.local_addr().unwrap(),
-        );
+        let (mut down_read, mut down_write) = peer_stream.into_split();
 
         let this = self.clone();
         tokio::spawn(async move {

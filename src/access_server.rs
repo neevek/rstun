@@ -78,6 +78,10 @@ impl AccessServer {
         self.running
     }
 
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
     pub fn tcp_receiver(&mut self) -> &mut Receiver<TcpStream> {
         &mut self.tcp_receiver
     }

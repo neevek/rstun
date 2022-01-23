@@ -192,10 +192,10 @@ impl Client {
         send: &mut SendStream,
         recv: &mut RecvStream,
     ) -> Result<()> {
-        let tun_type = config.tun_type.as_ref().unwrap();
-        let tun_type = bincode::serialize(tun_type).unwrap();
-        send.write_u16(tun_type.len() as u16).await?;
-        send.write_all(&tun_type).await?;
+        let login_msg = config.login_msg.as_ref().unwrap();
+        let login_msg = bincode::serialize(login_msg).unwrap();
+        send.write_u16(login_msg.len() as u16).await?;
+        send.write_all(&login_msg).await?;
 
         let mut resp = [0_u8; 2];
         recv.read(&mut resp)

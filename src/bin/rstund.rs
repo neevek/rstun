@@ -40,8 +40,7 @@ async fn run(args: RstundArgs) -> Result<()> {
     let mut downstreams = HashMap::new();
 
     for d in args.downstream.iter() {
-        let split = d.split("=");
-        let pair: Vec<&str> = split.collect();
+        let pair: Vec<&str> = d.split("=").collect();
         if pair.len() != 2 {
             bail!("invalid downstream: {}", d);
         }
