@@ -22,9 +22,12 @@ fn main() {
     )
     .unwrap();
 
+    let worker_threads = num_cpus::get() + 1;
+    info!("will use {} worker threads", worker_threads);
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(8)
+        .worker_threads(worker_threads)
         .build()
         .unwrap()
         .block_on(async {
@@ -60,8 +63,8 @@ fn parse_command_line_args() -> ClientConfig {
                 wait_before_retry_ms: 5 * 1000,
                 max_idle_timeout_ms,
                 keep_alive_interval_ms: max_idle_timeout_ms / 2,
-                tun_type: None,
                 loglevel: loglevel.clone(),
+                tun_type: None,
             };
         }
     }

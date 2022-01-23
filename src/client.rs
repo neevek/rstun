@@ -69,42 +69,6 @@ impl Client {
 
         let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
 
-        //let udp_socket = std::net::UdpSocket::bind(&local_addr)?;
-        //unsafe {
-        //let optval: libc::c_int = 1024 * 1024 * 3;
-        //let ret = libc::setsockopt(
-        //udp_socket.as_raw_fd(),
-        //libc::SOL_SOCKET,
-        //libc::SO_SNDBUF,
-        //&optval as *const _ as *const libc::c_void,
-        //std::mem::size_of_val(&optval) as libc::socklen_t,
-        //);
-        //if ret != 0 {
-        //error!(
-        //"failed to set SO_SNDBUF, err: {}",
-        //std::io::Error::last_os_error()
-        //);
-        //}
-
-        //let optval: libc::c_int = 1024 * 1024 * 3;
-        //let ret = libc::setsockopt(
-        //udp_socket.as_raw_fd(),
-        //libc::SOL_SOCKET,
-        //libc::SO_RCVBUF,
-        //&optval as *const _ as *const libc::c_void,
-        //std::mem::size_of_val(&optval) as libc::socklen_t,
-        //);
-        //if ret != 0 {
-        //error!(
-        //"failed to set SO_RCVBUF, err: {}",
-        //std::io::Error::last_os_error()
-        //);
-        //}
-        //}
-
-        //let (endpoint, _) = endpoint_builder.bind(&local_addr)?;
-        //let (endpoint, _) = endpoint_builder.with_socket(udp_socket)?;
-
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
         endpoint.set_default_client_config(cfg);
         info!(

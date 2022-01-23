@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use clap::Parser;
+use log::info;
 use rstun::LogHelper;
 use rstun::Server;
 use rstun::ServerConfig;
@@ -22,9 +23,12 @@ fn main() {
     )
     .unwrap();
 
+    let worker_threads = num_cpus::get() + 1;
+    info!("will use {} worker threads", worker_threads);
+
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(16)
+        .worker_threads(worker_threads)
         .build()
         .unwrap()
         .block_on(async {
@@ -51,7 +55,7 @@ async fn run(args: RstundArgs) -> Result<()> {
     config.key_path = args.key;
     config.downstreams = downstreams;
 
-    let mut server = Server::new(config);
+    let server = Server::new(config);
     server.start().await?;
     Ok(())
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
+#[derive(Debug)]
 pub struct AccessServer {
     addr: String,
     tcp_listener: Option<Arc<TcpListener>>,

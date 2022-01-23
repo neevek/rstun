@@ -1,4 +1,4 @@
-use crate::{ReadResult, ServerConfig, TunnelType};
+use crate::{AccessServer, ReadResult, ServerConfig, TunnelType};
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 use dashmap::DashMap;
@@ -15,7 +15,6 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
-type BufferPool = Arc<BytePool<Vec<u8>>>;
 const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -25,19 +24,23 @@ static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
 
 #[derive(Debug)]
 pub struct Server {
-    pub config: Arc<ServerConfig>,
-    buffer_pool: BufferPool,
+    config: ServerConfig,
+    downstream_addrs: DashMap<String, SocketAddr>,
+    access_servers: DashMap<u16, AccessServer>,
+    buffer_pool: BytePool<Vec<u8>>,
 }
 
 impl Server {
-    pub fn new(config: ServerConfig) -> Self {
-        Server {
-            config: Arc::new(config),
-            buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
-        }
+    pub fn new(config: ServerConfig) -> Arc<Self> {
+        Arc::new(Server {
+            config,
+            downstream_addrs: DashMap::new(),
+            access_servers: DashMap::new(),
+            buffer_pool: BytePool::<Vec<u8>>::new(),
+        })
     }
 
-    pub async fn start(&mut self) -> Result<()> {
+    pub async fn start(self: &Arc<Self>) -> Result<()> {
         let config = &self.config;
         let (cert, key) =
             match Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str()) {
@@ -82,58 +85,21 @@ impl Server {
 
         let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
 
-        //unsafe {
-        //let optval: libc::c_int = 1024 * 1024 * 3;
-        //let ret = libc::setsockopt(
-        //udp_socket.as_raw_fd(),
-        //libc::SOL_SOCKET,
-        //libc::SO_SNDBUF,
-        //&optval as *const _ as *const libc::c_void,
-        //std::mem::size_of_val(&optval) as libc::socklen_t,
-        //);
-        //if ret != 0 {
-        //error!(
-        //"failed to set SO_SNDBUF, err: {}",
-        //std::io::Error::last_os_error()
-        //);
-        //}
-
-        //let optval: libc::c_int = 1024 * 1024 * 3;
-        //let ret = libc::setsockopt(
-        //udp_socket.as_raw_fd(),
-        //libc::SOL_SOCKET,
-        //libc::SO_RCVBUF,
-        //&optval as *const _ as *const libc::c_void,
-        //std::mem::size_of_val(&optval) as libc::socklen_t,
-        //);
-        //if ret != 0 {
-        //error!(
-        //"failed to set SO_RCVBUF, err: {}",
-        //std::io::Error::last_os_error()
-        //);
-        //}
-        //}
-
         info!("server is bound to: {}", endpoint.local_addr()?);
 
-        let downstream_addrs: Arc<DashMap<String, SocketAddr>> = Arc::new(DashMap::new());
         for (name, str_addr) in &self.config.downstreams {
             if let Ok(addr) = str_addr.parse() {
-                downstream_addrs.insert(name.clone(), addr);
+                self.downstream_addrs.insert(name.clone(), addr);
             } else {
                 warn!("failed to parse downstream address: {}", str_addr);
             }
         }
 
         while let Some(conn) = incoming.next().await {
-            let server_config = self.config.clone();
-            let downstream_addrs = downstream_addrs.clone();
-            let buffer_pool = self.buffer_pool.clone();
+            let this = self.clone();
             tokio::spawn(async move {
-                if let Ok((conn, addr)) =
-                    Self::authenticate_connection(conn, server_config, downstream_addrs).await
-                {
-                    Self::handle_connection(conn, addr, buffer_pool)
+                if let Ok((conn, addr)) = this.authenticate_connection(conn).await {
+                    this.handle_connection(conn, addr)
                         .await
                         .map_err(|e| error!("handle_connection failed: {}", e))
                         .ok();
@@ -147,9 +113,8 @@ impl Server {
     }
 
     async fn authenticate_connection(
+        self: &Arc<Self>,
         connnecing: quinn::Connecting,
-        server_config: Arc<ServerConfig>,
-        downstream_addrs: Arc<DashMap<String, SocketAddr>>,
     ) -> Result<(quinn::NewConnection, SocketAddr)> {
         let mut conn = connnecing.await?;
 
@@ -182,28 +147,53 @@ impl Server {
             let mut downstream_addr = None;
             match tun_type {
                 TunnelType::Out(i) => {
-                    Self::check_password(server_config.password.as_str(), i.password.as_str())?;
+                    Self::check_password(self.config.password.as_str(), i.password.as_str())?;
 
-                    if downstream_addrs.contains_key(i.remote_downstream_name.as_str()) {
-                        downstream_addr = Some(
-                            *downstream_addrs
-                                .get(i.remote_downstream_name.as_str())
-                                .unwrap()
-                                .value(),
-                        );
-                        send.write_all(b"ok").await?;
-                    } else {
+                    if !self
+                        .downstream_addrs
+                        .contains_key(i.remote_downstream_name.as_str())
+                    {
                         send.write_all(b"downstream_name not found").await?;
+                        bail!("downstream_name not found");
                     }
-                }
-                TunnelType::In(i) => {
-                    Self::check_password(server_config.password.as_str(), i.password.as_str())?;
+
+                    downstream_addr = Some(
+                        *self
+                            .downstream_addrs
+                            .get(i.remote_downstream_name.as_str())
+                            .unwrap()
+                            .value(),
+                    );
                     send.write_all(b"ok").await?;
                 }
-            }
 
-            if downstream_addr.is_none() {
-                bail!("downstream_name not found");
+                TunnelType::In(i) => {
+                    Self::check_password(self.config.password.as_str(), i.password.as_str())?;
+                    if self.access_servers.contains_key(&i.remote_access_port) {
+                        send.write_all(b"remote access port is in use").await?;
+                        error!("remote access port is in use");
+                        bail!("remote access port is in use");
+                    }
+
+                    let addr = if i.allow_public_access {
+                        format!("0.0.0.0:{}", i.remote_access_port)
+                    } else {
+                        format!("127.0.0.1:{}", i.remote_access_port)
+                    };
+
+                    let mut access_server = AccessServer::new(addr);
+                    if access_server.bind().await.is_err() {
+                        send.write_all(b"access server failed to bind").await?;
+                        error!("access server failed to bind");
+                        bail!("access server failed to bind");
+                    }
+                    if access_server.start().await.is_err() {
+                        send.write_all(b"access server failed to start").await?;
+                        error!("access server failed to start");
+                        bail!("access server failed to start");
+                    }
+                    send.write_all(b"ok").await?;
+                }
             }
 
             info!("connection authenticated! addr: {}", remote_addr);
@@ -215,9 +205,9 @@ impl Server {
     }
 
     async fn handle_connection(
+        self: &Arc<Self>,
         mut conn: quinn::NewConnection,
         downstream_addr: SocketAddr,
-        buffer_pool: BufferPool,
     ) -> Result<()> {
         let remote_addr = &conn.connection.remote_address();
 
@@ -240,10 +230,15 @@ impl Server {
                         e
                     );
                 }
-                Ok(s) => tokio::spawn(
-                    Self::handle_stream(s, downstream_addr, buffer_pool.clone())
-                        .map_err(|e| debug!("stream ended, err: {}", e)),
-                ),
+                Ok(s) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.handle_stream(s, downstream_addr)
+                            .map_err(|e| debug!("stream ended, err: {}", e))
+                            .await
+                            .ok();
+                    })
+                }
             };
         }
 
@@ -251,9 +246,9 @@ impl Server {
     }
 
     async fn handle_stream(
+        self: &Arc<Self>,
         (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
         downstream_addr: SocketAddr,
-        buffer_pool: BufferPool,
     ) -> Result<()> {
         let downstream_conn = TcpStream::connect(&downstream_addr).await?;
         let (mut down_read, mut down_write) = downstream_conn.into_split();
@@ -264,43 +259,37 @@ impl Server {
             down_read.local_addr().unwrap(),
         );
 
-        let bp_clone = buffer_pool.clone();
+        let this = self.clone();
         tokio::spawn(async move {
             loop {
-                let result =
-                    Self::upstream_to_downstream(&mut recv, &mut down_write, &bp_clone).await;
-                if let Ok(ReadResult::EOF) | Err(_) = result {
-                    break;
-                }
-            }
-        });
-        tokio::spawn(async move {
-            loop {
-                let result =
-                    Self::downstream_to_upstream(&mut down_read, &mut send, &buffer_pool).await;
+                let result = this
+                    .upstream_to_downstream(&mut recv, &mut down_write)
+                    .await;
                 if let Ok(ReadResult::EOF) | Err(_) = result {
                     break;
                 }
             }
         });
 
-        Ok(())
-    }
+        let this = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let result = this.downstream_to_upstream(&mut down_read, &mut send).await;
+                if let Ok(ReadResult::EOF) | Err(_) = result {
+                    break;
+                }
+            }
+        });
 
-    fn check_password(password1: &str, password2: &str) -> Result<()> {
-        if password1 != password2 {
-            warn!("passwords don't match!");
-            bail!("passwords don't match!");
-        }
         Ok(())
     }
 
     async fn downstream_to_upstream(
+        self: &Arc<Self>,
         down_read: &mut OwnedReadHalf,
         up_send: &mut SendStream,
-        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = buffer_pool.alloc(8192);
+        let mut buffer = self.buffer_pool.alloc(8192);
         let len_read = down_read.read(&mut buffer[..]).await?;
 
         if len_read > 0 {
@@ -313,11 +302,11 @@ impl Server {
     }
 
     async fn upstream_to_downstream(
+        self: &Arc<Self>,
         up_recv: &mut RecvStream,
         down_write: &mut OwnedWriteHalf,
-        buffer_pool: &BufferPool,
     ) -> Result<ReadResult> {
-        let mut buffer = buffer_pool.alloc(8192);
+        let mut buffer = self.buffer_pool.alloc(8192);
         let result = up_recv.read(&mut buffer[..]).await?;
         if let Some(len_read) = result {
             down_write.write_all(&buffer[..len_read]).await?;
@@ -334,5 +323,13 @@ impl Server {
         let key = PrivateKey(key.into());
 
         Ok((cert, key))
+    }
+
+    fn check_password(password1: &str, password2: &str) -> Result<()> {
+        if password1 != password2 {
+            warn!("passwords don't match!");
+            bail!("passwords don't match!");
+        }
+        Ok(())
     }
 }

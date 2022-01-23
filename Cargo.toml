@@ -31,3 +31,4 @@ libc = "0.2.106"
 clap = { version = "3.0.7", features = ["derive"] }
 byte-pool = "0.2.3"
 enum-as-inner = "0.3.3"
+num_cpus = "1.13.1"
