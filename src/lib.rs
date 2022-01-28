@@ -1,42 +1,44 @@
 mod server;
+use quinn::{RecvStream, SendStream};
 pub use server::Server;
 mod client;
 pub use client::Client;
+mod tunnel_message;
+pub use tunnel_message::{LoginInfo, TunnelMessage};
 mod access_server;
+mod tunnel;
+pub use tunnel::Tunnel;
+mod util;
 pub use access_server::AccessServer;
-use enum_as_inner::EnumAsInner;
-use std::{collections::HashMap, net::SocketAddr};
-
+use byte_pool::BytePool;
 use colored::Colorize;
 use std::io::Write;
-extern crate colored;
-extern crate pretty_env_logger;
+use std::net::SocketAddr;
+use std::sync::Arc;
 
 #[macro_use]
 extern crate serde_derive;
 extern crate bincode;
+extern crate colored;
+extern crate pretty_env_logger;
 
-#[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq)]
-pub enum TunnelMessage {
-    InLoginRequest(LoginInfo),
-    OutLoginRequest(LoginInfo),
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub struct LoginInfo {
-    pub password: String,
-    pub access_server_addr: String, // ip:port tuple
-}
+type BufferPool = Arc<BytePool<Vec<u8>>>;
 
 #[derive(Debug)]
 pub enum TunnelType {
     Out((quinn::NewConnection, SocketAddr)),
-    In((quinn::NewConnection, AccessServer)),
+    In((quinn::NewConnection, AccessServer, ControlStream)),
+}
+
+#[derive(Debug)]
+pub struct ControlStream {
+    pub quic_send: SendStream,
+    pub quic_recv: RecvStream,
 }
 
 #[derive(Debug, Default)]
 pub struct ClientConfig {
-    pub local_access_server_addr: String,
+    pub local_access_server_addr: Option<SocketAddr>,
     pub cert_path: String,
     pub server_addr: String,
     pub connect_max_retry: usize,
@@ -45,6 +47,7 @@ pub struct ClientConfig {
     pub keep_alive_interval_ms: u64,
     pub login_msg: Option<TunnelMessage>,
     pub loglevel: String,
+    pub mode: &'static str,
 }
 
 #[derive(Default, Debug)]
@@ -54,11 +57,10 @@ pub struct ServerConfig {
     pub cert_path: String,
     pub key_path: String,
 
-    /// name1=127.0.0.1:8080,name2=192.168.0.101:8899
     /// traffics to the rstun server will be relayed to servers
-    /// specified by upstreams, each client must specify a target
-    /// server when it connects to the rstun server.
-    pub downstreams: HashMap<String, String>,
+    /// specified by downstreams, client must specify a target
+    /// downstream when it connects to the rstun server in OUT mode.
+    pub downstreams: Vec<SocketAddr>,
 
     /// 0.0.0.0:3515
     pub dashboard_server: String,

@@ -1,20 +1,19 @@
-use crate::ClientConfig;
-use crate::ReadResult;
+use crate::{ClientConfig, ControlStream, Tunnel, TunnelMessage};
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
-use log::{error, info};
+use futures_util::StreamExt;
+use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
-use rustls::client::ServerCertVerified;
-use rustls::client::ServerName;
+use rustls::client::{ServerCertVerified, ServerName};
 use rustls::Certificate;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::SystemTime;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
 extern crate libc;
@@ -23,9 +22,11 @@ const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 type BufferPool = Arc<BytePool<Vec<u8>>>;
 
 pub struct Client {
-    config: ClientConfig,
-    remote_conn: Option<quinn::Connection>,
+    pub config: ClientConfig,
+    remote_conn: Option<quinn::NewConnection>,
+    ctrl_stream: Option<ControlStream>,
     buffer_pool: BufferPool,
+    is_terminated: Arc<Mutex<bool>>,
 }
 
 impl Client {
@@ -33,7 +34,9 @@ impl Client {
         Client {
             config,
             remote_conn: None,
+            ctrl_stream: None,
             buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
+            is_terminated: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -77,10 +80,12 @@ impl Client {
             endpoint.local_addr().unwrap()
         );
 
-        let quinn::NewConnection { connection, .. } =
-            endpoint.connect(remote_addr, "localhost")?.await?;
+        let connection = endpoint.connect(remote_addr, "localhost")?.await?;
 
-        let (mut send, mut recv) = connection
+        info!("connected");
+
+        let (mut quic_send, mut quic_recv) = connection
+            .connection
             .open_bi()
             .await
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
@@ -88,28 +93,46 @@ impl Client {
 
         info!("logging in... server: {}", remote_addr);
 
-        Self::send_login_info(&self.config, &mut send, &mut recv).await?;
+        Self::login(&self.config, &mut quic_send, &mut quic_recv).await?;
 
         info!("logged in! server: {}", remote_addr);
 
         self.remote_conn = Some(connection);
+        self.ctrl_stream = Some(ControlStream {
+            quic_send,
+            quic_recv,
+        });
         Ok(())
     }
 
-    pub async fn serve(&mut self, local_conn_receiver: &mut Receiver<TcpStream>) -> Result<()> {
+    pub async fn serve_outgoing(
+        &mut self,
+        mut local_conn_receiver: Receiver<Option<TcpStream>>,
+    ) -> Result<()> {
         info!("start serving...");
 
-        let remote_conn = &self.remote_conn.as_ref().unwrap();
-        // accept local connections and build a tunnel to remote for accepted connections
-        while let Some(local_conn) = local_conn_receiver.recv().await {
-            match remote_conn.open_bi().await {
-                Ok((remote_send, remote_recv)) => {
-                    tokio::spawn(Self::handle_stream(
-                        local_conn,
-                        remote_send,
-                        remote_recv,
-                        self.buffer_pool.clone(),
-                    ));
+        let remote_conn = self.remote_conn.as_ref().unwrap();
+
+        // accept local connections and build a tunnel to remote
+        while let Some(tcp_stream) = local_conn_receiver.recv().await {
+            if let None = tcp_stream {
+                continue;
+            }
+            let tcp_stream = tcp_stream.unwrap();
+
+            match remote_conn.connection.open_bi().await {
+                Ok(quic_stream) => {
+                    debug!(
+                        "[OUT] open stream for conn, {} -> {}",
+                        quic_stream.0.id().index(),
+                        remote_conn.connection.remote_address(),
+                    );
+
+                    let tcp_stream = tcp_stream.into_split();
+                    Tunnel::new(self.buffer_pool.clone())
+                        .start(tcp_stream, quic_stream)
+                        .await
+                        .ok();
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
@@ -122,97 +145,74 @@ impl Client {
         Ok(())
     }
 
-    async fn handle_stream(
-        local_conn: TcpStream,
-        mut remote_send: SendStream,
-        mut remote_recv: RecvStream,
-        buffer_pool: BufferPool,
-    ) -> Result<()> {
-        let (mut local_read, mut local_write) = local_conn.into_split();
-        info!(
-            "open stream for local conn, {} -> {}",
-            remote_send.id().index(),
-            local_read.peer_addr().unwrap(),
-        );
-        let bp_clone = buffer_pool.clone();
-        tokio::spawn(async move {
-            loop {
-                let result =
-                    Self::local_to_remote(&mut local_read, &mut remote_send, &bp_clone).await;
-                if let Ok(ReadResult::EOF) | Err(_) = result {
-                    break;
+    pub async fn serve_incoming(&mut self) -> Result<()> {
+        info!("start serving...");
+
+        self.observe_terminate_signals().await?;
+
+        let remote_conn = self.remote_conn.as_mut().unwrap();
+        while let Some(quic_stream) = remote_conn.bi_streams.next().await {
+            let quic_stream = quic_stream?;
+            match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
+                Ok(tcp_stream) => {
+                    let tcp_stream = tcp_stream.into_split();
+                    Tunnel::new(self.buffer_pool.clone())
+                        .start(tcp_stream, quic_stream)
+                        .await
+                        .ok();
+                }
+                _ => {
+                    error!("failed to connect to access server");
                 }
             }
-        });
-        tokio::spawn(async move {
-            loop {
-                let result =
-                    Self::remote_to_local(&mut remote_recv, &mut local_write, &buffer_pool).await;
-                if let Ok(ReadResult::EOF) | Err(_) = result {
-                    break;
-                }
-            }
-        });
+        }
+
+        info!("quit!");
         Ok(())
     }
 
-    async fn local_to_remote(
-        local_read: &mut OwnedReadHalf,
-        remote_send: &mut SendStream,
-        buffer_pool: &BufferPool,
-    ) -> Result<ReadResult> {
-        let mut buffer = buffer_pool.alloc(8192);
-        let len_read = local_read.read(&mut buffer[..]).await?;
-        if len_read > 0 {
-            remote_send.write_all(&buffer[..len_read]).await?;
-            Ok(ReadResult::Succeeded)
-        } else {
-            remote_send.finish().await?;
-            Ok(ReadResult::EOF)
-        }
+    pub async fn observe_terminate_signals(&mut self) -> Result<()> {
+        let mut quic_send = self.ctrl_stream.take().unwrap().quic_send;
+
+        let is_terminated_flag = self.is_terminated.clone();
+
+        tokio::spawn(async move {
+            let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
+            let mut terminate = signal(SignalKind::terminate()).unwrap();
+            tokio::select! {
+                _ = ctrlc.recv() => info!("received SIGINT"),
+                _ = terminate.recv() => info!("received SIGTERM"),
+            }
+            *is_terminated_flag.lock().unwrap() = true;
+
+            info!("client quit!");
+
+            TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
+                .await
+                .ok();
+
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            std::process::exit(0);
+        });
+
+        Ok(())
     }
 
-    async fn remote_to_local(
-        remote_recv: &mut RecvStream,
-        local_write: &mut OwnedWriteHalf,
-        buffer_pool: &BufferPool,
-    ) -> Result<ReadResult> {
-        let mut buffer = buffer_pool.alloc(8192);
-        let result = remote_recv.read(&mut buffer[..]).await?;
-        if let Some(len_read) = result {
-            local_write.write_all(&buffer[..len_read]).await?;
-            Ok(ReadResult::Succeeded)
-        } else {
-            Ok(ReadResult::EOF)
-        }
+    pub fn should_retry(&mut self) -> bool {
+        return !*self.is_terminated.lock().unwrap();
     }
 
-    async fn send_login_info(
+    async fn login(
         config: &ClientConfig,
-        send: &mut SendStream,
-        recv: &mut RecvStream,
+        quic_send: &mut SendStream,
+        quic_recv: &mut RecvStream,
     ) -> Result<()> {
-        let login_msg = config.login_msg.as_ref().unwrap();
-        let login_msg = bincode::serialize(login_msg).unwrap();
-        send.write_u16(login_msg.len() as u16).await?;
-        send.write_all(&login_msg).await?;
-
-        let mut resp = [0_u8; 2];
-        recv.read(&mut resp)
-            .await
-            .context("read login response failed")?;
-
-        if resp[0] != b'o' && resp[1] != b'k' {
-            let mut err_buf = vec![0_u8; 128];
-            recv.read_to_end(&mut err_buf).await?;
-            bail!(
-                "failed to login, err: {}{}{}",
-                resp[0] as char,
-                resp[1] as char,
-                String::from_utf8_lossy(&err_buf)
-            );
+        TunnelMessage::send(quic_send, config.login_msg.as_ref().unwrap()).await?;
+        let resp = TunnelMessage::recv(quic_recv).await?;
+        if resp.as_resp_success().is_none() {
+            bail!("failed to login");
         }
-
+        TunnelMessage::handle_message(&resp)?;
         Ok(())
     }
 

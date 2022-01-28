@@ -53,8 +53,10 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
     let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
 
     for addr in &mut addrs {
-        if addr.find(':').is_none() {
+        if !addr.contains(":") {
             *addr = format!("127.0.0.1:{}", addr);
+        } else if addr.starts_with("0.0.0.0:") {
+            *addr = addr.replace("0.0.0.0:", "127.0.0.1:");
         }
     }
 
@@ -65,29 +67,41 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
     config.wait_before_retry_ms = 5 * 1000;
     config.max_idle_timeout_ms = 5 * 1000;
     config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
+    config.mode = if args.mode == MODE_IN {
+        MODE_IN
+    } else {
+        MODE_OUT
+    };
 
+    let local_access_server_addr;
     config.login_msg = if args.mode == MODE_IN {
-        config.local_access_server_addr = addrs[1].to_string();
-        Some(TunnelMessage::InLoginRequest(LoginInfo {
+        local_access_server_addr = addrs[1].to_string();
+        Some(TunnelMessage::ReqInLogin(LoginInfo {
             password: args.password,
             access_server_addr: addrs[0].to_string(),
         }))
     } else {
-        config.local_access_server_addr = addrs[1].to_string();
-        Some(TunnelMessage::OutLoginRequest(LoginInfo {
+        local_access_server_addr = addrs[0].to_string();
+        Some(TunnelMessage::ReqOutLogin(LoginInfo {
             password: args.password,
-            access_server_addr: addrs[0].to_string(),
+            access_server_addr: addrs[1].to_string(),
         }))
     };
+
+    config.local_access_server_addr = Some(
+        local_access_server_addr.parse().expect(
+            format!(
+                "invalid local_access_server_addr: {}",
+                local_access_server_addr
+            )
+            .as_str(),
+        ),
+    );
 
     true
 }
 
 async fn run(config: ClientConfig) -> Result<()> {
-    let mut access_server = AccessServer::new(config.local_access_server_addr.clone());
-    access_server.bind().await?;
-    access_server.start().await?;
-
     let mut connect_retry_count = 0;
     let connect_max_retry = config.connect_max_retry;
     let wait_before_retry_ms = config.wait_before_retry_ms;
@@ -97,8 +111,21 @@ async fn run(config: ClientConfig) -> Result<()> {
         match client.connect().await {
             Ok(_) => {
                 connect_retry_count = 0;
-                client.serve(access_server.tcp_receiver()).await.unwrap();
+                if client.config.mode == MODE_OUT {
+                    let mut access_server =
+                        AccessServer::new(client.config.local_access_server_addr.unwrap());
+                    access_server.bind().await?;
+                    access_server.start().await?;
+
+                    client
+                        .serve_outgoing(access_server.take_tcp_receiver())
+                        .await
+                        .ok();
+                } else {
+                    client.serve_incoming().await.ok();
+                }
             }
+
             Err(e) => {
                 error!("connect failed, err: {}", e);
                 if connect_max_retry > 0 {
@@ -118,6 +145,11 @@ async fn run(config: ClientConfig) -> Result<()> {
                 );
                 tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
             }
+        }
+
+        if !client.should_retry() {
+            info!("client quit");
+            break;
         }
     }
     Ok(())
@@ -142,12 +174,12 @@ struct RstuncArgs {
     #[clap(short = 'c', long, required = true, display_order = 4)]
     cert: String,
 
-    /// src|dst mapping in [ip:]port|[ip:]port for format, 8080|0.0.0.0:9090
-    #[clap(short = 'a', long, display_order = 1)]
+    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
+    #[clap(short = 'a', long, display_order = 5)]
     addr_mapping: String,
 
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 5)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
     loglevel: String,
 }
 

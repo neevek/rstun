@@ -4,13 +4,11 @@ use log::info;
 use rstun::LogHelper;
 use rstun::Server;
 use rstun::ServerConfig;
-use std::collections::HashMap;
+use std::net::SocketAddr;
 
 extern crate pretty_env_logger;
 
 fn main() {
-    // usage: ./target/debug/rstund -a 0.0.0.0:3333 -d http=127.0.0.1:9800 -k localhost.key.der -c localhost.crt.der -p password
-
     let args = RstundArgs::parse();
 
     LogHelper::init_logger(args.loglevel.as_str());
@@ -36,15 +34,22 @@ fn main() {
         })
 }
 
-async fn run(args: RstundArgs) -> Result<()> {
-    let mut downstreams = HashMap::new();
+async fn run(mut args: RstundArgs) -> Result<()> {
+    let mut downstreams = Vec::<SocketAddr>::new();
 
-    for d in args.downstream.iter() {
-        let pair: Vec<&str> = d.split("=").collect();
-        if pair.len() != 2 {
-            bail!("invalid downstream: {}", d);
+    for d in &mut args.downstream {
+        if d.starts_with("0.0.0.0:") {
+            *d = d.replace("0.0.0.0:", "127.0.0.1:");
         }
-        downstreams.insert(pair[0].into(), pair[1].into());
+        if !d.contains(":") {
+            *d = format!("127.0.0.1:{}", d);
+        }
+
+        if let Ok(addr) = d.parse() {
+            downstreams.push(addr);
+        } else {
+            bail!("invalid downstream address: {}", d);
+        }
     }
 
     let mut config = ServerConfig::default();
@@ -66,7 +71,7 @@ struct RstundArgs {
     #[clap(short = 'l', long, display_order = 1)]
     addr: String,
 
-    /// Downstream as the receiving end of the tunnel, e.g. -d name1=ip:port
+    /// Exposed downstream as the receiving end of the tunnel, e.g. -d [ip:]port
     #[clap(short = 'd', long, required = true, min_values = 1, display_order = 2)]
     downstream: Vec<String>,
 
