@@ -148,7 +148,7 @@ async fn run(config: ClientConfig) -> Result<()> {
         }
 
         if !client.should_retry() {
-            info!("client quit");
+            info!("client quit!");
             break;
         }
     }

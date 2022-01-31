@@ -26,7 +26,7 @@ impl AccessServer {
     }
 
     pub async fn bind(&mut self) -> Result<()> {
-        info!("staring access server... addr: {}", self.addr);
+        info!("staring access server, addr: {}", self.addr);
 
         let tcp_listener = TcpListener::bind(self.addr)
             .await
@@ -34,7 +34,7 @@ impl AccessServer {
 
         self.tcp_listener = Some(Arc::new(tcp_listener));
 
-        info!("started access server: {}", self.addr);
+        info!("started access server, addr: {}", self.addr);
 
         Ok(())
     }

@@ -23,16 +23,16 @@ pub struct LoginInfo {
 }
 
 impl TunnelMessage {
-    pub async fn recv(recv_stream: &mut RecvStream) -> Result<TunnelMessage> {
+    pub async fn recv(quic_recv: &mut RecvStream) -> Result<TunnelMessage> {
         let mut msg_len = [0_u8; 4];
-        recv_stream
+        quic_recv
             .read_exact(&mut msg_len)
             .await
             .context("read message length failed")?;
 
         let msg_len = util::as_u32_be(&msg_len) as usize;
         let mut msg = vec![0; msg_len];
-        recv_stream
+        quic_recv
             .read_exact(&mut msg)
             .await
             .context("read message failed")?;
@@ -42,10 +42,10 @@ impl TunnelMessage {
         Ok(tun_msg)
     }
 
-    pub async fn send(send_stream: &mut SendStream, msg: &TunnelMessage) -> Result<()> {
+    pub async fn send(quic_send: &mut SendStream, msg: &TunnelMessage) -> Result<()> {
         let msg = bincode::serialize(msg).context("serialize message failed")?;
-        send_stream.write_u32(msg.len() as u32).await?;
-        send_stream.write_all(&msg).await?;
+        quic_send.write_u32(msg.len() as u32).await?;
+        quic_send.write_all(&msg).await?;
         Ok(())
     }
 

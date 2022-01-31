@@ -282,12 +282,9 @@ impl Server {
         mut ctrl_stream: ControlStream,
     ) -> Result<()> {
         let tcp_sender = access_server.clone_tcp_sender();
-        let access_server_addr = access_server.addr().clone();
         tokio::spawn(async move {
             match TunnelMessage::recv(&mut ctrl_stream.quic_recv).await {
                 _ => {
-                    info!("will quit access server: {}", access_server_addr);
-
                     // send None to signify exit
                     tcp_sender.send(None).await.ok();
                     Ok::<(), anyhow::Error>(())
@@ -312,7 +309,7 @@ impl Server {
             }
         }
 
-        let str_addr = access_server_addr.to_string();
+        let str_addr = access_server.addr().to_string();
         let mut guarded_access_servers = self.access_servers.lock().await;
         if let Some(index) = guarded_access_servers.iter().position(|x| *x == str_addr) {
             guarded_access_servers.remove(index);
@@ -320,7 +317,7 @@ impl Server {
 
         access_server.shutdown(tcp_receiver).await.ok();
 
-        info!("access server quit");
+        info!("will quit access server: {}", str_addr);
 
         Ok(())
     }

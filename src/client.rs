@@ -140,8 +140,6 @@ impl Client {
                 }
             }
         }
-
-        info!("quit!");
         Ok(())
     }
 
@@ -166,8 +164,6 @@ impl Client {
                 }
             }
         }
-
-        info!("quit!");
         Ok(())
     }
 
@@ -180,12 +176,10 @@ impl Client {
             let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
             let mut terminate = signal(SignalKind::terminate()).unwrap();
             tokio::select! {
-                _ = ctrlc.recv() => info!("received SIGINT"),
-                _ = terminate.recv() => info!("received SIGTERM"),
+                _ = ctrlc.recv() => debug!("received SIGINT"),
+                _ = terminate.recv() => debug!("received SIGTERM"),
             }
             *is_terminated_flag.lock().unwrap() = true;
-
-            info!("client quit!");
 
             TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
                 .await
