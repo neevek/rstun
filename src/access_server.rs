@@ -10,7 +10,7 @@ pub struct AccessServer {
     addr: SocketAddr,
     tcp_listener: Option<Arc<TcpListener>>,
     tcp_sender: Sender<Option<TcpStream>>,
-    take_tcp_receiver: Option<Receiver<Option<TcpStream>>>,
+    tcp_receiver: Option<Receiver<Option<TcpStream>>>,
 }
 
 impl AccessServer {
@@ -21,7 +21,7 @@ impl AccessServer {
             addr,
             tcp_listener: None,
             tcp_sender: sender,
-            take_tcp_receiver: Some(receiver),
+            tcp_receiver: Some(receiver),
         }
     }
 
@@ -86,8 +86,12 @@ impl AccessServer {
         &self.addr
     }
 
+    pub fn tcp_receiver_ref(&mut self) -> &mut Receiver<Option<TcpStream>> {
+        self.tcp_receiver.as_mut().unwrap()
+    }
+
     pub fn take_tcp_receiver(&mut self) -> Receiver<Option<TcpStream>> {
-        self.take_tcp_receiver.take().unwrap()
+        self.tcp_receiver.take().unwrap()
     }
 
     pub fn clone_tcp_sender(&mut self) -> Sender<Option<TcpStream>> {

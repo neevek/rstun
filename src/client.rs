@@ -107,7 +107,7 @@ impl Client {
 
     pub async fn serve_outgoing(
         &mut self,
-        mut local_conn_receiver: Receiver<Option<TcpStream>>,
+        local_conn_receiver: &mut Receiver<Option<TcpStream>>,
     ) -> Result<()> {
         info!("start serving...");
 

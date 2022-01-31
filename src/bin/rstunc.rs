@@ -100,6 +100,14 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
 }
 
 async fn run(config: ClientConfig) -> Result<()> {
+    let mut access_server = None;
+    if config.mode == MODE_OUT {
+        let mut tmp_access_server = AccessServer::new(config.local_access_server_addr.unwrap());
+        tmp_access_server.bind().await?;
+        tmp_access_server.start().await?;
+        access_server = Some(tmp_access_server);
+    }
+
     let mut connect_retry_count = 0;
     let connect_max_retry = config.connect_max_retry;
     let wait_before_retry_ms = config.wait_before_retry_ms;
@@ -110,13 +118,8 @@ async fn run(config: ClientConfig) -> Result<()> {
             Ok(_) => {
                 connect_retry_count = 0;
                 if client.config.mode == MODE_OUT {
-                    let mut access_server =
-                        AccessServer::new(client.config.local_access_server_addr.unwrap());
-                    access_server.bind().await?;
-                    access_server.start().await?;
-
                     client
-                        .serve_outgoing(access_server.take_tcp_receiver())
+                        .serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
                         .await
                         .ok();
                 } else {
