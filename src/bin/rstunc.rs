@@ -55,8 +55,6 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
     for addr in &mut addrs {
         if !addr.contains(":") {
             *addr = format!("127.0.0.1:{}", addr);
-        } else if addr.starts_with("0.0.0.0:") {
-            *addr = addr.replace("0.0.0.0:", "127.0.0.1:");
         }
     }
 

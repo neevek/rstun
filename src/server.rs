@@ -26,7 +26,7 @@ static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
 #[derive(Debug)]
 pub struct Server {
     config: ServerConfig,
-    access_servers: Mutex<Vec<String>>,
+    access_server_ports: Mutex<Vec<u16>>,
     buffer_pool: BufferPool,
 }
 
@@ -34,7 +34,7 @@ impl Server {
     pub fn new(config: ServerConfig) -> Arc<Self> {
         Arc::new(Server {
             config,
-            access_servers: Mutex::new(Vec::new()),
+            access_server_ports: Mutex::new(Vec::new()),
             buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
         })
     }
@@ -164,20 +164,20 @@ impl Server {
 
             TunnelMessage::ReqInLogin(login_info) => {
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let mut guarded_access_servers = self.access_servers.lock().await;
-                if guarded_access_servers.contains(&login_info.access_server_addr) {
+                let upstream_addr: SocketAddr = login_info.access_server_addr.parse().context(
+                    format!("invalid address: {}", login_info.access_server_addr),
+                )?;
+
+                let mut guarded_access_server_ports = self.access_server_ports.lock().await;
+                if guarded_access_server_ports.contains(&upstream_addr.port()) {
                     TunnelMessage::send(
                         &mut quic_send,
                         &TunnelMessage::RespFailure("remote access port is in use".to_string()),
                     )
                     .await?;
-                    error!("remote access port is in use");
-                    bail!("remote access port is in use");
+                    error!("remote access port is in use: {}", upstream_addr.port());
+                    bail!("remote access port is in use: {}", upstream_addr.port());
                 }
-
-                let upstream_addr: SocketAddr = login_info.access_server_addr.parse().context(
-                    format!("invalid address: {}", login_info.access_server_addr),
-                )?;
 
                 let mut access_server = AccessServer::new(upstream_addr);
                 if access_server.bind().await.is_err() {
@@ -208,7 +208,7 @@ impl Server {
                     },
                 ));
 
-                guarded_access_servers.push(login_info.access_server_addr.clone());
+                guarded_access_server_ports.push(upstream_addr.port());
             }
 
             _ => {
@@ -309,15 +309,18 @@ impl Server {
             }
         }
 
-        let str_addr = access_server.addr().to_string();
-        let mut guarded_access_servers = self.access_servers.lock().await;
-        if let Some(index) = guarded_access_servers.iter().position(|x| *x == str_addr) {
-            guarded_access_servers.remove(index);
+        let addr = access_server.addr();
+        let mut guarded_access_server_ports = self.access_server_ports.lock().await;
+        if let Some(index) = guarded_access_server_ports
+            .iter()
+            .position(|x| *x == addr.port())
+        {
+            guarded_access_server_ports.remove(index);
         }
 
         access_server.shutdown(tcp_receiver).await.ok();
 
-        info!("will quit access server: {}", str_addr);
+        info!("will quit access server: {}", addr);
 
         Ok(())
     }
