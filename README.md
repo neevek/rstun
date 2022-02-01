@@ -1,15 +1,46 @@
 rstun
 =====
 
-A UDP secured tunnel written in Rust.
+A secured UDP tunnel written in Rust.
 
-rstun builds on [quinn](https://github.com/quinn-rs/quinn), which is an implementation of the IETF [QUIC](https://quicwg.org/) transport protocol.
+rstun builds on [Quinn](https://github.com/quinn-rs/quinn), which is an implementation of the IETF [QUIC](https://quicwg.org/) transport protocol.
 
 rstun consists of two binaries, `rstunc` for client and `rstund` for daemon. `rstund` accepts connections from `rstunc`.
 
-`rstunc` connects to the daemon to build a secured tunnel to allow data to be exchanged between two ends, `rstunc` initiates the connection in one of two modes (IN and OUT):
+`rstunc` connects to the daemon to build a secured tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
 
-  * The IN mode is used for exposing a local port to the internet through the daemon.
-  * The OUT mode is used for securing data going out from local to the internet through the daemon.
+  * The IN mode for exposing a local port to the internet through the daemon.
+  * The OUT mode for securing data going out from local to the internet through the daemon.
 
-... DOC to be continued
+All data going through the tunnel is secured by the builtin TLS layer of the QUIC protocol, when the negotiation of the connection completes and a tunnel is built, QUIC streams can be initiatated from both ends, for the OUT mode, streams are initiatated from the client, and for the IN mode, it is just the opposite.
+
+Usage
+-----
+
+* Start the daemon (the server part)
+
+```
+rstund \
+  --addr 0.0.0.0:6060 \
+  --downstream 8800 \
+  --password 123456 \
+  --cert path/to/certificate.der \
+  --key path/to/priv_key.der
+```
+`addr` specifies the ip:port that the daemon is listening on, `downstream` specifies a TCP port which traffic from the client through the tunnel will be relayed to, this is applicable for OUT mode tunnels only. For `cert` and `key`, the requirement is that they must be in DER format, I use a self signed certificate for testing. Note currently the certificate is checked bytewise by the client, that is why the same certificate must be specified for the client.
+
+* Start the client
+```
+rstunc
+  --mode OUT \
+  --server-addr 1.2.3.4:6060 \
+  --password 123456 \
+  --cert path/to/certificate.der \
+  --addr-mapping 0.0.0.0:9900^8800
+```
+For the arguments, I think only `addr-mapping` needs some explanation, this is an address mapping betwen two ip:port pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` host that runs `rstund`.
+
+License
+-------
+
+Later...
