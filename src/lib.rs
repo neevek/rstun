@@ -22,7 +22,11 @@ extern crate bincode;
 extern crate colored;
 extern crate pretty_env_logger;
 
-type BufferPool = Arc<BytePool<Vec<u8>>>;
+pub type BufferPool = Arc<BytePool<Vec<u8>>>;
+
+fn new_buffer_pool() -> BufferPool {
+    Arc::new(BytePool::<Vec<u8>>::new())
+}
 
 #[derive(Debug)]
 pub enum TunnelType {

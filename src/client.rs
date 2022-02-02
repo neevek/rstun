@@ -1,6 +1,5 @@
-use crate::{ClientConfig, ControlStream, Tunnel, TunnelMessage};
+use crate::{BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage};
 use anyhow::{bail, Context, Result};
-use byte_pool::BytePool;
 use futures_util::StreamExt;
 use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
@@ -16,10 +15,8 @@ use tokio::net::TcpStream;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
-extern crate libc;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
-type BufferPool = Arc<BytePool<Vec<u8>>>;
 
 pub struct Client {
     pub config: ClientConfig,
@@ -35,7 +32,7 @@ impl Client {
             config,
             remote_conn: None,
             ctrl_stream: None,
-            buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
+            buffer_pool: crate::new_buffer_pool(),
             is_terminated: Arc::new(Mutex::new(false)),
         }
     }

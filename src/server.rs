@@ -1,9 +1,7 @@
-use crate::ControlStream;
-use crate::Tunnel;
-use crate::TunnelMessage;
-use crate::{AccessServer, ServerConfig, TunnelType};
+use crate::{
+    AccessServer, BufferPool, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
+};
 use anyhow::{bail, Context, Result};
-use byte_pool::BytePool;
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
 use quinn::{congestion, TransportConfig};
@@ -15,7 +13,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-type BufferPool = Arc<BytePool<Vec<u8>>>;
 const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
@@ -35,7 +32,7 @@ impl Server {
         Arc::new(Server {
             config,
             access_server_ports: Mutex::new(Vec::new()),
-            buffer_pool: Arc::new(BytePool::<Vec<u8>>::new()),
+            buffer_pool: crate::new_buffer_pool(),
         })
     }
 
