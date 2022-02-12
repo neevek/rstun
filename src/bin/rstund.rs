@@ -21,7 +21,12 @@ fn main() {
     )
     .unwrap();
 
-    let worker_threads = num_cpus::get() + 1;
+    let worker_threads = if args.threads > 0 {
+        args.threads
+    } else {
+        num_cpus::get()
+    };
+
     info!("will use {} worker threads", worker_threads);
 
     tokio::runtime::Builder::new_multi_thread()
@@ -87,6 +92,10 @@ struct RstundArgs {
     #[clap(short = 'k', long, required = true, display_order = 5)]
     key: String,
 
-    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
+    /// Threads to run async tasks
+    #[clap(short = 't', long, default_value = "0", display_order = 6)]
+    threads: usize,
+
+    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 7)]
     loglevel: String,
 }

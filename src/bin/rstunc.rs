@@ -29,12 +29,11 @@ fn main() {
     )
     .unwrap();
 
-    let worker_threads = num_cpus::get() + 1;
-    info!("will use {} worker threads", worker_threads);
+    info!("will use {} worker threads", config.threads);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(worker_threads)
+        .worker_threads(config.threads)
         .build()
         .unwrap()
         .block_on(async {
@@ -60,6 +59,11 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
 
     config.cert_path = args.cert;
     config.server_addr = args.server_addr;
+    config.threads = if args.threads > 0 {
+        args.threads
+    } else {
+        num_cpus::get()
+    };
     config.loglevel = args.loglevel;
     config.connect_max_retry = 0;
     config.wait_before_retry_ms = 5 * 1000;
@@ -179,7 +183,11 @@ struct RstuncArgs {
     #[clap(short = 'a', long, display_order = 5)]
     addr_mapping: String,
 
+    /// Threads to run async tasks
+    #[clap(short = 't', long, default_value = "0", display_order = 6)]
+    threads: usize,
+
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 6)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 7)]
     loglevel: String,
 }

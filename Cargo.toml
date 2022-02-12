@@ -1,6 +1,6 @@
 [package]
 name = "rstun"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -9,7 +9,7 @@ edition = "2021"
 tracing-subscriber = { version = "0.2.5", default-features = false, features = ["env-filter", "fmt", "ansi", "chrono"]}
 rustls = { version = "0.20.2", features = ["dangerous_configuration", "quic"] }
 clap = { version = "3.0.7", features = ["derive"] }
-tokio = { version = "1.15.0", features = ["full"] }
+tokio = { version = "1.16", features = ["full"] }
 pretty_env_logger = "0.4.0"
 ring = "0.16.20"
 log = "0.4.14"

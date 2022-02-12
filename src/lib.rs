@@ -50,6 +50,7 @@ pub struct ClientConfig {
     pub max_idle_timeout_ms: u64,
     pub keep_alive_interval_ms: u64,
     pub login_msg: Option<TunnelMessage>,
+    pub threads: usize,
     pub loglevel: String,
     pub mode: &'static str,
 }
