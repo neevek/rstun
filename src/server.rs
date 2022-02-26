@@ -3,7 +3,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rustls::{Certificate, PrivateKey};
@@ -39,19 +39,8 @@ impl Server {
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         let config = &self.config;
         let (cert, key) =
-            match Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str()) {
-                Ok(v) => v,
-                Err(_) => {
-                    info!("generate temporary cert and key");
-                    let cert =
-                        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-                    let key = cert.serialize_private_key_der();
-                    let cert = cert.serialize_der().unwrap();
-                    let cert = Certificate(cert.into());
-                    let key = PrivateKey(key.into());
-                    (cert, key)
-                }
-            };
+            Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str())
+                .context("failed to read certificate or key")?;
 
         let crypto = rustls::ServerConfig::builder()
             .with_cipher_suites(PERF_CIPHER_SUITES)
@@ -152,7 +141,7 @@ impl Server {
                 ))?;
 
                 if !self.config.downstreams.contains(&downstream_addr) {
-                    bail!(format!("invalid addr: {}", downstream_addr));
+                    bail_with_log!("invalid addr: {}", downstream_addr);
                 }
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -172,8 +161,7 @@ impl Server {
                         &TunnelMessage::RespFailure("remote access port is in use".to_string()),
                     )
                     .await?;
-                    error!("remote access port is in use: {}", upstream_addr.port());
-                    bail!("remote access port is in use: {}", upstream_addr.port());
+                    bail_with_log!("remote access port is in use: {}", upstream_addr.port());
                 }
 
                 let mut access_server = AccessServer::new(upstream_addr);
@@ -183,7 +171,7 @@ impl Server {
                         &TunnelMessage::RespFailure("access server failed to bind".to_string()),
                     )
                     .await?;
-                    bail!("access server failed to bind");
+                    bail_with_log!("access server failed to bind");
                 }
 
                 if access_server.start().await.is_err() {
@@ -192,7 +180,7 @@ impl Server {
                         &TunnelMessage::RespFailure("access server failed to start".to_string()),
                     )
                     .await?;
-                    bail!("access server failed to start");
+                    bail_with_log!("access server failed to start");
                 }
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -209,7 +197,7 @@ impl Server {
             }
 
             _ => {
-                bail!("received unepxected message");
+                bail_with_log!("received unepxected message");
             }
         }
 
@@ -236,7 +224,7 @@ impl Server {
                     return Ok(());
                 }
                 Err(e) => {
-                    bail!(
+                    bail_with_log!(
                         "failed to open bi_streams, addr: {}, err: {}",
                         remote_addr,
                         e
@@ -300,8 +288,7 @@ impl Server {
                         .ok();
                 }
                 _ => {
-                    error!("failed to open bi_streams to client");
-                    bail!("quit");
+                    bail_with_log!("failed to open bi_streams to client, quit");
                 }
             }
         }
@@ -333,8 +320,7 @@ impl Server {
 
     fn check_password(password1: &str, password2: &str) -> Result<()> {
         if password1 != password2 {
-            warn!("passwords don't match!");
-            bail!("passwords don't match!");
+            bail_with_log!("passwords don't match!");
         }
         Ok(())
     }

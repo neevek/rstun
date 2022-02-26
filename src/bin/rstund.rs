@@ -1,9 +1,8 @@
 use anyhow::{bail, Result};
 use clap::Parser;
+use log::error;
 use log::info;
-use rstun::LogHelper;
-use rstun::Server;
-use rstun::ServerConfig;
+use rstun::*;
 use std::net::SocketAddr;
 
 extern crate pretty_env_logger;
@@ -53,7 +52,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         if let Ok(addr) = d.parse() {
             downstreams.push(addr);
         } else {
-            bail!("invalid downstream address: {}", d);
+            bail_with_log!("invalid downstream address: {}", d);
         }
     }
 

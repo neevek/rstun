@@ -8,8 +8,7 @@ use quinn_proto::{IdleTimeout, VarInt};
 use rustls::client::{ServerCertVerified, ServerName};
 use rustls::Certificate;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::net::TcpStream;
 use tokio::signal::unix::{signal, SignalKind};
@@ -112,11 +111,7 @@ impl Client {
 
         // accept local connections and build a tunnel to remote
         while let Some(tcp_stream) = local_conn_receiver.recv().await {
-            if let None = tcp_stream {
-                continue;
-            }
-            let tcp_stream = tcp_stream.unwrap();
-
+            let tcp_stream = unwrap_or_continue!(tcp_stream);
             match remote_conn.connection.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
@@ -201,7 +196,7 @@ impl Client {
         TunnelMessage::send(quic_send, config.login_msg.as_ref().unwrap()).await?;
         let resp = TunnelMessage::recv(quic_recv).await?;
         if resp.as_resp_success().is_none() {
-            bail!("failed to login");
+            bail_with_log!("failed to login");
         }
         TunnelMessage::handle_message(&resp)?;
         Ok(())

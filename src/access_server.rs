@@ -41,7 +41,7 @@ impl AccessServer {
 
     pub async fn start(&mut self) -> Result<()> {
         if self.tcp_listener.is_none() {
-            bail!("bind the server first");
+            bail_with_log!("bind the server first");
         }
 
         let listener = self.tcp_listener.clone().unwrap();
