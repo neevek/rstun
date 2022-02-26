@@ -5,9 +5,6 @@ use log::{debug, error};
 use rstun::*;
 use tokio::time::Duration;
 
-extern crate colored;
-extern crate pretty_env_logger;
-
 const MODE_IN: &str = "IN";
 const MODE_OUT: &str = "OUT";
 

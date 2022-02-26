@@ -5,8 +5,6 @@ use log::info;
 use rstun::*;
 use std::net::SocketAddr;
 
-extern crate pretty_env_logger;
-
 fn main() {
     let args = RstundArgs::parse();
 
