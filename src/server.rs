@@ -131,9 +131,12 @@ impl Server {
             format!("login request not received in time, addr: {}", remote_addr),
         )??;
 
+        info!("received bi_stream request, addr: {}", remote_addr);
         let tunnel_type;
         match TunnelMessage::recv(&mut quic_recv).await? {
             TunnelMessage::ReqOutLogin(login_info) => {
+                info!("received OutLogin request, addr: {}", remote_addr);
+
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
                 let downstream_addr = login_info.access_server_addr.parse().context(format!(
                     "invalid access server address: {}",
@@ -146,9 +149,12 @@ impl Server {
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 tunnel_type = TunnelType::Out((client_conn, downstream_addr));
+                info!("sent response for OutLogin request, addr: {}", remote_addr);
             }
 
             TunnelMessage::ReqInLogin(login_info) => {
+                info!("received InLogin request, addr: {}", remote_addr);
+
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
                 let upstream_addr: SocketAddr = login_info.access_server_addr.parse().context(
                     format!("invalid address: {}", login_info.access_server_addr),
@@ -194,6 +200,8 @@ impl Server {
                 ));
 
                 guarded_access_server_ports.push(upstream_addr.port());
+
+                info!("sent response for InLogin request, addr: {}", remote_addr);
             }
 
             _ => {

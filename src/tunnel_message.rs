@@ -46,6 +46,7 @@ impl TunnelMessage {
         let msg = bincode::serialize(msg).context("serialize message failed")?;
         quic_send.write_u32(msg.len() as u32).await?;
         quic_send.write_all(&msg).await?;
+        quic_send.flush().await?;
         Ok(())
     }
 

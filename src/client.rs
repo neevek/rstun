@@ -193,12 +193,16 @@ impl Client {
         quic_send: &mut SendStream,
         quic_recv: &mut RecvStream,
     ) -> Result<()> {
+        debug!("sending login request...");
         TunnelMessage::send(quic_send, config.login_msg.as_ref().unwrap()).await?;
+        debug!("sent login request!");
+
         let resp = TunnelMessage::recv(quic_recv).await?;
         if resp.as_resp_success().is_none() {
             bail_with_log!("failed to login");
         }
         TunnelMessage::handle_message(&resp)?;
+        debug!("finished login request!");
         Ok(())
     }
 
