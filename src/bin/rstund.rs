@@ -7,8 +7,7 @@ use std::net::SocketAddr;
 
 fn main() {
     let args = RstundArgs::parse();
-
-    LogHelper::init_logger(args.loglevel.as_str());
+    init_logger(args.loglevel.as_str());
 
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()

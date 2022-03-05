@@ -1,22 +1,15 @@
-use anyhow::Result;
 use clap::Parser;
-use log::info;
-use log::{debug, error};
+use log::{error, info};
 use rstun::*;
-use tokio::time::Duration;
-
-const MODE_IN: &str = "IN";
-const MODE_OUT: &str = "OUT";
 
 fn main() {
-    //raise_fd_limit();
+    let args = RstuncArgs::parse();
+    init_logger(args.loglevel.as_ref());
 
     let mut config = ClientConfig::default();
-    if !parse_command_line_args(&mut config) {
+    if !parse_command_line_args(args, &mut config) {
         return;
     }
-
-    LogHelper::init_logger(config.loglevel.as_ref());
 
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
@@ -27,23 +20,13 @@ fn main() {
     .unwrap();
 
     info!("will use {} worker threads", config.threads);
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(config.threads)
-        .build()
-        .unwrap()
-        .block_on(async {
-            run(config).await.unwrap();
-        });
+    start_tunnelling(config);
 }
 
-fn parse_command_line_args(config: &mut ClientConfig) -> bool {
-    let args = RstuncArgs::parse();
-
+fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool {
     let addrs: Vec<&str> = args.addr_mapping.split("^").collect();
     if addrs.len() != 2 {
-        print!("invalid address mapping: {}", args.addr_mapping);
+        error!("invalid address mapping: {}", args.addr_mapping);
         return false;
     }
     let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
@@ -61,19 +44,18 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
     } else {
         num_cpus::get()
     };
-    config.loglevel = args.loglevel;
     config.connect_max_retry = 0;
     config.wait_before_retry_ms = 5 * 1000;
     config.max_idle_timeout_ms = 5 * 1000;
     config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
-    config.mode = if args.mode == MODE_IN {
-        MODE_IN
+    config.mode = if args.mode == TUNNEL_MODE_IN {
+        TUNNEL_MODE_IN
     } else {
-        MODE_OUT
+        TUNNEL_MODE_OUT
     };
 
     let local_access_server_addr;
-    config.login_msg = if args.mode == MODE_IN {
+    config.login_msg = if args.mode == TUNNEL_MODE_IN {
         local_access_server_addr = addrs[1].to_string();
         Some(TunnelMessage::ReqInLogin(LoginInfo {
             password: args.password,
@@ -100,68 +82,11 @@ fn parse_command_line_args(config: &mut ClientConfig) -> bool {
     true
 }
 
-async fn run(config: ClientConfig) -> Result<()> {
-    let mut access_server = None;
-    if config.mode == MODE_OUT {
-        let mut tmp_access_server = AccessServer::new(config.local_access_server_addr.unwrap());
-        tmp_access_server.bind().await?;
-        tmp_access_server.start().await?;
-        access_server = Some(tmp_access_server);
-    }
-
-    let mut connect_retry_count = 0;
-    let connect_max_retry = config.connect_max_retry;
-    let wait_before_retry_ms = config.wait_before_retry_ms;
-    let mut client = Client::new(config);
-
-    loop {
-        match client.connect().await {
-            Ok(_) => {
-                connect_retry_count = 0;
-                if client.config.mode == MODE_OUT {
-                    client
-                        .serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
-                        .await
-                        .ok();
-                } else {
-                    client.serve_incoming().await.ok();
-                }
-            }
-
-            Err(e) => {
-                error!("connect failed, err: {}", e);
-                if connect_max_retry > 0 {
-                    connect_retry_count += 1;
-                    if connect_retry_count >= connect_max_retry {
-                        info!(
-                            "quit after having retried for {} times",
-                            connect_retry_count
-                        );
-                        break;
-                    }
-                }
-
-                debug!(
-                    "will wait for {}ms before retrying...",
-                    wait_before_retry_ms
-                );
-                tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
-            }
-        }
-
-        if !client.should_retry() {
-            info!("client quit!");
-            break;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct RstuncArgs {
     /// Create a tunnel running in IN or OUT mode
-    #[clap(short = 'm', long, possible_values = &[MODE_IN, MODE_OUT], display_order = 1)]
+    #[clap(short = 'm', long, possible_values = &[TUNNEL_MODE_IN, TUNNEL_MODE_OUT], display_order = 1)]
     mode: String,
 
     /// Address (ip:port pair) of rstund

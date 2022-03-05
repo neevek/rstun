@@ -26,7 +26,7 @@ impl AccessServer {
     }
 
     pub async fn bind(&mut self) -> Result<()> {
-        info!("staring access server, addr: {}", self.addr);
+        info!("starting access server, addr: {}", self.addr);
 
         let tcp_listener = TcpListener::bind(self.addr)
             .await
