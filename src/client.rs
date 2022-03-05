@@ -108,16 +108,12 @@ impl Client {
         info!("start serving...");
 
         let remote_conn = self.remote_conn.as_ref().unwrap();
-        const MAX_RETRY: usize = 20;
-        let mut retry: usize = 0;
 
         // accept local connections and build a tunnel to remote
         while let Some(tcp_stream) = local_conn_receiver.recv().await {
             let tcp_stream = unwrap_or_continue!(tcp_stream);
             match remote_conn.connection.open_bi().await {
                 Ok(quic_stream) => {
-                    retry = 0;
-
                     debug!(
                         "[OUT] open stream for conn, {} -> {}",
                         quic_stream.0.id().index(),
@@ -132,13 +128,7 @@ impl Client {
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
-
-                    if retry > MAX_RETRY {
-                        error!("reached MAX_RETRY: {}", retry);
-                        break;
-                    }
-
-                    retry += 1;
+                    break;
                 }
             }
         }
