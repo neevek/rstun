@@ -51,6 +51,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
     config.cert_path = args.cert;
     config.key_path = args.key;
     config.downstreams = downstreams;
+    config.max_idle_timeout_ms = args.max_idle_timeout_ms;
 
     let server = Server::new(config);
     server.start().await?;
@@ -84,6 +85,10 @@ struct RstundArgs {
     #[clap(short = 't', long, default_value = "0", display_order = 6)]
     threads: usize,
 
-    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 7)]
+    /// Max idle timeout for the connection
+    #[clap(short = 'w', long, default_value = "40000", display_order = 7)]
+    max_idle_timeout_ms: u64,
+
+    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 8)]
     loglevel: String,
 }

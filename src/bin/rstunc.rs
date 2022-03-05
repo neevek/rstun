@@ -37,8 +37,8 @@ fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool 
         num_cpus::get()
     };
     config.connect_max_retry = 0;
-    config.wait_before_retry_ms = 5 * 1000;
-    config.max_idle_timeout_ms = 5 * 1000;
+    config.wait_before_retry_ms = args.wait_before_retry_ms;
+    config.max_idle_timeout_ms = args.max_idle_timeout_ms;
     config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
     config.mode = if args.mode == TUNNEL_MODE_IN {
         TUNNEL_MODE_IN
@@ -101,7 +101,15 @@ struct RstuncArgs {
     #[clap(short = 't', long, default_value = "0", display_order = 6)]
     threads: usize,
 
+    /// Wait time before trying
+    #[clap(short = 'w', long, default_value = "5000", display_order = 7)]
+    wait_before_retry_ms: u64,
+
+    /// Max idle timeout for the connection
+    #[clap(short = 'i', long, default_value = "20000", display_order = 8)]
+    max_idle_timeout_ms: u64,
+
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 7)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 9)]
     loglevel: String,
 }

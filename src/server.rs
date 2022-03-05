@@ -13,7 +13,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-const IDLE_TIMEOUT: u64 = 30 * 1000;
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
     //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
@@ -55,9 +54,10 @@ impl Server {
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        let timeout = IdleTimeout::from(VarInt::from_u32(IDLE_TIMEOUT as u32));
+        let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
         transport_cfg.max_idle_timeout(Some(timeout));
-        transport_cfg.keep_alive_interval(Some(Duration::from_millis(IDLE_TIMEOUT / 2)));
+        transport_cfg
+            .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
         let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
@@ -70,7 +70,11 @@ impl Server {
 
         let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
 
-        info!("server is bound to: {}", endpoint.local_addr()?);
+        info!(
+            "server is bound to: {}, idle_timeout: {}",
+            endpoint.local_addr()?,
+            config.max_idle_timeout_ms
+        );
 
         while let Some(client_conn) = incoming.next().await {
             let mut this = self.clone();

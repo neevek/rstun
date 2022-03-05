@@ -69,6 +69,7 @@ pub struct ServerConfig {
     pub password: String,
     pub cert_path: String,
     pub key_path: String,
+    pub max_idle_timeout_ms: u64,
 
     /// traffics to the rstun server will be relayed to servers
     /// specified by downstreams, client must specify a target
@@ -104,11 +105,16 @@ pub fn init_logger(log_level: &str) {
 pub fn start_tunnelling(config: ClientConfig) {
     unsafe {
         if IS_RUNNING {
-            warn!("rsproxy is alreay running");
+            warn!("tunnel is active");
             return;
         }
         IS_RUNNING = true;
     }
+
+    info!(
+        "rstunc connecting, idle_timeout:{}, retry_timeout:{}",
+        config.max_idle_timeout_ms, config.wait_before_retry_ms
+    );
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -246,7 +252,7 @@ impl LogHelper {
     }
 }
 
-#[cfg(target_os = "android")]
+//#[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 pub mod android {
     extern crate jni;
@@ -295,6 +301,8 @@ pub mod android {
         jpassword: JString,
         jcertFilePath: JString,
         jthreads: jint,
+        jwaitBeforeRetryMs: jint,
+        jmaxIdleTimeoutMs: jint,
     ) -> jboolean {
         let mode = convert_jstring(&env, jmode);
         let server_addr = convert_jstring(&env, jserverAddr);
@@ -324,8 +332,8 @@ pub mod android {
             num_cpus::get()
         };
         config.connect_max_retry = 0;
-        config.wait_before_retry_ms = 5 * 1000;
-        config.max_idle_timeout_ms = 5 * 1000;
+        config.wait_before_retry_ms = jwaitBeforeRetryMs as u64;
+        config.max_idle_timeout_ms = jmaxIdleTimeoutMs as u64;
         config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
         config.mode = if mode == TUNNEL_MODE_IN {
             TUNNEL_MODE_IN
