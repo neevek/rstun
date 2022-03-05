@@ -7,7 +7,6 @@ edition = "2021"
 crate-type = ["dylib", "lib"]
 
 [dependencies]
-tracing-subscriber = { version = "0.2.5", default-features = false, features = ["env-filter", "fmt", "ansi", "chrono"]}
 rustls = { version = "0.20.2", features = ["dangerous_configuration", "quic"] }
 clap = { version = "3.0.7", features = ["derive"] }
 tokio = { version = "1.16", features = ["full"] }
@@ -16,7 +15,6 @@ ring = "0.16.20"
 log = "0.4.14"
 chrono = "0.4.19"
 anyhow = "1.0.44"
-tracing = "0.1.29"
 quinn = "0.8.0"
 quinn-proto = "0.8.0"
 rcgen = "0.8.14"
