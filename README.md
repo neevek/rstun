@@ -5,19 +5,19 @@ A secured UDP tunnel written in Rust.
 
 rstun builds on [Quinn](https://github.com/quinn-rs/quinn), which is an implementation of the IETF [QUIC](https://quicwg.org/) transport protocol.
 
-rstun consists of two binaries, `rstunc` for client and `rstund` for daemon. `rstund` accepts connections from `rstunc`.
+rstun consists of two binaries, `rstunc` for client and `rstund` for server. `rstund` accepts connections from `rstunc`.
 
-`rstunc` connects to the daemon to build a secured tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
+`rstunc` connects to the server to build a secured tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
 
-  * The IN mode for exposing a local port to the internet through the daemon.
-  * The OUT mode for securing data going out from local to the internet through the daemon.
+  * The IN mode for exposing a local port to the internet through the server.
+  * The OUT mode for securing data going out from local to the internet through the server.
 
 All data going through the tunnel is secured by the builtin TLS layer of the QUIC protocol, when the negotiation of the connection completes and a tunnel is built, QUIC streams can be initiatated from both ends, for the OUT mode, streams are initiatated from the client, and for the IN mode, it is just the opposite.
 
 Usage
 -----
 
-* Start the daemon (the server part)
+* Start the server
 
 ```
 rstund \
@@ -27,7 +27,7 @@ rstund \
   --cert path/to/certificate.der \
   --key path/to/priv_key.der
 ```
-`addr` specifies the ip:port that the daemon is listening on, `downstream` specifies a TCP port which traffic from the client through the tunnel will be relayed to, this is applicable for OUT mode tunnels only. For `cert` and `key`, the requirement is that they must be in DER format, I use a self signed certificate for testing. Note currently the certificate is checked bytewise by the client, that is why the same certificate must be specified for the client.
+`addr` specifies the ip:port that the server is listening on, `downstream` specifies a TCP port which traffic from the client through the tunnel will be relayed to, this is applicable for OUT mode tunnels only. For `cert` and `key`, the requirement is that they must be in DER format, I use a self signed certificate for testing. Note currently the certificate is checked bytewise by the client, that is why the same certificate must be specified for the client.
 
 * Start the client
 ```
