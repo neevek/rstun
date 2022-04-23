@@ -4,7 +4,7 @@ use rstun::*;
 
 fn main() {
     let args = RstuncArgs::parse();
-    init_logger(args.loglevel.as_ref());
+    rs_utilities::LogHelper::init_logger("rstunc", args.loglevel.as_ref());
 
     let mut config = ClientConfig::default();
     if !parse_command_line_args(args, &mut config) {

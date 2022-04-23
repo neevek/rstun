@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 
 fn main() {
     let args = RstundArgs::parse();
-    init_logger(args.loglevel.as_str());
+    rs_utilities::LogHelper::init_logger("rstund", args.loglevel.as_str());
 
     let worker_threads = if args.threads > 0 {
         args.threads
