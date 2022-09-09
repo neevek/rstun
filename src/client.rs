@@ -6,8 +6,8 @@ use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
 use rustls::client::{ServerCertVerified, ServerName};
-use rustls::Certificate;
-use std::net::SocketAddr;
+use rustls::{Certificate, OwnedTrustAnchor, RootCertStore};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::net::TcpStream;
@@ -15,12 +15,26 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
 use trust_dns_resolver::config::{
-    LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
+    LookupIpStrategy, NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig,
+    ResolverOpts,
 };
 use trust_dns_resolver::AsyncResolver;
+use webpki_roots;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
+
+pub const ALIDNS_IP_ARRAY: &[IpAddr] = &[
+    IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)),
+    IpAddr::V4(Ipv4Addr::new(223, 6, 6, 6)),
+    IpAddr::V6(Ipv6Addr::new(0x2400, 0x3200, 0, 0, 0, 0, 0, 1)),
+    IpAddr::V6(Ipv6Addr::new(0x2400, 0x3200, 0xbaba, 0, 0, 0, 0, 1)),
+];
+
+//pub const DNSPOD_IP_ARRAY: &[IpAddr] = &[
+//    IpAddr::V4(Ipv4Addr::new(120, 53, 53, 53)),
+//    IpAddr::V4(Ipv4Addr::new(1, 12, 12, 12)),
+//];
 
 pub struct Client {
     pub config: ClientConfig,
@@ -231,12 +245,41 @@ impl Client {
             domain = &addr[..pos];
         }
 
-        let mut resolve_cfg = ResolverConfig::default();
-        resolve_cfg.add_name_server(NameServerConfig::new(
+        let alidns_dot = NameServerConfigGroup::from_ips_tls(
+            ALIDNS_IP_ARRAY,
+            853,
+            "dns.alidns.com".to_string(),
+            true,
+        );
+
+        //let dnspod_dot = NameServerConfigGroup::from_ips_tls(DNSPOD_IP_ARRAY, 853, "dot.pub".to_string(), true);
+
+        let mut root_store = RootCertStore::empty();
+        root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+            OwnedTrustAnchor::from_subject_spki_name_constraints(
+                ta.subject,
+                ta.spki,
+                ta.name_constraints,
+            )
+        }));
+
+        let client_config = rustls::ClientConfig::builder()
+            .with_safe_default_cipher_suites()
+            .with_safe_default_kx_groups()
+            .with_protocol_versions(&[&rustls::version::TLS12])
+            .unwrap()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let mut resolver_cfg = ResolverConfig::from_parts(None, vec![], alidns_dot);
+        resolver_cfg.set_tls_client_config(Arc::new(client_config));
+
+        resolver_cfg.add_name_server(NameServerConfig::new(
             "223.5.5.5:53".parse().unwrap(),
             Protocol::Udp,
         ));
-        resolve_cfg.add_name_server(NameServerConfig::new(
+
+        resolver_cfg.add_name_server(NameServerConfig::new(
             "119.29.29.29:53".parse().unwrap(),
             Protocol::Udp,
         ));
@@ -245,7 +288,7 @@ impl Client {
         resolve_opt.timeout = Duration::from_secs(3);
         resolve_opt.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
         resolve_opt.num_concurrent_reqs = 3;
-        let resolver = AsyncResolver::tokio(resolve_cfg, resolve_opt).unwrap();
+        let resolver = AsyncResolver::tokio(resolver_cfg, resolve_opt).unwrap();
 
         let response = resolver.lookup_ip(domain).await?;
         let ip = response
