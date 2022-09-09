@@ -81,7 +81,7 @@ struct RstuncArgs {
     #[clap(short = 'm', long, possible_values = &[TUNNEL_MODE_IN, TUNNEL_MODE_OUT], display_order = 1)]
     mode: String,
 
-    /// Address (ip:port pair) of rstund
+    /// Address (<domain:ip>[:port] pair) of rstund
     #[clap(short = 'r', long, display_order = 2)]
     server_addr: String,
 

@@ -14,8 +14,13 @@ use tokio::net::TcpStream;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
+use trust_dns_resolver::config::{
+    LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
+};
+use trust_dns_resolver::AsyncResolver;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
+const DEFAULT_SERVER_PORT: u16 = 3515;
 
 pub struct Client {
     pub config: ClientConfig,
@@ -60,12 +65,7 @@ impl Client {
         let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
         cfg.transport = Arc::new(transport_cfg);
 
-        let remote_addr = self
-            .config
-            .server_addr
-            .parse()
-            .with_context(|| format!("invalid address: {}", self.config.server_addr))?;
-
+        let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
         let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
 
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
@@ -211,6 +211,51 @@ impl Client {
         let cert = rustls::Certificate(cert.into());
 
         Ok(cert)
+    }
+
+    async fn parse_server_addr(addr: &str) -> Result<SocketAddr> {
+        let sock_addr: Result<SocketAddr> =
+            addr.parse().context("failed to parse addr as SocketAddr");
+
+        if sock_addr.is_ok() {
+            return sock_addr;
+        }
+
+        let mut domain = addr;
+        let mut port = DEFAULT_SERVER_PORT;
+        let pos = addr.rfind(":");
+        if let Some(pos) = pos {
+            port = addr[(pos + 1)..]
+                .parse()
+                .with_context(|| format!("invalid address: {}", addr))?;
+            domain = &addr[..pos];
+        }
+
+        let mut resolve_cfg = ResolverConfig::default();
+        resolve_cfg.add_name_server(NameServerConfig::new(
+            "223.5.5.5:53".parse().unwrap(),
+            Protocol::Udp,
+        ));
+        resolve_cfg.add_name_server(NameServerConfig::new(
+            "119.29.29.29:53".parse().unwrap(),
+            Protocol::Udp,
+        ));
+
+        let mut resolve_opt = ResolverOpts::default();
+        resolve_opt.timeout = Duration::from_secs(3);
+        resolve_opt.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        resolve_opt.num_concurrent_reqs = 3;
+        let resolver = AsyncResolver::tokio(resolve_cfg, resolve_opt).unwrap();
+
+        let response = resolver.lookup_ip(domain).await?;
+        let ip = response
+            .iter()
+            .next()
+            .context(format!("failed to resolve address: {}", domain))?;
+
+        info!("resolved {} to {}, port: {}", domain, ip, port);
+
+        Ok(SocketAddr::new(ip, port))
     }
 }
 

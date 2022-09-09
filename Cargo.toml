@@ -27,6 +27,7 @@ byte-pool = "0.2.3"
 enum-as-inner = "0.3.3"
 num_cpus = "1.13.1"
 rs-utilities = "0.1"
+trust-dns-resolver = "0.22"
 
 [target.aarch64-linux-android.dependencies]
 jni = "0.19"

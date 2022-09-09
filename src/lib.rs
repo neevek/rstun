@@ -117,7 +117,9 @@ pub fn start_tunnelling(config: ClientConfig) {
         .build()
         .unwrap()
         .block_on(async {
-            run(config).await.ok();
+            run(config)
+                .await
+                .unwrap_or_else(|e| error!("run failed: {}", e));
         });
 
     unsafe {

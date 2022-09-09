@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use log::{debug, error, info};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,13 +27,7 @@ impl AccessServer {
 
     pub async fn bind(&mut self) -> Result<()> {
         info!("starting access server, addr: {}", self.addr);
-
-        let tcp_listener = TcpListener::bind(self.addr)
-            .await
-            .context("failed to start AccessServer")?;
-
-        self.tcp_listener = Some(Arc::new(tcp_listener));
-
+        self.tcp_listener = Some(Arc::new(TcpListener::bind(self.addr).await?));
         info!("started access server, addr: {}", self.addr);
 
         Ok(())
