@@ -227,21 +227,17 @@ impl Client {
             domain = &addr[..pos];
         }
 
-        if let Ok(ip) =
-            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::AliDNS, vec![]).await
-        {
+        if let Ok(ip) = Self::lookup_server_ip(domain, "dns.alidns.com", vec![]).await {
             return Ok(SocketAddr::new(ip, port));
         }
 
-        if let Ok(ip) =
-            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::DNSPod, vec![]).await
-        {
+        if let Ok(ip) = Self::lookup_server_ip(domain, "dot.pub", vec![]).await {
             return Ok(SocketAddr::new(ip, port));
         }
 
         if let Ok(ip) = Self::lookup_server_ip(
             domain,
-            rs_utilities::dns::DoTProvider::NotSpecified,
+            "",
             vec![
                 "1.12.12.12".to_string(),
                 "120.53.53.53".to_string(),
@@ -254,10 +250,7 @@ impl Client {
             return Ok(SocketAddr::new(ip, port));
         }
 
-        if let Ok(ip) =
-            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::NotSpecified, vec![])
-                .await
-        {
+        if let Ok(ip) = Self::lookup_server_ip(domain, "", vec![]).await {
             return Ok(SocketAddr::new(ip, port));
         }
 
@@ -266,18 +259,18 @@ impl Client {
 
     async fn lookup_server_ip(
         domain: &str,
-        dot_server: dns::DoTProvider,
+        dot_server: &str,
         name_servers: Vec<String>,
     ) -> Result<IpAddr> {
-        let resolver = if dot_server != dns::DoTProvider::NotSpecified {
-            dns::tokio_resolver(dot_server, vec![])
+        let resolver = if dot_server != "" {
+            dns::resolver(dot_server, vec![])
         } else if !name_servers.is_empty() {
-            dns::tokio_resolver(dns::DoTProvider::NotSpecified, name_servers)
+            dns::resolver("", name_servers)
         } else {
-            rs_utilities::dns::tokio_resolver(rs_utilities::dns::DoTProvider::NotSpecified, vec![])
+            rs_utilities::dns::resolver("", vec![])
         };
 
-        let ip = resolver.await.unwrap().lookup_first(domain).await?;
+        let ip = resolver.await.lookup_first(domain).await?;
         info!("resolved {} to {}", domain, ip);
         Ok(ip)
     }
