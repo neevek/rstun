@@ -110,6 +110,6 @@ struct RstuncArgs {
     max_idle_timeout_ms: u64,
 
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 9)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 11)]
     loglevel: String,
 }

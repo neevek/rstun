@@ -1,6 +1,6 @@
 [package]
 name = "rstun"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 
 [lib]
@@ -26,14 +26,12 @@ pin-utils = "0.1.0"
 byte-pool = "0.2.3"
 enum-as-inner = "0.3.3"
 num_cpus = "1.13.1"
-rs-utilities = "0.1"
-trust-dns-resolver = { version = "0.22", features = ["dns-over-rustls"] }
-webpki-roots = "0.22"
+rs-utilities = "0.2"
 
 [target.aarch64-linux-android.dependencies]
 jni = "0.19"
-android_logger = "0.10"
+android_logger = "0.11"
 
 [target.armv7-linux-androideabi.dependencies]
 jni = "0.19"
-android_logger = "0.10"
+android_logger = "0.11"

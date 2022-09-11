@@ -5,36 +5,19 @@ use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
+use rs_utilities::dns;
 use rustls::client::{ServerCertVerified, ServerName};
-use rustls::{Certificate, OwnedTrustAnchor, RootCertStore};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use rustls::Certificate;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::net::TcpStream;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
-use trust_dns_resolver::config::{
-    LookupIpStrategy, NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig,
-    ResolverOpts,
-};
-use trust_dns_resolver::AsyncResolver;
-use webpki_roots;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
-
-pub const ALIDNS_IP_ARRAY: &[IpAddr] = &[
-    IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)),
-    IpAddr::V4(Ipv4Addr::new(223, 6, 6, 6)),
-    IpAddr::V6(Ipv6Addr::new(0x2400, 0x3200, 0, 0, 0, 0, 0, 1)),
-    IpAddr::V6(Ipv6Addr::new(0x2400, 0x3200, 0xbaba, 0, 0, 0, 0, 1)),
-];
-
-//pub const DNSPOD_IP_ARRAY: &[IpAddr] = &[
-//    IpAddr::V4(Ipv4Addr::new(120, 53, 53, 53)),
-//    IpAddr::V4(Ipv4Addr::new(1, 12, 12, 12)),
-//];
 
 pub struct Client {
     pub config: ClientConfig,
@@ -228,8 +211,7 @@ impl Client {
     }
 
     async fn parse_server_addr(addr: &str) -> Result<SocketAddr> {
-        let sock_addr: Result<SocketAddr> =
-            addr.parse().context("failed to parse addr as SocketAddr");
+        let sock_addr: Result<SocketAddr> = addr.parse().context("error will be ignored");
 
         if sock_addr.is_ok() {
             return sock_addr;
@@ -245,60 +227,59 @@ impl Client {
             domain = &addr[..pos];
         }
 
-        let alidns_dot = NameServerConfigGroup::from_ips_tls(
-            ALIDNS_IP_ARRAY,
-            853,
-            "dns.alidns.com".to_string(),
-            true,
-        );
+        if let Ok(ip) =
+            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::AliDNS, vec![]).await
+        {
+            return Ok(SocketAddr::new(ip, port));
+        }
 
-        //let dnspod_dot = NameServerConfigGroup::from_ips_tls(DNSPOD_IP_ARRAY, 853, "dot.pub".to_string(), true);
+        if let Ok(ip) =
+            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::DNSPod, vec![]).await
+        {
+            return Ok(SocketAddr::new(ip, port));
+        }
 
-        let mut root_store = RootCertStore::empty();
-        root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
-            OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        }));
+        if let Ok(ip) = Self::lookup_server_ip(
+            domain,
+            rs_utilities::dns::DoTProvider::NotSpecified,
+            vec![
+                "1.12.12.12".to_string(),
+                "120.53.53.53".to_string(),
+                "223.5.5.5".to_string(),
+                "223.6.6.6".to_string(),
+            ],
+        )
+        .await
+        {
+            return Ok(SocketAddr::new(ip, port));
+        }
 
-        let client_config = rustls::ClientConfig::builder()
-            .with_safe_default_cipher_suites()
-            .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS12])
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        if let Ok(ip) =
+            Self::lookup_server_ip(domain, rs_utilities::dns::DoTProvider::NotSpecified, vec![])
+                .await
+        {
+            return Ok(SocketAddr::new(ip, port));
+        }
 
-        let mut resolver_cfg = ResolverConfig::from_parts(None, vec![], alidns_dot);
-        resolver_cfg.set_tls_client_config(Arc::new(client_config));
+        bail!("failed to resolve domain: {}", domain);
+    }
 
-        resolver_cfg.add_name_server(NameServerConfig::new(
-            "223.5.5.5:53".parse().unwrap(),
-            Protocol::Udp,
-        ));
+    async fn lookup_server_ip(
+        domain: &str,
+        dot_server: dns::DoTProvider,
+        name_servers: Vec<String>,
+    ) -> Result<IpAddr> {
+        let resolver = if dot_server != dns::DoTProvider::NotSpecified {
+            dns::tokio_resolver(dot_server, vec![])
+        } else if !name_servers.is_empty() {
+            dns::tokio_resolver(dns::DoTProvider::NotSpecified, name_servers)
+        } else {
+            rs_utilities::dns::tokio_resolver(rs_utilities::dns::DoTProvider::NotSpecified, vec![])
+        };
 
-        resolver_cfg.add_name_server(NameServerConfig::new(
-            "119.29.29.29:53".parse().unwrap(),
-            Protocol::Udp,
-        ));
-
-        let mut resolve_opt = ResolverOpts::default();
-        resolve_opt.timeout = Duration::from_secs(3);
-        resolve_opt.ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
-        resolve_opt.num_concurrent_reqs = 3;
-        let resolver = AsyncResolver::tokio(resolver_cfg, resolve_opt).unwrap();
-
-        let response = resolver.lookup_ip(domain).await?;
-        let ip = response
-            .iter()
-            .next()
-            .context(format!("failed to resolve address: {}", domain))?;
-
-        info!("resolved {} to {}, port: {}", domain, ip, port);
-
-        Ok(SocketAddr::new(ip, port))
+        let ip = resolver.await.unwrap().lookup_first(domain).await?;
+        info!("resolved {} to {}", domain, ip);
+        Ok(ip)
     }
 }
 
