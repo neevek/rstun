@@ -1,5 +1,5 @@
 use clap::Parser;
-use log::{error, info};
+use log::error;
 use rstun::*;
 
 fn main() {
@@ -11,8 +11,8 @@ fn main() {
         return;
     }
 
-    info!("will use {} worker threads", config.threads);
-    start_tunnelling(config);
+    let mut client = Client::new(config);
+    client.start_tunnelling();
 }
 
 fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool {

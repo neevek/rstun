@@ -9,15 +9,12 @@ mod tunnel_message;
 mod util;
 
 pub use access_server::AccessServer;
-use anyhow::Result;
 use byte_pool::BytePool;
 pub use client::Client;
-use log::{debug, error, info, warn};
 use quinn::{RecvStream, SendStream};
 pub use server::Server;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
@@ -28,8 +25,6 @@ extern crate pretty_env_logger;
 
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
-static mut IS_RUNNING: bool = false;
-
 pub type BufferPool = Arc<BytePool<Vec<u8>>>;
 
 fn new_buffer_pool() -> BufferPool {
@@ -97,108 +92,20 @@ impl ReadResult {
     }
 }
 
-pub fn start_tunnelling(config: ClientConfig) {
-    unsafe {
-        if IS_RUNNING {
-            warn!("tunnel is active");
-            return;
-        }
-        IS_RUNNING = true;
-    }
-
-    info!(
-        "rstunc connecting, idle_timeout:{}, retry_timeout:{}",
-        config.max_idle_timeout_ms, config.wait_before_retry_ms
-    );
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(config.threads)
-        .build()
-        .unwrap()
-        .block_on(async {
-            run(config)
-                .await
-                .unwrap_or_else(|e| error!("run failed: {}", e));
-        });
-
-    unsafe {
-        IS_RUNNING = false;
-    }
-}
-
-async fn run(config: ClientConfig) -> Result<()> {
-    let mut access_server = None;
-    if config.mode == TUNNEL_MODE_OUT {
-        let mut tmp_access_server = AccessServer::new(config.local_access_server_addr.unwrap());
-        tmp_access_server.bind().await?;
-        tmp_access_server.start().await?;
-        access_server = Some(tmp_access_server);
-    }
-
-    let mut connect_retry_count = 0;
-    let connect_max_retry = config.connect_max_retry;
-    let wait_before_retry_ms = config.wait_before_retry_ms;
-    let mut client = Client::new(config);
-
-    loop {
-        match client.connect().await {
-            Ok(_) => {
-                connect_retry_count = 0;
-                if client.config.mode == TUNNEL_MODE_OUT {
-                    client
-                        .serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
-                        .await
-                        .ok();
-                } else {
-                    client.serve_incoming().await.ok();
-                }
-            }
-
-            Err(e) => {
-                error!("connect failed, err: {}", e);
-                if connect_max_retry > 0 {
-                    connect_retry_count += 1;
-                    if connect_retry_count >= connect_max_retry {
-                        info!(
-                            "quit after having retried for {} times",
-                            connect_retry_count
-                        );
-                        break;
-                    }
-                }
-
-                debug!(
-                    "will wait for {}ms before retrying...",
-                    wait_before_retry_ms
-                );
-                tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
-            }
-        }
-
-        if !client.should_retry() {
-            info!("client quit!");
-            break;
-        }
-    }
-    Ok(())
-}
-
-pub fn is_running() -> bool {
-    unsafe { IS_RUNNING }
-}
-
 #[cfg(target_os = "android")]
 #[allow(non_snake_case)]
 pub mod android {
     extern crate jni;
+
+    use jni::sys::jlong;
+    use log::error;
 
     use self::jni::objects::{JClass, JString};
     use self::jni::sys::{jboolean, jint, JNI_FALSE, JNI_TRUE, JNI_VERSION_1_6};
     use self::jni::{JNIEnv, JavaVM};
     use super::*;
     use std::os::raw::c_void;
-    use std::thread::{self, sleep};
+    use std::thread;
 
     #[no_mangle]
     pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
@@ -207,28 +114,20 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_initLogger(
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTuncKt_nativeInitLogger(
         env: JNIEnv,
         _: JClass,
         jlogLevel: JString,
     ) -> jboolean {
         if let Ok(log_level) = env.get_string(jlogLevel) {
-            rs_utilities::LogHelper::init_logger("rstunc", log_level.to_str().unwrap());
+            rs_utilities::LogHelper::init_logger("rstc", log_level.to_str().unwrap());
             return JNI_TRUE;
         }
         JNI_FALSE
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_isRunning(
-        _env: JNIEnv,
-        _: JClass,
-    ) -> jboolean {
-        return if is_running() { JNI_TRUE } else { JNI_FALSE };
-    }
-
-    #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_startTunnelling(
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeCreate(
         env: JNIEnv,
         _: JClass,
         jmode: JString,
@@ -239,7 +138,7 @@ pub mod android {
         jthreads: jint,
         jwaitBeforeRetryMs: jint,
         jmaxIdleTimeoutMs: jint,
-    ) -> jboolean {
+    ) -> jlong {
         let mode = convert_jstring(&env, jmode);
         let server_addr = convert_jstring(&env, jserverAddr);
         let addr_mapping = convert_jstring(&env, jaddrMapping);
@@ -249,7 +148,7 @@ pub mod android {
         let addrs: Vec<&str> = addr_mapping.split("^").collect();
         if addrs.len() != 2 {
             error!("invalid address mapping: {}", addr_mapping);
-            return JNI_FALSE;
+            return 0;
         }
         let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
 
@@ -302,12 +201,43 @@ pub mod android {
             ),
         );
 
-        thread::spawn(|| start_tunnelling(config));
+        Box::into_raw(Box::new(Client::new(config))) as jlong
+    }
 
-        // wait for a moment for the server to start
-        sleep(std::time::Duration::from_millis(500));
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeStartTunnelling(
+        _env: JNIEnv,
+        _: JClass,
+        client_ptr: jlong,
+    ) {
+        if client_ptr == 0 {
+            return;
+        }
 
-        return if IS_RUNNING { JNI_TRUE } else { JNI_FALSE };
+        let client = &mut *(client_ptr as *mut Client);
+        if client.has_scheduled_start() {
+            return;
+        }
+
+        client.set_scheduled_start();
+        thread::spawn(move || {
+            let client = &mut *(client_ptr as *mut Client);
+            client.start_tunnelling();
+        });
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeIsRunning(
+        _env: JNIEnv,
+        _: JClass,
+        client_ptr: jlong,
+    ) -> jboolean {
+        if client_ptr == 0 {
+            return false as jboolean;
+        }
+
+        let client = &mut *(client_ptr as *mut Client);
+        client.is_running() as jboolean
     }
 
     fn convert_jstring(env: &JNIEnv, jstr: JString) -> String {

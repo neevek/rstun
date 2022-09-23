@@ -1,4 +1,6 @@
-use crate::{BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage};
+use crate::{
+    AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT,
+};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use log::{debug, error, info};
@@ -25,6 +27,8 @@ pub struct Client {
     ctrl_stream: Option<ControlStream>,
     buffer_pool: BufferPool,
     is_terminated: Arc<Mutex<bool>>,
+    is_running: Mutex<bool>,
+    scheduled_start: bool,
 }
 
 impl Client {
@@ -35,7 +39,87 @@ impl Client {
             ctrl_stream: None,
             buffer_pool: crate::new_buffer_pool(),
             is_terminated: Arc::new(Mutex::new(false)),
+            is_running: Mutex::new(false),
+            scheduled_start: false,
         }
+    }
+
+    pub fn start_tunnelling(&mut self) {
+        info!(
+            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
+            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
+        );
+
+        *self.is_running.lock().unwrap() = true;
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(self.config.threads)
+            .build()
+            .unwrap()
+            .block_on(async {
+                self.connect_and_serve()
+                    .await
+                    .unwrap_or_else(|e| error!("connect failed: {}", e));
+            });
+
+        *self.is_running.lock().unwrap() = false;
+    }
+
+    async fn connect_and_serve(&mut self) -> Result<()> {
+        // create a local access server for 'out' tunnel
+        let mut access_server = None;
+        if self.config.mode == TUNNEL_MODE_OUT {
+            let mut tmp_access_server =
+                AccessServer::new(self.config.local_access_server_addr.unwrap());
+            tmp_access_server.bind().await?;
+            tmp_access_server.start().await?;
+            access_server = Some(tmp_access_server);
+        }
+
+        let mut connect_retry_count = 0;
+        let connect_max_retry = self.config.connect_max_retry;
+        let wait_before_retry_ms = self.config.wait_before_retry_ms;
+        loop {
+            match self.connect().await {
+                Ok(_) => {
+                    connect_retry_count = 0;
+                    if self.config.mode == TUNNEL_MODE_OUT {
+                        self.serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
+                            .await
+                            .ok();
+                    } else {
+                        self.serve_incoming().await.ok();
+                    }
+                }
+
+                Err(e) => {
+                    error!("connect failed, err: {}", e);
+                    if connect_max_retry > 0 {
+                        connect_retry_count += 1;
+                        if connect_retry_count >= connect_max_retry {
+                            info!(
+                                "quit after having retried for {} times",
+                                connect_retry_count
+                            );
+                            break;
+                        }
+                    }
+
+                    debug!(
+                        "will wait for {}ms before retrying...",
+                        wait_before_retry_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
+                }
+            }
+
+            if !self.should_retry() {
+                info!("client quit!");
+                break;
+            }
+        }
+        Ok(())
     }
 
     pub async fn connect(&mut self) -> Result<()> {
@@ -98,7 +182,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn serve_outgoing(
+    async fn serve_outgoing(
         &mut self,
         local_conn_receiver: &mut Receiver<Option<TcpStream>>,
     ) -> Result<()> {
@@ -132,7 +216,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn serve_incoming(&mut self) -> Result<()> {
+    async fn serve_incoming(&mut self) -> Result<()> {
         info!("start serving...");
 
         self.observe_terminate_signals().await?;
@@ -156,7 +240,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn observe_terminate_signals(&mut self) -> Result<()> {
+    async fn observe_terminate_signals(&mut self) -> Result<()> {
         let mut quic_send = self.ctrl_stream.take().unwrap().quic_send;
 
         let is_terminated_flag = self.is_terminated.clone();
@@ -181,8 +265,20 @@ impl Client {
         Ok(())
     }
 
-    pub fn should_retry(&mut self) -> bool {
+    fn should_retry(&mut self) -> bool {
         return !*self.is_terminated.lock().unwrap();
+    }
+
+    pub fn is_running(&self) -> bool {
+        *self.is_running.lock().unwrap()
+    }
+
+    pub fn set_scheduled_start(&mut self) {
+        self.scheduled_start = true;
+    }
+
+    pub fn has_scheduled_start(&self) -> bool {
+        self.scheduled_start
     }
 
     async fn login(
