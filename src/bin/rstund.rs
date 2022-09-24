@@ -34,7 +34,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         if d.starts_with("0.0.0.0:") {
             *d = d.replace("0.0.0.0:", "127.0.0.1:");
         }
-        if !d.contains(":") {
+        if !d.contains(':') {
             *d = format!("127.0.0.1:{}", d);
         }
 

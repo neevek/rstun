@@ -1,12 +1,12 @@
 #[macro_use]
 pub mod macros;
+mod tunnel_info_bridge;
 
 mod access_server;
 mod client;
 mod server;
 mod tunnel;
 mod tunnel_message;
-mod util;
 
 pub use access_server::AccessServer;
 use byte_pool::BytePool;
@@ -18,8 +18,6 @@ use std::sync::Arc;
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
-#[macro_use]
-extern crate serde_derive;
 extern crate bincode;
 extern crate pretty_env_logger;
 
@@ -84,11 +82,7 @@ pub(crate) enum ReadResult {
 impl ReadResult {
     #![allow(dead_code)]
     pub fn is_eof(&self) -> bool {
-        if let Self::EOF = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Self::EOF)
     }
 }
 
@@ -219,11 +213,12 @@ pub mod android {
             return;
         }
 
-        client.set_scheduled_start();
+        client.set_scheduled_start(true);
         thread::spawn(move || {
             let client = &mut *(client_ptr as *mut Client);
             client.start_tunnelling();
         });
+        client.set_scheduled_start(false);
     }
 
     #[no_mangle]
@@ -238,6 +233,39 @@ pub mod android {
 
         let client = &mut *(client_ptr as *mut Client);
         client.is_running() as jboolean
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeSetEnableOnInfoReport(
+        env: JNIEnv,
+        jobj: JClass,
+        client_ptr: jlong,
+        enable: jboolean,
+    ) {
+        if client_ptr == 0 {
+            return;
+        }
+
+        let client = &mut *(client_ptr as *mut Client);
+        if !client.has_on_info_listener() {
+            let jvm = env.get_java_vm().unwrap();
+            let jobj_global_ref = env.new_global_ref(jobj).unwrap();
+            client.set_on_info_listener(move |data: &str| {
+                let env = jvm.attach_current_thread().unwrap();
+                if let Ok(s) = env.new_string(data) {
+                    env.call_method(
+                        &jobj_global_ref,
+                        "onInfo",
+                        "(Ljava/lang/String;)V",
+                        &[s.into()],
+                    )
+                    .unwrap();
+                }
+            });
+            client.set_enable_on_info_report(true);
+        }
+
+        client.set_enable_on_info_report(enable != 0);
     }
 
     fn convert_jstring(env: &JNIEnv, jstr: JString) -> String {

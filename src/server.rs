@@ -215,7 +215,7 @@ impl Server {
 
         info!("connection authenticated! addr: {}", remote_addr);
 
-        return Ok(tunnel_type);
+        Ok(tunnel_type)
     }
 
     async fn process_out_connection(
@@ -256,8 +256,7 @@ impl Server {
                                 let tcp_stream = tcp_stream.into_split();
                                 Tunnel::new(this.buffer_pool.clone())
                                     .start(tcp_stream, quic_stream)
-                                    .await
-                                    .ok();
+                                    .await;
                             }
 
                             Err(e) => {
@@ -296,8 +295,7 @@ impl Server {
                     let tcp_stream = tcp_stream.into_split();
                     Tunnel::new(self.buffer_pool.clone())
                         .start(tcp_stream, quic_stream)
-                        .await
-                        .ok();
+                        .await;
                 }
                 _ => {
                     bail_with_log!("failed to open bi_streams to client, quit");
@@ -324,8 +322,8 @@ impl Server {
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
         let cert = std::fs::read(cert_path).context("failed to read cert file")?;
         let key = std::fs::read(key_path).context("failed to read key file")?;
-        let cert = Certificate(cert.into());
-        let key = PrivateKey(key.into());
+        let cert = Certificate(cert);
+        let key = PrivateKey(key);
 
         Ok((cert, key))
     }

@@ -16,7 +16,7 @@ fn main() {
 }
 
 fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool {
-    let addrs: Vec<&str> = args.addr_mapping.split("^").collect();
+    let addrs: Vec<&str> = args.addr_mapping.split('^').collect();
     if addrs.len() != 2 {
         error!("invalid address mapping: {}", args.addr_mapping);
         return false;
@@ -24,7 +24,7 @@ fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool 
     let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
 
     for addr in &mut addrs {
-        if !addr.contains(":") {
+        if !addr.contains(':') {
             *addr = format!("127.0.0.1:{}", addr);
         }
     }
@@ -61,15 +61,12 @@ fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool 
         }))
     };
 
-    config.local_access_server_addr = Some(
-        local_access_server_addr.parse().expect(
-            format!(
-                "invalid local_access_server_addr: {}",
-                local_access_server_addr
-            )
-            .as_str(),
-        ),
-    );
+    config.local_access_server_addr = Some(local_access_server_addr.parse().unwrap_or_else(|e| {
+        panic!(
+            "invalid local_access_server_addr: {}, {}",
+            local_access_server_addr, e
+        )
+    }));
 
     true
 }

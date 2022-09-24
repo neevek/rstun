@@ -1,3 +1,4 @@
+use crate::tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType};
 use crate::{
     AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT,
 };
@@ -10,8 +11,9 @@ use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::dns;
 use rustls::client::{ServerCertVerified, ServerName};
 use rustls::Certificate;
+use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use tokio::net::TcpStream;
 use tokio::signal::unix::{signal, SignalKind};
@@ -20,15 +22,19 @@ use tokio::time::Duration;
 
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
+const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
 
 pub struct Client {
     pub config: ClientConfig,
-    remote_conn: Option<quinn::NewConnection>,
+    remote_conn: Option<Arc<RwLock<quinn::NewConnection>>>,
     ctrl_stream: Option<ControlStream>,
     buffer_pool: BufferPool,
     is_terminated: Arc<Mutex<bool>>,
     is_running: Mutex<bool>,
     scheduled_start: bool,
+    tunnel_info_bridge: TunnelInfoBridge,
+    on_info_report_enabled: bool,
+    total_traffic_data: Arc<Mutex<TrafficData>>,
 }
 
 impl Client {
@@ -41,6 +47,9 @@ impl Client {
             is_terminated: Arc::new(Mutex::new(false)),
             is_running: Mutex::new(false),
             scheduled_start: false,
+            tunnel_info_bridge: TunnelInfoBridge::new(),
+            on_info_report_enabled: false,
+            total_traffic_data: Arc::new(Mutex::new(TrafficData::default())),
         }
     }
 
@@ -51,6 +60,8 @@ impl Client {
         );
 
         *self.is_running.lock().unwrap() = true;
+
+        self.post_tunnel_log("starting...");
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -64,12 +75,22 @@ impl Client {
             });
 
         *self.is_running.lock().unwrap() = false;
+
+        self.post_tunnel_log("quit");
     }
 
     async fn connect_and_serve(&mut self) -> Result<()> {
         // create a local access server for 'out' tunnel
         let mut access_server = None;
         if self.config.mode == TUNNEL_MODE_OUT {
+            self.post_tunnel_log(
+                format!(
+                    "starting AccessServer for OUT mode tunneling: {:?}",
+                    self.config.local_access_server_addr.unwrap()
+                )
+                .as_str(),
+            );
+
             let mut tmp_access_server =
                 AccessServer::new(self.config.local_access_server_addr.unwrap());
             tmp_access_server.bind().await?;
@@ -80,14 +101,15 @@ impl Client {
         let mut connect_retry_count = 0;
         let connect_max_retry = self.config.connect_max_retry;
         let wait_before_retry_ms = self.config.wait_before_retry_ms;
+
         loop {
             match self.connect().await {
                 Ok(_) => {
                     connect_retry_count = 0;
+
                     if self.config.mode == TUNNEL_MODE_OUT {
                         self.serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
-                            .await
-                            .ok();
+                            .await;
                     } else {
                         self.serve_incoming().await.ok();
                     }
@@ -118,12 +140,19 @@ impl Client {
                 info!("client quit!");
                 break;
             }
+
+            info!("connection dropped, will reconnect.");
+            self.post_tunnel_log("reconnecting...");
         }
         Ok(())
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        info!("using cert: {}", self.config.cert_path);
+        self.post_tunnel_info(TunnelInfo::new(
+            TunnelInfoType::TunnelState,
+            Box::new("Connecting"),
+        ));
+        self.post_tunnel_log(format!("using cert: {}", self.config.cert_path).as_str());
 
         let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
         let crypto = rustls::ClientConfig::builder()
@@ -151,15 +180,23 @@ impl Client {
 
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
         endpoint.set_default_client_config(cfg);
-        info!(
-            "connecting to {}, local_addr: {}",
-            remote_addr,
-            endpoint.local_addr().unwrap()
+
+        self.post_tunnel_log(
+            format!(
+                "connecting to {}, local_addr: {}",
+                remote_addr,
+                endpoint.local_addr().unwrap()
+            )
+            .as_str(),
         );
 
         let connection = endpoint.connect(remote_addr, "localhost")?.await?;
 
-        info!("connected");
+        self.post_tunnel_info(TunnelInfo::new(
+            TunnelInfoType::TunnelState,
+            Box::new("Connected"),
+        ));
+        self.post_tunnel_log(format!("connected to server: {:?}", remote_addr).as_str());
 
         let (mut quic_send, mut quic_recv) = connection
             .connection
@@ -168,44 +205,49 @@ impl Client {
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
             .unwrap();
 
-        info!("logging in... server: {}", remote_addr);
+        self.post_tunnel_log(format!("logging in... server: {}", remote_addr).as_str());
 
         Self::login(&self.config, &mut quic_send, &mut quic_recv).await?;
 
-        info!("logged in! server: {}", remote_addr);
+        self.post_tunnel_info(TunnelInfo::new(
+            TunnelInfoType::TunnelState,
+            Box::new("Tunnelling"),
+        ));
+        self.post_tunnel_log(format!("logged in! server: {}", remote_addr).as_str());
 
-        self.remote_conn = Some(connection);
+        self.remote_conn = Some(Arc::new(RwLock::new(connection)));
         self.ctrl_stream = Some(ControlStream {
             quic_send,
             quic_recv,
         });
+
         Ok(())
     }
 
-    async fn serve_outgoing(
-        &mut self,
-        local_conn_receiver: &mut Receiver<Option<TcpStream>>,
-    ) -> Result<()> {
-        info!("start serving...");
+    async fn serve_outgoing(&mut self, local_conn_receiver: &mut Receiver<Option<TcpStream>>) {
+        self.post_tunnel_log("start serving in [OUT] mode...");
+
+        self.report_traffic_data_in_background();
 
         let remote_conn = self.remote_conn.as_ref().unwrap();
+        let ref conn = remote_conn.read().unwrap().connection;
 
         // accept local connections and build a tunnel to remote
         while let Some(tcp_stream) = local_conn_receiver.recv().await {
             let tcp_stream = unwrap_or_continue!(tcp_stream);
-            match remote_conn.connection.open_bi().await {
+
+            match conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
                         "[OUT] open stream for conn, {} -> {}",
                         quic_stream.0.id().index(),
-                        remote_conn.connection.remote_address(),
+                        conn.remote_address(),
                     );
 
                     let tcp_stream = tcp_stream.into_split();
                     Tunnel::new(self.buffer_pool.clone())
                         .start(tcp_stream, quic_stream)
-                        .await
-                        .ok();
+                        .await;
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
@@ -213,15 +255,27 @@ impl Client {
                 }
             }
         }
-        Ok(())
+
+        let stats = conn.stats();
+        let mut data = self.total_traffic_data.as_ref().lock().unwrap();
+        data.rx_bytes += stats.udp_rx.bytes;
+        data.tx_bytes += stats.udp_tx.bytes;
+        data.rx_dgrams += stats.udp_rx.datagrams;
+        data.tx_dgrams += stats.udp_tx.datagrams;
     }
 
     async fn serve_incoming(&mut self) -> Result<()> {
-        info!("start serving...");
+        self.post_tunnel_log("start serving in [IN] mode...");
 
-        self.observe_terminate_signals().await?;
+        self.observe_terminate_signals().await.map_err(|e| {
+            self.post_tunnel_log("failed to observe signals");
+            e
+        })?;
 
-        let remote_conn = self.remote_conn.as_mut().unwrap();
+        // this will take the lock exclusively, so remote_conn cannot be shared and we cannot
+        // implement traffic data report for [IN] mode tunnelling using the same technique that
+        // [OUT] mode tunnelling uses
+        let mut remote_conn = self.remote_conn.as_mut().unwrap().write().unwrap();
         while let Some(quic_stream) = remote_conn.bi_streams.next().await {
             let quic_stream = quic_stream?;
             match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
@@ -229,8 +283,7 @@ impl Client {
                     let tcp_stream = tcp_stream.into_split();
                     Tunnel::new(self.buffer_pool.clone())
                         .start(tcp_stream, quic_stream)
-                        .await
-                        .ok();
+                        .await;
                 }
                 _ => {
                     error!("failed to connect to access server");
@@ -238,6 +291,43 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    fn report_traffic_data_in_background(&self) {
+        let remote_conn = Arc::downgrade(self.remote_conn.as_ref().unwrap());
+        let total_traffic_data = self.total_traffic_data.clone();
+        let tunnel_info_bridge = self.tunnel_info_bridge.clone();
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(POST_TRAFFIC_DATA_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                match remote_conn.upgrade() {
+                    Some(remote_conn) => {
+                        let stats = remote_conn.read().unwrap().connection.stats();
+                        let total_traffic_data = total_traffic_data.as_ref().lock().unwrap();
+                        let data = TrafficData {
+                            rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
+                            tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
+                            rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
+                            tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
+                        };
+                        tunnel_info_bridge.post_tunnel_info(&TunnelInfo::new(
+                            TunnelInfoType::Traffic,
+                            Box::new(data),
+                        ));
+                    }
+                    _ => {
+                        info!("connection dropped!");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     async fn observe_terminate_signals(&mut self) -> Result<()> {
@@ -273,8 +363,8 @@ impl Client {
         *self.is_running.lock().unwrap()
     }
 
-    pub fn set_scheduled_start(&mut self) {
-        self.scheduled_start = true;
+    pub fn set_scheduled_start(&mut self, start: bool) {
+        self.scheduled_start = start;
     }
 
     pub fn has_scheduled_start(&self) -> bool {
@@ -301,7 +391,7 @@ impl Client {
 
     fn read_cert(cert_path: &str) -> Result<rustls::Certificate> {
         let cert = std::fs::read(cert_path).context("failed to read cert file")?;
-        let cert = rustls::Certificate(cert.into());
+        let cert = rustls::Certificate(cert);
 
         Ok(cert)
     }
@@ -315,7 +405,7 @@ impl Client {
 
         let mut domain = addr;
         let mut port = DEFAULT_SERVER_PORT;
-        let pos = addr.rfind(":");
+        let pos = addr.rfind(':');
         if let Some(pos) = pos {
             port = addr[(pos + 1)..]
                 .parse()
@@ -358,7 +448,7 @@ impl Client {
         dot_server: &str,
         name_servers: Vec<String>,
     ) -> Result<IpAddr> {
-        let resolver = if dot_server != "" {
+        let resolver = if !dot_server.is_empty() {
             dns::resolver(dot_server, vec![])
         } else if !name_servers.is_empty() {
             dns::resolver("", name_servers)
@@ -369,6 +459,32 @@ impl Client {
         let ip = resolver.await.lookup_first(domain).await?;
         info!("resolved {} to {}", domain, ip);
         Ok(ip)
+    }
+
+    fn post_tunnel_log(&self, log: &str) {
+        info!("{}", log);
+        self.post_tunnel_info(TunnelInfo::new(TunnelInfoType::TunnelLog, Box::new(log)));
+    }
+
+    fn post_tunnel_info<T>(&self, server_info: TunnelInfo<T>)
+    where
+        T: ?Sized + Serialize,
+    {
+        if self.on_info_report_enabled {
+            self.tunnel_info_bridge.post_tunnel_info(&server_info);
+        }
+    }
+
+    pub fn set_on_info_listener(&mut self, callback: impl FnMut(&str) + 'static + Send + Sync) {
+        self.tunnel_info_bridge.set_listener(callback);
+    }
+
+    pub fn has_on_info_listener(&self) -> bool {
+        self.tunnel_info_bridge.has_listener()
+    }
+
+    pub fn set_enable_on_info_report(&mut self, enable: bool) {
+        self.on_info_report_enabled = enable
     }
 }
 
@@ -387,9 +503,9 @@ impl rustls::client::ServerCertVerifier for CertVerifier {
         _now: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         if end_entity.0 != self.cert.0 {
-            return Err(rustls::Error::General(format!(
-                "server certificates doesn't match ours"
-            )));
+            return Err(rustls::Error::General(
+                "server certificates doesn't match ours".to_string(),
+            ));
         }
 
         info!("certificate verified!");

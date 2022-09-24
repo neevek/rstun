@@ -19,7 +19,7 @@ impl Tunnel {
         &self,
         tcp_stream: (OwnedReadHalf, OwnedWriteHalf),
         quic_stream: (SendStream, RecvStream),
-    ) -> Result<()> {
+    ) {
         let (mut tcp_read, mut tcp_write) = tcp_stream;
         let (mut quic_send, mut quic_recv) = quic_stream;
 
@@ -48,7 +48,6 @@ impl Tunnel {
                 }
             }
         });
-        Ok(())
     }
 
     async fn tcp_to_quic(

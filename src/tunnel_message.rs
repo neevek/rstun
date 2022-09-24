@@ -2,11 +2,11 @@ use anyhow::Result;
 use anyhow::{bail, Context};
 use enum_as_inner::EnumAsInner;
 use quinn::{RecvStream, SendStream};
+use rs_utilities::Utils;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-use crate::util;
-
-#[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum TunnelMessage {
     ReqInLogin(LoginInfo),
     ReqOutLogin(LoginInfo),
@@ -16,7 +16,7 @@ pub enum TunnelMessage {
     RespSuccess,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
     pub access_server_addr: String, // ip:port tuple
@@ -30,7 +30,7 @@ impl TunnelMessage {
             .await
             .context("read message length failed")?;
 
-        let msg_len = util::as_u32_be(&msg_len) as usize;
+        let msg_len = Utils::to_u32_be(&msg_len) as usize;
         let mut msg = vec![0; msg_len];
         quic_recv
             .read_exact(&mut msg)
