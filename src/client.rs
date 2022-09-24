@@ -8,7 +8,7 @@ use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
-use rs_utilities::dns;
+use rs_utilities::{dns, log_and_bail, unwrap_or_continue};
 use rustls::client::{ServerCertVerified, ServerName};
 use rustls::Certificate;
 use serde::Serialize;
@@ -382,7 +382,7 @@ impl Client {
 
         let resp = TunnelMessage::recv(quic_recv).await?;
         if resp.as_resp_success().is_none() {
-            bail_with_log!("failed to login");
+            log_and_bail!("failed to login");
         }
         TunnelMessage::handle_message(&resp)?;
         debug!("finished login request!");

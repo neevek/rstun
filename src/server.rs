@@ -6,6 +6,7 @@ use futures_util::StreamExt;
 use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
+use rs_utilities::log_and_bail;
 use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -148,7 +149,7 @@ impl Server {
                 ))?;
 
                 if !self.config.downstreams.contains(&downstream_addr) {
-                    bail_with_log!("invalid addr: {}", downstream_addr);
+                    log_and_bail!("invalid addr: {}", downstream_addr);
                 }
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -171,7 +172,7 @@ impl Server {
                         &TunnelMessage::RespFailure("remote access port is in use".to_string()),
                     )
                     .await?;
-                    bail_with_log!("remote access port is in use: {}", upstream_addr.port());
+                    log_and_bail!("remote access port is in use: {}", upstream_addr.port());
                 }
 
                 let mut access_server = AccessServer::new(upstream_addr);
@@ -181,7 +182,7 @@ impl Server {
                         &TunnelMessage::RespFailure("access server failed to bind".to_string()),
                     )
                     .await?;
-                    bail_with_log!("access server failed to bind");
+                    log_and_bail!("access server failed to bind");
                 }
 
                 if access_server.start().await.is_err() {
@@ -190,7 +191,7 @@ impl Server {
                         &TunnelMessage::RespFailure("access server failed to start".to_string()),
                     )
                     .await?;
-                    bail_with_log!("access server failed to start");
+                    log_and_bail!("access server failed to start");
                 }
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -209,7 +210,7 @@ impl Server {
             }
 
             _ => {
-                bail_with_log!("received unepxected message");
+                log_and_bail!("received unepxected message");
             }
         }
 
@@ -236,7 +237,7 @@ impl Server {
                     return Ok(());
                 }
                 Err(e) => {
-                    bail_with_log!(
+                    log_and_bail!(
                         "failed to open bi_streams, addr: {}, err: {}",
                         remote_addr,
                         e
@@ -298,7 +299,7 @@ impl Server {
                         .await;
                 }
                 _ => {
-                    bail_with_log!("failed to open bi_streams to client, quit");
+                    log_and_bail!("failed to open bi_streams to client, quit");
                 }
             }
         }
@@ -330,7 +331,7 @@ impl Server {
 
     fn check_password(password1: &str, password2: &str) -> Result<()> {
         if password1 != password2 {
-            bail_with_log!("passwords don't match!");
+            log_and_bail!("passwords don't match!");
         }
         Ok(())
     }

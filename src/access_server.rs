@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use log::{debug, error, info};
+use rs_utilities::log_and_bail;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -35,7 +36,7 @@ impl AccessServer {
 
     pub async fn start(&mut self) -> Result<()> {
         if self.tcp_listener.is_none() {
-            bail_with_log!("bind the server first");
+            log_and_bail!("bind the server first");
         }
 
         let listener = self.tcp_listener.clone().unwrap();
