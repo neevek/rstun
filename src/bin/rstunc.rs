@@ -12,6 +12,10 @@ fn main() {
     }
 
     let mut client = Client::new(config);
+    client.set_enable_on_info_report(true);
+    client.set_on_info_listener(|s| {
+        error!("{}", s);
+    });
     client.start_tunnelling();
 }
 

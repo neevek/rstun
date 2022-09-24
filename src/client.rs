@@ -12,6 +12,7 @@ use rs_utilities::{dns, log_and_bail, unwrap_or_continue};
 use rustls::client::{ServerCertVerified, ServerName};
 use rustls::Certificate;
 use serde::Serialize;
+use std::fmt::Display;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
@@ -24,17 +25,42 @@ const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
 
+#[derive(Clone, Serialize)]
+pub enum ClientState {
+    Idle = 0,
+    Preparing,
+    Connecting,
+    Connected,
+    LoggingIn,
+    Tunnelling,
+    Terminated,
+}
+
+impl Display for ClientState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientState::Idle => write!(f, "Idle"),
+            ClientState::Preparing => write!(f, "Preparing"),
+            ClientState::Connecting => write!(f, "Connecting"),
+            ClientState::Connected => write!(f, "Connected"),
+            ClientState::LoggingIn => write!(f, "LoggingIn"),
+            ClientState::Tunnelling => write!(f, "Tunnelling"),
+            ClientState::Terminated => write!(f, "Terminated"),
+        }
+    }
+}
+
 pub struct Client {
     pub config: ClientConfig,
     remote_conn: Option<Arc<RwLock<quinn::NewConnection>>>,
     ctrl_stream: Option<ControlStream>,
     buffer_pool: BufferPool,
     is_terminated: Arc<Mutex<bool>>,
-    is_running: Mutex<bool>,
     scheduled_start: bool,
     tunnel_info_bridge: TunnelInfoBridge,
     on_info_report_enabled: bool,
     total_traffic_data: Arc<Mutex<TrafficData>>,
+    state: ClientState,
 }
 
 impl Client {
@@ -45,11 +71,11 @@ impl Client {
             ctrl_stream: None,
             buffer_pool: crate::new_buffer_pool(),
             is_terminated: Arc::new(Mutex::new(false)),
-            is_running: Mutex::new(false),
             scheduled_start: false,
             tunnel_info_bridge: TunnelInfoBridge::new(),
             on_info_report_enabled: false,
             total_traffic_data: Arc::new(Mutex::new(TrafficData::default())),
+            state: ClientState::Idle,
         }
     }
 
@@ -59,9 +85,8 @@ impl Client {
             self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
         );
 
-        *self.is_running.lock().unwrap() = true;
-
-        self.post_tunnel_log("starting...");
+        self.post_tunnel_log("preparing...");
+        self.set_and_post_tunnel_state(ClientState::Preparing);
 
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -74,9 +99,8 @@ impl Client {
                     .unwrap_or_else(|e| error!("connect failed: {}", e));
             });
 
-        *self.is_running.lock().unwrap() = false;
-
         self.post_tunnel_log("quit");
+        self.set_and_post_tunnel_state(ClientState::Terminated);
     }
 
     async fn connect_and_serve(&mut self) -> Result<()> {
@@ -148,10 +172,7 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<()> {
-        self.post_tunnel_info(TunnelInfo::new(
-            TunnelInfoType::TunnelState,
-            Box::new("Connecting"),
-        ));
+        self.set_and_post_tunnel_state(ClientState::Connecting);
         self.post_tunnel_log(format!("using cert: {}", self.config.cert_path).as_str());
 
         let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
@@ -192,10 +213,7 @@ impl Client {
 
         let connection = endpoint.connect(remote_addr, "localhost")?.await?;
 
-        self.post_tunnel_info(TunnelInfo::new(
-            TunnelInfoType::TunnelState,
-            Box::new("Connected"),
-        ));
+        self.set_and_post_tunnel_state(ClientState::Connected);
         self.post_tunnel_log(format!("connected to server: {:?}", remote_addr).as_str());
 
         let (mut quic_send, mut quic_recv) = connection
@@ -205,14 +223,12 @@ impl Client {
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
             .unwrap();
 
+        self.set_and_post_tunnel_state(ClientState::LoggingIn);
         self.post_tunnel_log(format!("logging in... server: {}", remote_addr).as_str());
 
         Self::login(&self.config, &mut quic_send, &mut quic_recv).await?;
 
-        self.post_tunnel_info(TunnelInfo::new(
-            TunnelInfoType::TunnelState,
-            Box::new("Tunnelling"),
-        ));
+        self.set_and_post_tunnel_state(ClientState::Tunnelling);
         self.post_tunnel_log(format!("logged in! server: {}", remote_addr).as_str());
 
         self.remote_conn = Some(Arc::new(RwLock::new(connection)));
@@ -359,8 +375,8 @@ impl Client {
         return !*self.is_terminated.lock().unwrap();
     }
 
-    pub fn is_running(&self) -> bool {
-        *self.is_running.lock().unwrap()
+    pub fn get_state(&self) -> ClientState {
+        self.state.clone()
     }
 
     pub fn set_scheduled_start(&mut self, start: bool) {
@@ -466,6 +482,15 @@ impl Client {
         self.post_tunnel_info(TunnelInfo::new(TunnelInfoType::TunnelLog, Box::new(log)));
     }
 
+    fn set_and_post_tunnel_state(&mut self, state: ClientState) {
+        info!("client state: {}", state);
+        self.state = state;
+        self.post_tunnel_info(TunnelInfo::new(
+            TunnelInfoType::TunnelState,
+            Box::new(self.state.to_string()),
+        ));
+    }
+
     fn post_tunnel_info<T>(&self, server_info: TunnelInfo<T>)
     where
         T: ?Sized + Serialize,
@@ -484,6 +509,7 @@ impl Client {
     }
 
     pub fn set_enable_on_info_report(&mut self, enable: bool) {
+        info!("set_enable_on_info_report, enable:{}", enable);
         self.on_info_report_enabled = enable
     }
 }

@@ -89,7 +89,7 @@ impl ReadResult {
 pub mod android {
     extern crate jni;
 
-    use jni::sys::jlong;
+    use jni::sys::{jlong, jstring};
     use log::error;
 
     use self::jni::objects::{JClass, JString};
@@ -197,6 +197,17 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeStop(
+        _env: JNIEnv,
+        _: JClass,
+        client_ptr: jlong,
+    ) {
+        if client_ptr != 0 {
+            let _boxed_client = Box::from_raw(client_ptr as *mut Client);
+        }
+    }
+
+    #[no_mangle]
     pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeStartTunnelling(
         _env: JNIEnv,
         _: JClass,
@@ -220,17 +231,19 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeIsRunning(
-        _env: JNIEnv,
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeGetState(
+        env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
-    ) -> jboolean {
+    ) -> jstring {
         if client_ptr == 0 {
-            return false as jboolean;
+            return env.new_string("").unwrap().into_inner();
         }
 
         let client = &mut *(client_ptr as *mut Client);
-        client.is_running() as jboolean
+        env.new_string(client.get_state().to_string())
+            .unwrap()
+            .into_inner()
     }
 
     #[no_mangle]
@@ -245,7 +258,8 @@ pub mod android {
         }
 
         let client = &mut *(client_ptr as *mut Client);
-        if !client.has_on_info_listener() {
+        let bool_enable = enable == 1;
+        if bool_enable && !client.has_on_info_listener() {
             let jvm = env.get_java_vm().unwrap();
             let jobj_global_ref = env.new_global_ref(jobj).unwrap();
             client.set_on_info_listener(move |data: &str| {
@@ -260,10 +274,9 @@ pub mod android {
                     .unwrap();
                 }
             });
-            client.set_enable_on_info_report(true);
         }
 
-        client.set_enable_on_info_report(enable != 0);
+        client.set_enable_on_info_report(bool_enable);
     }
 
     fn convert_jstring(env: &JNIEnv, jstr: JString) -> String {
