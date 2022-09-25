@@ -13,7 +13,7 @@ tokio = { version = "1.16", features = ["full"] }
 pretty_env_logger = "0.4.0"
 ring = "0.16.20"
 log = "0.4.14"
-chrono = "0.4.19"
+chrono = "0.4"
 anyhow = "1.0.44"
 quinn = "0.8.0"
 quinn-proto = "0.8.0"

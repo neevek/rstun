@@ -21,6 +21,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
 
+const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
@@ -166,14 +167,12 @@ impl Client {
             }
 
             info!("connection dropped, will reconnect.");
-            self.post_tunnel_log("reconnecting...");
         }
         Ok(())
     }
 
     pub async fn connect(&mut self) -> Result<()> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
-        self.post_tunnel_log(format!("using cert: {}", self.config.cert_path).as_str());
 
         let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
         let crypto = rustls::ClientConfig::builder()
@@ -267,6 +266,9 @@ impl Client {
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
+                    self.post_tunnel_log(
+                        format!("connection failed, will reconnect: {}", e).as_str(),
+                    );
                     break;
                 }
             }
@@ -479,7 +481,14 @@ impl Client {
 
     fn post_tunnel_log(&self, log: &str) {
         info!("{}", log);
-        self.post_tunnel_info(TunnelInfo::new(TunnelInfoType::TunnelLog, Box::new(log)));
+        self.post_tunnel_info(TunnelInfo::new(
+            TunnelInfoType::TunnelLog,
+            Box::new(format!(
+                "{} {}",
+                chrono::Local::now().format(TIME_FORMAT),
+                log
+            )),
+        ));
     }
 
     fn set_and_post_tunnel_state(&mut self, state: ClientState) {
