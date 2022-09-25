@@ -399,7 +399,7 @@ impl Client {
         debug!("sent login request!");
 
         let resp = TunnelMessage::recv(quic_recv).await?;
-        if resp.as_resp_success().is_none() {
+        if !resp.is_resp_success() {
             log_and_bail!("failed to login");
         }
         TunnelMessage::handle_message(&resp)?;
