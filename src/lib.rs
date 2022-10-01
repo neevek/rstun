@@ -106,7 +106,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTuncKt_nativeInitLogger(
+    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeInitLogger(
         env: JNIEnv,
         _: JClass,
         jlogLevel: JString,
