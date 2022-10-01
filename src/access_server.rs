@@ -16,7 +16,7 @@ pub struct AccessServer {
 
 impl AccessServer {
     pub fn new(addr: SocketAddr) -> Self {
-        let (sender, receiver) = channel(50000);
+        let (sender, receiver) = channel(1024);
 
         AccessServer {
             addr,

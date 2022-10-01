@@ -82,7 +82,7 @@ struct RstuncArgs {
     #[clap(short = 'm', long, possible_values = &[TUNNEL_MODE_IN, TUNNEL_MODE_OUT], display_order = 1)]
     mode: String,
 
-    /// Address (<domain:ip>[:port] pair) of rstund
+    /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
     #[clap(short = 'r', long, display_order = 2)]
     server_addr: String,
 
@@ -107,7 +107,7 @@ struct RstuncArgs {
     wait_before_retry_ms: u64,
 
     /// Max idle timeout for the connection
-    #[clap(short = 'i', long, default_value = "20000", display_order = 8)]
+    #[clap(short = 'i', long, default_value = "150000", display_order = 8)]
     max_idle_timeout_ms: u64,
 
     /// Log level

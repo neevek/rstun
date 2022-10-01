@@ -110,7 +110,7 @@ impl Client {
         if self.config.mode == TUNNEL_MODE_OUT {
             self.post_tunnel_log(
                 format!(
-                    "starting AccessServer for OUT mode tunneling: {:?}",
+                    "starting access server for [TunnelOut] tunneling: {:?}",
                     self.config.local_access_server_addr.unwrap()
                 )
                 .as_str(),
@@ -223,12 +223,12 @@ impl Client {
             .unwrap();
 
         self.set_and_post_tunnel_state(ClientState::LoggingIn);
-        self.post_tunnel_log(format!("logging in... server: {}", remote_addr).as_str());
+        self.post_tunnel_log("logging in...");
 
         Self::login(&self.config, &mut quic_send, &mut quic_recv).await?;
 
         self.set_and_post_tunnel_state(ClientState::Tunnelling);
-        self.post_tunnel_log(format!("logged in! server: {}", remote_addr).as_str());
+        self.post_tunnel_log("logged in!");
 
         self.remote_conn = Some(Arc::new(RwLock::new(connection)));
         self.ctrl_stream = Some(ControlStream {
@@ -240,7 +240,7 @@ impl Client {
     }
 
     async fn serve_outgoing(&mut self, local_conn_receiver: &mut Receiver<Option<TcpStream>>) {
-        self.post_tunnel_log("start serving in [OUT] mode...");
+        self.post_tunnel_log("start serving in [TunnelOut] mode...");
 
         self.report_traffic_data_in_background();
 
@@ -254,7 +254,7 @@ impl Client {
             match conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
-                        "[OUT] open stream for conn, {} -> {}",
+                        "[TunnelOut] open stream for conn, {} -> {}",
                         quic_stream.0.id().index(),
                         conn.remote_address(),
                     );
@@ -283,7 +283,7 @@ impl Client {
     }
 
     async fn serve_incoming(&mut self) -> Result<()> {
-        self.post_tunnel_log("start serving in [IN] mode...");
+        self.post_tunnel_log("start serving in [TunnelIn] mode...");
 
         self.observe_terminate_signals().await.map_err(|e| {
             self.post_tunnel_log("failed to observe signals");
@@ -292,7 +292,7 @@ impl Client {
 
         // this will take the lock exclusively, so remote_conn cannot be shared and we cannot
         // implement traffic data report for [IN] mode tunnelling using the same technique that
-        // [OUT] mode tunnelling uses
+        // [TunnelOut] mode tunnelling uses
         let mut remote_conn = self.remote_conn.as_mut().unwrap().write().unwrap();
         while let Some(quic_stream) = remote_conn.bi_streams.next().await {
             let quic_stream = quic_stream?;
