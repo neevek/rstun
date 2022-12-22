@@ -2,7 +2,6 @@ use crate::{
     AccessServer, BufferPool, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
 };
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
 use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
@@ -69,7 +68,7 @@ impl Server {
             .parse()
             .context(format!("invalid address: {}", config.addr))?;
 
-        let (endpoint, mut incoming) = quinn::Endpoint::server(cfg, addr)?;
+        let endpoint = quinn::Endpoint::server(cfg, addr)?;
 
         info!(
             "server is bound to: {}, idle_timeout: {}",
@@ -77,16 +76,17 @@ impl Server {
             config.max_idle_timeout_ms
         );
 
-        while let Some(client_conn) = incoming.next().await {
+        while let Some(client_conn) = endpoint.accept().await {
             let mut this = self.clone();
             tokio::spawn(async move {
+                let client_conn = client_conn.await?;
                 let tun_type = this.authenticate_connection(client_conn).await?;
 
                 match tun_type {
                     TunnelType::Out((client_conn, addr)) => {
                         info!(
                             "start tunnel streaming in OUT mode, {} -> {}",
-                            client_conn.connection.remote_address(),
+                            client_conn.remote_address(),
                             addr
                         );
 
@@ -100,7 +100,7 @@ impl Server {
                         info!(
                             "start tunnel streaming in IN mode, {} -> {}",
                             access_server.addr(),
-                            client_conn.connection.remote_address(),
+                            client_conn.remote_address(),
                         );
 
                         this.process_in_connection(client_conn, access_server, ctrl_stream)
@@ -121,20 +121,18 @@ impl Server {
 
     async fn authenticate_connection(
         self: &mut Arc<Self>,
-        connnecing: quinn::Connecting,
+        client_conn: quinn::Connection,
     ) -> Result<TunnelType> {
-        let mut client_conn = connnecing.await?;
-
-        let remote_addr = &client_conn.connection.remote_address();
+        let remote_addr = &client_conn.remote_address();
 
         info!(
             "received connection, authenticating... addr:{}",
             remote_addr
         );
 
-        let (mut quic_send, mut quic_recv) = client_conn.bi_streams.next().await.context(
+        let (mut quic_send, mut quic_recv) = client_conn.accept_bi().await.context(
             format!("login request not received in time, addr: {}", remote_addr),
-        )??;
+        )?;
 
         info!("received bi_stream request, addr: {}", remote_addr);
         let tunnel_type;
@@ -221,13 +219,13 @@ impl Server {
 
     async fn process_out_connection(
         self: &Arc<Self>,
-        mut client_conn: quinn::NewConnection,
+        client_conn: quinn::Connection,
         downstream_addr: SocketAddr,
     ) -> Result<()> {
-        let remote_addr = &client_conn.connection.remote_address();
+        let remote_addr = &client_conn.remote_address();
 
-        while let Some(quic_stream) = client_conn.bi_streams.next().await {
-            match quic_stream {
+        loop {
+            match client_conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut { .. }) => {
                     info!("connection timeout, addr: {}", remote_addr);
                     return Ok(());
@@ -268,13 +266,11 @@ impl Server {
                 }
             };
         }
-
-        Ok(())
     }
 
     async fn process_in_connection(
         self: &Arc<Self>,
-        client_conn: quinn::NewConnection,
+        client_conn: quinn::Connection,
         mut access_server: AccessServer,
         mut ctrl_stream: ControlStream,
     ) -> Result<()> {
@@ -291,7 +287,7 @@ impl Server {
 
         let mut tcp_receiver = access_server.take_tcp_receiver();
         while let Some(Some(tcp_stream)) = tcp_receiver.recv().await {
-            match client_conn.connection.open_bi().await {
+            match client_conn.open_bi().await {
                 Ok(quic_stream) => {
                     let tcp_stream = tcp_stream.into_split();
                     Tunnel::new(self.buffer_pool.clone())

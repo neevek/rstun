@@ -3,7 +3,6 @@ use crate::{
     AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT,
 };
 use anyhow::{bail, Context, Result};
-use futures_util::StreamExt;
 use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
@@ -53,7 +52,7 @@ impl Display for ClientState {
 
 pub struct Client {
     pub config: ClientConfig,
-    remote_conn: Option<Arc<RwLock<quinn::NewConnection>>>,
+    remote_conn: Option<Arc<RwLock<quinn::Connection>>>,
     ctrl_stream: Option<ControlStream>,
     buffer_pool: BufferPool,
     is_terminated: Arc<Mutex<bool>>,
@@ -110,7 +109,7 @@ impl Client {
         if self.config.mode == TUNNEL_MODE_OUT {
             self.post_tunnel_log(
                 format!(
-                    "starting access server for [TunnelOut] tunneling: {:?}",
+                    "starting access server for [Out] tunneling: {:?}",
                     self.config.local_access_server_addr.unwrap()
                 )
                 .as_str(),
@@ -193,7 +192,7 @@ impl Client {
         )));
 
         let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
-        cfg.transport = Arc::new(transport_cfg);
+        cfg.transport_config(Arc::new(transport_cfg));
 
         let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
         let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
@@ -216,7 +215,6 @@ impl Client {
         self.post_tunnel_log(format!("connected to server: {:?}", remote_addr).as_str());
 
         let (mut quic_send, mut quic_recv) = connection
-            .connection
             .open_bi()
             .await
             .map_err(|e| error!("open bidirectional connection failed: {}", e))
@@ -240,12 +238,12 @@ impl Client {
     }
 
     async fn serve_outgoing(&mut self, local_conn_receiver: &mut Receiver<Option<TcpStream>>) {
-        self.post_tunnel_log("start serving in [TunnelOut] mode...");
+        self.post_tunnel_log("start serving in [Out] mode...");
 
         self.report_traffic_data_in_background();
 
         let remote_conn = self.remote_conn.as_ref().unwrap();
-        let ref conn = remote_conn.read().unwrap().connection;
+        let ref conn = remote_conn.read().unwrap();
 
         // accept local connections and build a tunnel to remote
         while let Some(tcp_stream) = local_conn_receiver.recv().await {
@@ -254,7 +252,7 @@ impl Client {
             match conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
-                        "[TunnelOut] open stream for conn, {} -> {}",
+                        "[Out] open stream for conn, {} -> {}",
                         quic_stream.0.id().index(),
                         conn.remote_address(),
                     );
@@ -292,10 +290,9 @@ impl Client {
 
         // this will take the lock exclusively, so remote_conn cannot be shared and we cannot
         // implement traffic data report for [IN] mode tunnelling using the same technique that
-        // [TunnelOut] mode tunnelling uses
-        let mut remote_conn = self.remote_conn.as_mut().unwrap().write().unwrap();
-        while let Some(quic_stream) = remote_conn.bi_streams.next().await {
-            let quic_stream = quic_stream?;
+        // [Out] mode tunnelling uses
+        let remote_conn = self.remote_conn.as_mut().unwrap().write().unwrap();
+        while let Ok(quic_stream) = remote_conn.open_bi().await {
             match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
                 Ok(tcp_stream) => {
                     let tcp_stream = tcp_stream.into_split();
@@ -326,7 +323,7 @@ impl Client {
 
                 match remote_conn.upgrade() {
                     Some(remote_conn) => {
-                        let stats = remote_conn.read().unwrap().connection.stats();
+                        let stats = remote_conn.read().unwrap().stats();
                         let total_traffic_data = total_traffic_data.as_ref().lock().unwrap();
                         let data = TrafficData {
                             rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,

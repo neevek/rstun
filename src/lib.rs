@@ -29,8 +29,8 @@ fn new_buffer_pool() -> BufferPool {
 
 #[derive(Debug)]
 pub enum TunnelType {
-    Out((quinn::NewConnection, SocketAddr)),
-    In((quinn::NewConnection, AccessServer, ControlStream)),
+    Out((quinn::Connection, SocketAddr)),
+    In((quinn::Connection, AccessServer, ControlStream)),
 }
 
 #[derive(Debug)]

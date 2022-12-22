@@ -32,7 +32,7 @@ rstund \
 * Start the client
 ```
 rstunc
-  --mode TunnelOut \
+  --mode OUT \
   --server-addr 1.2.3.4:6060 \
   --password 123456 \
   --cert path/to/certificate.der \
