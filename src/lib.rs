@@ -19,6 +19,7 @@ pub use tunnel_message::{LoginInfo, TunnelMessage};
 extern crate bincode;
 extern crate pretty_env_logger;
 
+pub const ALPN_QUIC_HTTP: &[&[u8]] = &[b"hq-29"];
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
 pub type BufferPool = Arc<BytePool<Vec<u8>>>;

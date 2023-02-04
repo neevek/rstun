@@ -1,6 +1,6 @@
 use crate::tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType};
 use crate::{
-    AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT,
+    AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT, ALPN_QUIC_HTTP,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
@@ -174,10 +174,11 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
         let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
-        let crypto = rustls::ClientConfig::builder()
+        let mut crypto = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(CertVerifier { cert: cert.clone() }))
             .with_no_client_auth();
+        crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();

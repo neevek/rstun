@@ -1,5 +1,5 @@
 use crate::{
-    AccessServer, BufferPool, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
+    AccessServer, BufferPool, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType, ALPN_QUIC_HTTP,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
@@ -15,8 +15,8 @@ use tokio::time::Duration;
 
 static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-    //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    //rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    // rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    // rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
 ];
 
 #[derive(Debug)]
@@ -41,14 +41,13 @@ impl Server {
             Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str())
                 .context("failed to read certificate or key")?;
 
-        let crypto = rustls::ServerConfig::builder()
+        let mut crypto = rustls::ServerConfig::builder()
             .with_cipher_suites(PERF_CIPHER_SUITES)
             .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)
-            .unwrap();
+            .with_single_cert(vec![cert], key)?;
+        crypto.alpn_protocols = ALPN_QUIC_HTTP.iter().map(|&x| x.into()).collect();
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
