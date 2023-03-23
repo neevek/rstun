@@ -29,6 +29,32 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+          override: true
+      - run: cargo build --all-features --release && mkdir -p rstun-windows-x86_64
+                                                  && mv target/release/rstunc.exe ./rstun-windows-x86_64/
+                                                  && mv target/release/rstund.exe ./rstun-windows-x86_64/
+                                                  && 7z a rstun-windows-x86_64.zip ./rstun-windows-x86_64/*
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            rstun-windows-x86_64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   darwin-x86_64:
     name: Darwin x86_64
     runs-on: macos-latest

@@ -16,6 +16,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use tokio::net::TcpStream;
+#[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
@@ -346,26 +347,29 @@ impl Client {
     }
 
     async fn observe_terminate_signals(&mut self) -> Result<()> {
-        let mut quic_send = self.ctrl_stream.take().unwrap().quic_send;
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut quic_send = self.ctrl_stream.take().unwrap().quic_send;
 
-        let is_terminated_flag = self.is_terminated.clone();
+            let is_terminated_flag = self.is_terminated.clone();
 
-        tokio::spawn(async move {
-            let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
-            let mut terminate = signal(SignalKind::terminate()).unwrap();
-            tokio::select! {
-                _ = ctrlc.recv() => debug!("received SIGINT"),
-                _ = terminate.recv() => debug!("received SIGTERM"),
-            }
-            *is_terminated_flag.lock().unwrap() = true;
+            tokio::spawn(async move {
+                let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
+                let mut terminate = signal(SignalKind::terminate()).unwrap();
+                tokio::select! {
+                    _ = ctrlc.recv() => debug!("received SIGINT"),
+                    _ = terminate.recv() => debug!("received SIGTERM"),
+                }
+                *is_terminated_flag.lock().unwrap() = true;
 
-            TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
-                .await
-                .ok();
+                TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
+                    .await
+                    .ok();
 
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            std::process::exit(0);
-        });
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                std::process::exit(0);
+            });
+        }
 
         Ok(())
     }
