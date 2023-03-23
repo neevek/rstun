@@ -9,10 +9,10 @@ rstun consists of two binaries, `rstunc` for client and `rstund` for server. `rs
 
 `rstunc` connects to the server to build a secured tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
 
-  * The TunnelIn mode for exposing a local port to the internet through the server.
-  * The TunnelOut mode for securing data going out from local to the internet through the server.
+  * The `IN` mode for exposing a local port to the internet through the server.
+  * The `OUT` mode for securing data going out from local to the internet through the server.
 
-All data going through the tunnel is secured by the builtin TLS layer of the QUIC protocol, when the negotiation of the connection completes and a tunnel is built, QUIC streams can be initiated from both ends, for the TunnelOut mode, streams are initiated from the client, and for the IN mode, it is just the opposite.
+All data going through the tunnel is secured by the builtin TLS layer of the QUIC protocol, when the negotiation of the connection completes and a tunnel is built, QUIC streams can be initiated from both ends, for the `OUT` mode, streams are initiated from the client, and for the `IN` mode, it is just the opposite.
 
 Usage
 -----
@@ -27,7 +27,7 @@ rstund \
   --cert path/to/certificate.der \
   --key path/to/priv_key.der
 ```
-`addr` specifies the ip:port that the server is listening on, `downstream` specifies a TCP port which traffic from the client through the tunnel will be relayed to, this is applicable for TunnelOut mode tunnels only. For `cert` and `key`, the requirement is that they must be in DER format, I use a self signed certificate for testing. Note currently the certificate is checked bytewise by the client, that is why the same certificate must be specified for the client.
+`addr` specifies the ip:port that the server is listening on, `downstream` specifies a TCP port which traffic from the client through the tunnel will be relayed to, this is applicable for `OUT` mode tunnels only. For `cert` and `key`, the requirement is that they must be in DER format, I use a self signed certificate for testing. Note currently the certificate is checked bytewise by the client, that is why the same certificate must be specified for the client.
 
 * Start the client
 ```
