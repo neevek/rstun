@@ -1,9 +1,8 @@
-mod tunnel_info_bridge;
-
 mod access_server;
 mod client;
 mod server;
 mod tunnel;
+mod tunnel_info_bridge;
 mod tunnel_message;
 
 pub use access_server::AccessServer;
@@ -11,8 +10,8 @@ use byte_pool::BytePool;
 pub use client::Client;
 use quinn::{RecvStream, SendStream};
 pub use server::Server;
-use std::net::SocketAddr;
 use std::sync::Arc;
+use std::{net::SocketAddr, ops::Deref};
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
@@ -21,10 +20,71 @@ extern crate pretty_env_logger;
 
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
-pub type BufferPool = Arc<BytePool<Vec<u8>>>;
 
+pub type BufferPool = Arc<BytePool<Vec<u8>>>;
 fn new_buffer_pool() -> BufferPool {
     Arc::new(BytePool::<Vec<u8>>::new())
+}
+
+pub const SUPPORTED_CIPHER_SUITES: &[&str] = &[
+    "chacha20-poly1305",
+    "aes-256-gcm",
+    "aes-128-gcm",
+    // the following ciphers don't work at the moement, will look into it later
+    // "ecdhe-ecdsa-aes256-gcm",
+    // "ecdhe-ecdsa-aes128-gcm",
+    // "ecdhe-ecdsa-chacha20-poly1305",
+    // "ecdhe-rsa-aes256-gcm",
+    // "ecdhe-rsa-aes128-gcm",
+    // "ecdhe-rsa-chacha20-poly1305",
+];
+
+pub(crate) struct SelectedCipherSuite(rustls::SupportedCipherSuite);
+
+impl std::str::FromStr for SelectedCipherSuite {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "chacha20-poly1305" => Ok(SelectedCipherSuite(
+                rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            )),
+            "aes-256-gcm" => Ok(SelectedCipherSuite(
+                rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            )),
+            "aes-128-gcm" => Ok(SelectedCipherSuite(
+                rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+            )),
+            // "ecdhe-ecdsa-aes256-gcm" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            // )),
+            // "ecdhe-ecdsa-aes128-gcm" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            // )),
+            // "ecdhe-ecdsa-chacha20-poly1305" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+            // )),
+            // "ecdhe-rsa-aes256-gcm" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            // )),
+            // "ecdhe-rsa-aes128-gcm" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            // )),
+            // "ecdhe-rsa-chacha20-poly1305" => Ok(SelectedCipherSuite(
+            //     rustls::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            // )),
+            _ => Ok(SelectedCipherSuite(
+                rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            )),
+        }
+    }
+}
+
+impl Deref for SelectedCipherSuite {
+    type Target = rustls::SupportedCipherSuite;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 #[derive(Debug)]
@@ -43,6 +103,7 @@ pub struct ControlStream {
 pub struct ClientConfig {
     pub local_access_server_addr: Option<SocketAddr>,
     pub cert_path: String,
+    pub cipher: String,
     pub server_addr: String,
     pub connect_max_retry: usize,
     pub wait_before_retry_ms: u64,

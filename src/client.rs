@@ -1,6 +1,7 @@
-use crate::tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType};
 use crate::{
-    AccessServer, BufferPool, ClientConfig, ControlStream, Tunnel, TunnelMessage, TUNNEL_MODE_OUT,
+    tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType},
+    AccessServer, BufferPool, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel,
+    TunnelMessage, TUNNEL_MODE_OUT,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
@@ -8,18 +9,18 @@ use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::{dns, log_and_bail, unwrap_or_continue};
-use rustls::client::{ServerCertVerified, ServerName};
-use rustls::Certificate;
+use rustls::{Certificate, RootCertStore};
+use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
-use std::fmt::Display;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::SystemTime;
+use std::{fmt::Display, str::FromStr};
 use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
@@ -174,12 +175,6 @@ impl Client {
     pub async fn connect(&mut self) -> Result<()> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
-        let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
-        let crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(CertVerifier { cert: cert.clone() }))
-            .with_no_client_auth();
-
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
@@ -192,7 +187,9 @@ impl Client {
             self.config.keep_alive_interval_ms,
         )));
 
-        let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
+        let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
+
+        let mut cfg = quinn::ClientConfig::new(Arc::new(tls_client_cfg));
         cfg.transport_config(Arc::new(transport_cfg));
 
         let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
@@ -210,7 +207,7 @@ impl Client {
             .as_str(),
         );
 
-        let connection = endpoint.connect(remote_addr, "localhost")?.await?;
+        let connection = endpoint.connect(remote_addr, domain.as_str())?.await?;
 
         self.set_and_post_tunnel_state(ClientState::Connected);
         self.post_tunnel_log(format!("connected to server: {:?}", remote_addr).as_str());
@@ -374,6 +371,64 @@ impl Client {
         Ok(())
     }
 
+    fn parse_client_config_and_domain(&self) -> Result<(rustls::ClientConfig, String)> {
+        let cipher = *SelectedCipherSuite::from_str(&self.config.cipher).map_err(|_| {
+            rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
+        })?;
+
+        if !Self::is_ip_addr(&self.config.server_addr) {
+            let domain = match self.config.server_addr.rfind(':') {
+                Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
+                None => self.config.server_addr.to_string(),
+            };
+
+            let client_config = rustls::ClientConfig::builder()
+                .with_cipher_suites(&[cipher])
+                .with_safe_default_kx_groups()
+                .with_safe_default_protocol_versions()?
+                .with_custom_certificate_verifier(Arc::new(Verifier::new()))
+                .with_no_client_auth();
+
+            return Ok((client_config, domain));
+        }
+
+        if self.config.cert_path.is_empty() {
+            bail!("if server-addr is an IP address, self signed certificate is assumed, the path to the certificate is required");
+        }
+
+        let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
+        let mut roots = RootCertStore::empty();
+        roots.add(&cert).context(format!(
+            "certificate is not in DER format: {}",
+            self.config.cert_path
+        ))?;
+
+        let (_rem, cert) = X509Certificate::from_der(cert.as_ref()).context(format!(
+            "not an valid X509Certificate: {}",
+            self.config.cert_path
+        ))?;
+
+        let common_name = cert
+            .subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .context(format!(
+                "failed to read CN (Common Name) from specified certificate: {}",
+                self.config.cert_path
+            ))?;
+
+        Ok((
+            rustls::ClientConfig::builder()
+                .with_cipher_suites(&[cipher])
+                .with_safe_default_kx_groups()
+                .with_safe_default_protocol_versions()?
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+            common_name.to_string(),
+        ))
+    }
+
     fn should_retry(&mut self) -> bool {
         return !*self.is_terminated.lock().unwrap();
     }
@@ -413,6 +468,10 @@ impl Client {
         let cert = rustls::Certificate(cert);
 
         Ok(cert)
+    }
+
+    fn is_ip_addr(addr: &str) -> bool {
+        addr.parse::<SocketAddr>().is_ok()
     }
 
     async fn parse_server_addr(addr: &str) -> Result<SocketAddr> {
@@ -521,30 +580,5 @@ impl Client {
     pub fn set_enable_on_info_report(&mut self, enable: bool) {
         info!("set_enable_on_info_report, enable:{}", enable);
         self.on_info_report_enabled = enable
-    }
-}
-
-struct CertVerifier {
-    cert: Certificate,
-}
-
-impl rustls::client::ServerCertVerifier for CertVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: SystemTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        if end_entity.0 != self.cert.0 {
-            return Err(rustls::Error::General(
-                "server certificates doesn't match ours".to_string(),
-            ));
-        }
-
-        info!("certificate verified!");
-        Ok(ServerCertVerified::assertion())
     }
 }

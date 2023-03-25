@@ -34,6 +34,7 @@ fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool 
     }
 
     config.cert_path = args.cert;
+    config.cipher = args.cipher;
     config.server_addr = args.server_addr;
     config.threads = if args.threads > 0 {
         args.threads
@@ -90,27 +91,31 @@ struct RstuncArgs {
     #[clap(short = 'p', long, required = true, display_order = 3)]
     password: String,
 
-    /// Path to the certificate file in DER format
-    #[clap(short = 'c', long, required = true, display_order = 4)]
-    cert: String,
-
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    #[clap(short = 'a', long, display_order = 5)]
+    #[clap(short = 'a', long, display_order = 4)]
     addr_mapping: String,
 
+    /// Path to the certificate file in DER format, only needed for self signed certificate
+    #[clap(short = 'c', long, default_value = "", display_order = 5)]
+    cert: String,
+
+    /// Preferred cipher suite
+    #[clap(short = 'e', long, default_value = SUPPORTED_CIPHER_SUITES[0], display_order = 6, possible_values = SUPPORTED_CIPHER_SUITES)]
+    cipher: String,
+
     /// Threads to run async tasks
-    #[clap(short = 't', long, default_value = "0", display_order = 6)]
+    #[clap(short = 't', long, default_value = "0", display_order = 7)]
     threads: usize,
 
     /// Wait time before trying
-    #[clap(short = 'w', long, default_value = "5000", display_order = 7)]
+    #[clap(short = 'w', long, default_value = "5000", display_order = 8)]
     wait_before_retry_ms: u64,
 
     /// Max idle timeout for the connection
-    #[clap(short = 'i', long, default_value = "150000", display_order = 8)]
+    #[clap(short = 'i', long, default_value = "150000", display_order = 9)]
     max_idle_timeout_ms: u64,
 
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 11)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 10)]
     loglevel: String,
 }

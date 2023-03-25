@@ -13,12 +13,6 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
-static PERF_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
-    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-    //rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    //rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
-];
-
 #[derive(Debug)]
 pub struct Server {
     config: ServerConfig,
@@ -42,13 +36,11 @@ impl Server {
                 .context("failed to read certificate or key")?;
 
         let crypto = rustls::ServerConfig::builder()
-            .with_cipher_suites(PERF_CIPHER_SUITES)
+            .with_safe_default_cipher_suites()
             .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
+            .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)
-            .unwrap();
+            .with_single_cert(vec![cert], key)?;
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
@@ -130,9 +122,10 @@ impl Server {
             remote_addr
         );
 
-        let (mut quic_send, mut quic_recv) = client_conn.accept_bi().await.context(
-            format!("login request not received in time, addr: {}", remote_addr),
-        )?;
+        let (mut quic_send, mut quic_recv) = client_conn.accept_bi().await.context(format!(
+            "login request not received in time, addr: {}",
+            remote_addr
+        ))?;
 
         info!("received bi_stream request, addr: {}", remote_addr);
         let tunnel_type;

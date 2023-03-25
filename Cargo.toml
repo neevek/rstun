@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["dylib", "lib"]
 
 [dependencies]
-rustls = { version = "0.20.6", features = ["dangerous_configuration", "quic"] }
+rustls = { version = "0.20.8", features = ["dangerous_configuration", "quic"] }
 clap = { version = "3.0.7", features = ["derive"] }
 tokio = { version = "1.21", features = ["full"] }
 pretty_env_logger = "0.4.0"
@@ -26,6 +26,8 @@ num_cpus = "1.13.1"
 rs-utilities = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rustls-platform-verifier = { git = "https://github.com/neevek/rustls-platform-verifier" }
+x509-parser = "0.15"
 
 [target.aarch64-linux-android.dependencies]
 jni = "0.19"
