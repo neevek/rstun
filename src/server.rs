@@ -1,6 +1,4 @@
-use crate::{
-    AccessServer, BufferPool, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
-};
+use crate::{AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
 use quinn::{congestion, TransportConfig};
@@ -17,7 +15,6 @@ use tokio::time::Duration;
 pub struct Server {
     config: ServerConfig,
     access_server_ports: Mutex<Vec<u16>>,
-    buffer_pool: BufferPool,
 }
 
 impl Server {
@@ -25,7 +22,6 @@ impl Server {
         Arc::new(Server {
             config,
             access_server_ports: Mutex::new(Vec::new()),
-            buffer_pool: crate::new_buffer_pool(),
         })
     }
 
@@ -46,10 +42,12 @@ impl Server {
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
         transport_cfg.send_window(1024 * 1024);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
-        transport_cfg.max_idle_timeout(Some(timeout));
-        transport_cfg
-            .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
+        if config.max_idle_timeout_ms > 0 {
+            let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
+            transport_cfg.max_idle_timeout(Some(timeout));
+            transport_cfg
+                .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
+        }
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
         let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
@@ -139,7 +137,9 @@ impl Server {
                     login_info.access_server_addr
                 ))?;
 
-                if !self.config.downstreams.contains(&downstream_addr) {
+                if !self.config.downstreams.is_empty()
+                    && !self.config.downstreams.contains(&downstream_addr)
+                {
                     log_and_bail!("invalid addr: {}", downstream_addr);
                 }
 
@@ -234,29 +234,24 @@ impl Server {
                         e
                     );
                 }
-                Ok(quic_stream) => {
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        match TcpStream::connect(&downstream_addr).await {
-                            Ok(tcp_stream) => {
-                                debug!(
-                                    "[Out] open stream for conn, {} -> {}",
-                                    quic_stream.0.id().index(),
-                                    downstream_addr,
-                                );
+                Ok(quic_stream) => tokio::spawn(async move {
+                    match TcpStream::connect(&downstream_addr).await {
+                        Ok(tcp_stream) => {
+                            debug!(
+                                "[Out] open stream for conn, {} -> {}",
+                                quic_stream.0.id().index(),
+                                downstream_addr,
+                            );
 
-                                let tcp_stream = tcp_stream.into_split();
-                                Tunnel::new(this.buffer_pool.clone())
-                                    .start(tcp_stream, quic_stream)
-                                    .await;
-                            }
-
-                            Err(e) => {
-                                error!("failed to connect to {}, err: {}", downstream_addr, e);
-                            }
+                            let tcp_stream = tcp_stream.into_split();
+                            Tunnel::new().start(tcp_stream, quic_stream).await;
                         }
-                    })
-                }
+
+                        Err(e) => {
+                            error!("failed to connect to {}, err: {}", downstream_addr, e);
+                        }
+                    }
+                }),
             };
         }
     }
@@ -283,9 +278,7 @@ impl Server {
             match client_conn.open_bi().await {
                 Ok(quic_stream) => {
                     let tcp_stream = tcp_stream.into_split();
-                    Tunnel::new(self.buffer_pool.clone())
-                        .start(tcp_stream, quic_stream)
-                        .await;
+                    Tunnel::new().start(tcp_stream, quic_stream).await;
                 }
                 _ => {
                     log_and_bail!("failed to open bi_streams to client, quit");

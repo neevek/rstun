@@ -8,9 +8,9 @@ mod tunnel_message;
 pub use access_server::AccessServer;
 use byte_pool::BytePool;
 pub use client::Client;
+use lazy_static::lazy_static;
 use quinn::{RecvStream, SendStream};
 pub use server::Server;
-use std::sync::Arc;
 use std::{net::SocketAddr, ops::Deref};
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
@@ -21,9 +21,8 @@ extern crate pretty_env_logger;
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
 
-pub type BufferPool = Arc<BytePool<Vec<u8>>>;
-fn new_buffer_pool() -> BufferPool {
-    Arc::new(BytePool::<Vec<u8>>::new())
+lazy_static! {
+    static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
 
 pub const SUPPORTED_CIPHER_SUITES: &[&str] = &[

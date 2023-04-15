@@ -1,7 +1,7 @@
 use crate::{
     tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType},
-    AccessServer, BufferPool, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel,
-    TunnelMessage, TUNNEL_MODE_OUT,
+    AccessServer, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel, TunnelMessage,
+    TUNNEL_MODE_OUT,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info};
@@ -56,7 +56,6 @@ pub struct Client {
     pub config: ClientConfig,
     remote_conn: Option<Arc<RwLock<quinn::Connection>>>,
     ctrl_stream: Option<ControlStream>,
-    buffer_pool: BufferPool,
     is_terminated: Arc<Mutex<bool>>,
     scheduled_start: bool,
     tunnel_info_bridge: TunnelInfoBridge,
@@ -71,7 +70,6 @@ impl Client {
             config,
             remote_conn: None,
             ctrl_stream: None,
-            buffer_pool: crate::new_buffer_pool(),
             is_terminated: Arc::new(Mutex::new(false)),
             scheduled_start: false,
             tunnel_info_bridge: TunnelInfoBridge::new(),
@@ -82,14 +80,6 @@ impl Client {
     }
 
     pub fn start_tunnelling(&mut self) {
-        info!(
-            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
-            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
-        );
-
-        self.post_tunnel_log("preparing...");
-        self.set_and_post_tunnel_state(ClientState::Preparing);
-
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(self.config.threads)
@@ -100,12 +90,17 @@ impl Client {
                     .await
                     .unwrap_or_else(|e| error!("connect failed: {}", e));
             });
-
-        self.post_tunnel_log("quit");
-        self.set_and_post_tunnel_state(ClientState::Terminated);
     }
 
-    async fn connect_and_serve(&mut self) -> Result<()> {
+    pub async fn connect_and_serve(&mut self) -> Result<()> {
+        info!(
+            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
+            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
+        );
+
+        self.post_tunnel_log("preparing...");
+        self.set_and_post_tunnel_state(ClientState::Preparing);
+
         // create a local access server for 'out' tunnel
         let mut access_server = None;
         if self.config.mode == TUNNEL_MODE_OUT {
@@ -169,6 +164,9 @@ impl Client {
 
             info!("connection dropped, will reconnect.");
         }
+
+        self.post_tunnel_log("quit");
+        self.set_and_post_tunnel_state(ClientState::Terminated);
         Ok(())
     }
 
@@ -256,9 +254,7 @@ impl Client {
                     );
 
                     let tcp_stream = tcp_stream.into_split();
-                    Tunnel::new(self.buffer_pool.clone())
-                        .start(tcp_stream, quic_stream)
-                        .await;
+                    Tunnel::new().start(tcp_stream, quic_stream).await;
                 }
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {}", e);
@@ -294,9 +290,7 @@ impl Client {
             match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
                 Ok(tcp_stream) => {
                     let tcp_stream = tcp_stream.into_split();
-                    Tunnel::new(self.buffer_pool.clone())
-                        .start(tcp_stream, quic_stream)
-                        .await;
+                    Tunnel::new().start(tcp_stream, quic_stream).await;
                 }
                 _ => {
                     error!("failed to connect to access server");

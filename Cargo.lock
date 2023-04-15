@@ -132,8 +132,7 @@ checksum = "a4a45a46ab1f2412e53d3a0ade76ffad2025804294569aae387231a0cd6e0899"
 [[package]]
 name = "byte-pool"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8c7230ddbb427b1094d477d821a99f3f54d36333178eeb806e279bcdcecf0ca"
+source = "git+https://github.com/neevek/byte-pool#e3a193a24da8e8f7dfa42c31b418f9aee7de1cb0"
 dependencies = [
  "crossbeam-queue",
  "stable_deref_trait",
@@ -950,6 +949,7 @@ dependencies = [
  "enum-as-inner",
  "futures-util",
  "jni",
+ "lazy_static",
  "log",
  "num_cpus",
  "pin-utils",

@@ -5,25 +5,22 @@ use rstun::*;
 fn main() {
     let args = RstuncArgs::parse();
     rs_utilities::LogHelper::init_logger("rstunc", args.loglevel.as_ref());
-
-    let mut config = ClientConfig::default();
-    if !parse_command_line_args(args, &mut config) {
-        return;
+    if let Some(config) = parse_command_line_args(args) {
+        let mut client = Client::new(config);
+        // client.set_enable_on_info_report(true);
+        // client.set_on_info_listener(|s| {
+        //     error!("{}", s);
+        // });
+        client.start_tunnelling();
     }
-
-    let mut client = Client::new(config);
-    // client.set_enable_on_info_report(true);
-    // client.set_on_info_listener(|s| {
-    //     error!("{}", s);
-    // });
-    client.start_tunnelling();
 }
 
-fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool {
+fn parse_command_line_args(args: RstuncArgs) -> Option<ClientConfig> {
+    let mut config = ClientConfig::default();
     let addrs: Vec<&str> = args.addr_mapping.split('^').collect();
     if addrs.len() != 2 {
         error!("invalid address mapping: {}", args.addr_mapping);
-        return false;
+        return None;
     }
     let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
 
@@ -73,7 +70,7 @@ fn parse_command_line_args(args: RstuncArgs, config: &mut ClientConfig) -> bool 
         )
     }));
 
-    true
+    Some(config)
 }
 
 #[derive(Parser, Debug)]
