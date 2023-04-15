@@ -24,17 +24,27 @@ fn main() {
         .build()
         .unwrap()
         .block_on(async {
-            run(args).await.unwrap();
+            run(args)
+                .await
+                .map_err(|e| {
+                    error!("{}", e);
+                })
+                .ok();
         })
 }
 
 async fn run(mut args: RstundArgs) -> Result<()> {
+    if !args.addr.contains(':') {
+        args.addr = format!("127.0.0.1:{}", args.addr);
+    }
+
     let mut downstreams = Vec::<SocketAddr>::new();
 
     for d in &mut args.downstreams {
         if d.starts_with("0.0.0.0:") {
             *d = d.replace("0.0.0.0:", "127.0.0.1:");
         }
+
         if !d.contains(':') {
             *d = format!("127.0.0.1:{}", d);
         }
@@ -62,7 +72,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct RstundArgs {
-    /// Address (ip:port pair) to listen on
+    /// Address ([ip:]port pair) to listen on
     #[clap(short = 'l', long, display_order = 1)]
     addr: String,
 

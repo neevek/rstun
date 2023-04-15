@@ -243,7 +243,7 @@ impl Client {
     }
 
     async fn serve_outgoing(&mut self, local_conn_receiver: &mut Receiver<Option<TcpStream>>) {
-        self.post_tunnel_log("start serving in [Out] mode...");
+        self.post_tunnel_log("start serving in [TunnelOut] mode...");
 
         self.report_traffic_data_in_background();
 
@@ -612,8 +612,8 @@ impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
         _ocsp_response: &[u8],
         _now: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        warn!("================================= WARNING ============================================");
-        warn!("====== Connecting to a server without verifying its certificate is DANGEROUS!!! ======");
+        warn!("======================================= WARNING ======================================");
+        warn!("=      Connecting to a server without verifying its certificate is DANGEROUS!!!      =");
         warn!("= Provide the self-signed certificate for verification or connect with a domain name =");
         warn!("======================= Be cautious, this is for TEST only!!! ========================");
         Ok(ServerCertVerified::assertion())

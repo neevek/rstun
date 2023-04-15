@@ -1,13 +1,13 @@
 [package]
 name = "rstun"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 
 [lib]
 crate-type = ["dylib", "lib"]
 
 [dependencies]
-rustls = { version = "0.20.8", features = ["dangerous_configuration", "quic"] }
+rustls = { version = "0.20", features = ["dangerous_configuration", "quic"] }
 clap = { version = "3.0.7", features = ["derive"] }
 rcgen = "0.10"
 tokio = { version = "1.21", features = ["full"] }
