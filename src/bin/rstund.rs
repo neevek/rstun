@@ -75,12 +75,13 @@ struct RstundArgs {
     #[clap(short = 'p', long, required = true, display_order = 3)]
     password: String,
 
-    /// Path to the certificate file in DER format
-    #[clap(short = 'c', long, required = true, display_order = 4)]
+    /// Path to the certificate file in DER format, if empty, a self-signed certificate
+    /// with the domain "localhost" will be used
+    #[clap(short = 'c', long, default_value = "", display_order = 4)]
     cert: String,
 
-    /// Path to the key file in DER format
-    #[clap(short = 'k', long, required = true, display_order = 5)]
+    /// Path to the key file in DER format, can be empty if no cert is provided
+    #[clap(short = 'k', long, default_value = "", display_order = 5)]
     key: String,
 
     /// Threads to run async tasks

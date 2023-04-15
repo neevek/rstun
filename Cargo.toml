@@ -9,6 +9,7 @@ crate-type = ["dylib", "lib"]
 [dependencies]
 rustls = { version = "0.20.8", features = ["dangerous_configuration", "quic"] }
 clap = { version = "3.0.7", features = ["derive"] }
+rcgen = "0.10"
 tokio = { version = "1.21", features = ["full"] }
 pretty_env_logger = "0.4.0"
 ring = "0.16.20"

@@ -1,6 +1,6 @@
 use crate::{AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType};
 use anyhow::{bail, Context, Result};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use quinn::{congestion, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
@@ -303,12 +303,22 @@ impl Server {
     }
 
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
-        let cert = std::fs::read(cert_path).context("failed to read cert file")?;
-        let key = std::fs::read(key_path).context("failed to read key file")?;
-        let cert = Certificate(cert);
-        let key = PrivateKey(key);
+        let (cert, key) = if cert_path.is_empty() {
+            warn!("=========================== WARNING ============================");
+            warn!("No valid certificate path is provided, a self-signed certificate");
+            warn!("          for the domain \"localhost\" is generated.");
+            warn!("============== Be cautious, this is for TEST only!!! ============");
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+            let key = cert.serialize_private_key_der();
+            let cert = cert.serialize_der()?;
+            (cert, key)
+        } else {
+            let cert = std::fs::read(cert_path).context("failed to read cert file")?;
+            let key = std::fs::read(key_path).context("failed to read key file")?;
+            (cert, key)
+        };
 
-        Ok((cert, key))
+        Ok((Certificate(cert), PrivateKey(key)))
     }
 
     fn check_password(password1: &str, password2: &str) -> Result<()> {

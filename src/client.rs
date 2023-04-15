@@ -173,7 +173,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn connect(&mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<()> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
         let mut transport_cfg = TransportConfig::default();
@@ -182,11 +182,17 @@ impl Client {
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
-        let timeout = IdleTimeout::from(VarInt::from_u32(self.config.max_idle_timeout_ms as u32));
-        transport_cfg.max_idle_timeout(Some(timeout));
-        transport_cfg.keep_alive_interval(Some(Duration::from_millis(
-            self.config.keep_alive_interval_ms,
-        )));
+        if self.config.max_idle_timeout_ms > 0 {
+            let timeout =
+                IdleTimeout::from(VarInt::from_u32(self.config.max_idle_timeout_ms as u32));
+            transport_cfg.max_idle_timeout(Some(timeout));
+        }
+
+        if self.config.keep_alive_interval_ms > 0 {
+            transport_cfg.keep_alive_interval(Some(Duration::from_millis(
+                self.config.keep_alive_interval_ms,
+            )));
+        }
 
         let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
 
@@ -609,7 +615,7 @@ impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
         warn!("================================= WARNING ============================================");
         warn!("====== Connecting to a server without verifying its certificate is DANGEROUS!!! ======");
         warn!("= Provide the self-signed certificate for verification or connect with a domain name =");
-        warn!("======================================================================================");
+        warn!("======================= Be cautious, this is for TEST only!!! ========================");
         Ok(ServerCertVerified::assertion())
     }
 }
