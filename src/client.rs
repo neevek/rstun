@@ -4,17 +4,20 @@ use crate::{
     TUNNEL_MODE_OUT,
 };
 use anyhow::{bail, Context, Result};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::{dns, log_and_bail, unwrap_or_continue};
-use rustls::{Certificate, RootCertStore};
+use rustls::{client::ServerCertVerified, Certificate, RootCertStore, ServerName};
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, RwLock};
 use std::{fmt::Display, str::FromStr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::SystemTime,
+};
 use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
@@ -387,7 +390,15 @@ impl Client {
         }
 
         if self.config.cert_path.is_empty() {
-            bail!("if server-addr is an IP address, self signed certificate is assumed, the path to the certificate is required");
+            let client_config = rustls::ClientConfig::builder()
+                .with_cipher_suites(&[cipher])
+                .with_safe_default_kx_groups()
+                .with_safe_default_protocol_versions()?
+                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier::new()))
+                .with_no_client_auth();
+
+            warn!("No certificate is provided for verification, domain \"localhost\" is assumed");
+            return Ok((client_config, "localhost".to_string()));
         }
 
         let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
@@ -398,7 +409,7 @@ impl Client {
         ))?;
 
         let (_rem, cert) = X509Certificate::from_der(cert.as_ref()).context(format!(
-            "not an valid X509Certificate: {}",
+            "not a valid X509Certificate: {}",
             self.config.cert_path
         ))?;
 
@@ -574,5 +585,31 @@ impl Client {
     pub fn set_enable_on_info_report(&mut self, enable: bool) {
         info!("set_enable_on_info_report, enable:{}", enable);
         self.on_info_report_enabled = enable
+    }
+}
+
+struct InsecureCertVerifier {}
+
+impl InsecureCertVerifier {
+    pub fn new() -> Self {
+        InsecureCertVerifier {}
+    }
+}
+
+impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        warn!("================================= WARNING ============================================");
+        warn!("====== Connecting to a server without verifying its certificate is DANGEROUS!!! ======");
+        warn!("= Provide the self-signed certificate for verification or connect with a domain name =");
+        warn!("======================================================================================");
+        Ok(ServerCertVerified::assertion())
     }
 }
