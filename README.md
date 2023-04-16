@@ -46,7 +46,10 @@ rstunc
   - `server-addr`, a TCP server that runs locally for accepting requests and forwarding all the traffic to the server through the tunnel.
   - `password`, same as that for the server.
   - `cert`, see explanation above for `rstund`. Note this is also optional if connecting to the server with a domain name, or the server `rstund` runs with an auto-generated self-signed certificate (see the TEST example below).
-  - `addr-mapping` is an address mapping between two `ip:port` pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` server that runs `rstund`. i.e. all traffic from the local port `9900` will be forwarded to the remote port `8800` through the tunnel.
+  - `addr-mapping` is an address mapping between two `ip:port` pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` server that runs `rstund`. i.e. all traffic from the local port `9900` will be forwarded to the remote port `8800` through the tunnel. `addr-mapping` also supports the following 3 combinations:
+    - `ANY^8000` for not explicitly specifying a port for the local access server (the client), the bound port will be printed to the terminal as following `[TunnelOut] access server bound to: 0.0.0.0:60001`, in which `60001` is a random port.
+    - `8000^ANY` for not explicitly specifying a port to bind with the remote server, the server decides that port, so it depends on that the server is started with explicitly setting the `--downstreams` option.
+    - `ANY^ANY` both the cases of the settings above.
 
 * Simple TEST example
 
@@ -65,14 +68,13 @@ rstunc -m OUT -r 127.0.0.1:9000 -p 1234 -a 0.0.0.0:9900^8800
 * Complete options for `rstund`
 
 ```
-rstun 0.4.0
-
 USAGE:
-    rstund [OPTIONS] --addr <ADDR> --password <PASSWORD>
+    rstund [OPTIONS] --password <PASSWORD>
 
 OPTIONS:
-    -l, --addr <ADDR>
-            Address ([ip:]port pair) to listen on
+    -a, --addr <ADDR>
+            Address ([ip:]port pair) to listen on, a random port will be chosen and binding to all
+            network interfaces (0.0.0.0) if empty [default: ]
 
     -d, --downstreams <DOWNSTREAMS>
             Exposed downstreams as the receiving end of the tunnel, e.g. -d [ip:]port, The entire
@@ -94,7 +96,7 @@ OPTIONS:
     -w, --max-idle-timeout-ms <MAX_IDLE_TIMEOUT_MS>
             Max idle timeout for the connection [default: 40000]
 
-    -L, --loglevel <LOGLEVEL>
+    -l, --loglevel <LOGLEVEL>
             [default: I] [possible values: T, D, I, W, E]
 
     -h, --help
@@ -107,7 +109,7 @@ OPTIONS:
 * Complete options for `rstunc`
 
 ```
-rstun 0.4.0
+rstun 0.4.1
 
 USAGE:
     rstunc [OPTIONS] --mode <MODE> --server-addr <SERVER_ADDR> --password <PASSWORD> --addr-mapping <ADDR_MAPPING>
@@ -124,6 +126,10 @@ OPTIONS:
 
     -a, --addr-mapping <ADDR_MAPPING>
             LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
+            `ANY^8000` for not explicitly specifying a port for the local access server (the client)
+            `8000^ANY` for not explicitly specifying a port to bind with the remote server, the
+            server decides that port, so it depends on that the server is started with explicitly
+            setting the `--downstreams` option. `ANY^ANY` both the cases of the settings above
 
     -c, --cert <CERT>
             Path to the certificate file in DER format, only needed for self signed certificate

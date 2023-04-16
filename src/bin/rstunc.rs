@@ -93,7 +93,11 @@ struct RstuncArgs {
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// ANY^ANY means
+    /// `ANY^8000` for not explicitly specifying a port for the local access server (the client)
+    /// `8000^ANY` for not explicitly specifying a port to bind with the remote server,
+    ///            the server decides that port, so it depends on that the server is started
+    ///            with explicitly setting the `--downstreams` option.
+    /// `ANY^ANY` both the cases of the settings above.
     #[clap(short = 'a', long, display_order = 4)]
     addr_mapping: String,
 
