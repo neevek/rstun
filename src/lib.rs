@@ -6,12 +6,18 @@ mod tunnel_info_bridge;
 mod tunnel_message;
 
 pub use access_server::AccessServer;
+use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 pub use client::Client;
 use lazy_static::lazy_static;
+use log::error;
 use quinn::{RecvStream, SendStream};
+use rs_utilities::log_and_bail;
 pub use server::Server;
-use std::{net::SocketAddr, ops::Deref};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Deref,
+};
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
@@ -137,6 +143,78 @@ pub(crate) enum ReadResult {
     EOF,
 }
 
+impl ClientConfig {
+    pub fn create(
+        mode: &str,
+        server_addr: &str,
+        password: &str,
+        cert: &str,
+        cipher: &str,
+        addr_mapping: &str,
+        threads: usize,
+        wait_before_retry_ms: u64,
+        max_idle_timeout_ms: u64,
+    ) -> Result<ClientConfig> {
+        let mut config = ClientConfig::default();
+        let addr_mapping_str = addr_mapping;
+        let addr_mapping: Vec<&str> = addr_mapping_str.split('^').collect();
+        if addr_mapping.len() != 2 {
+            log_and_bail!("invalid address mapping: {}", addr_mapping_str);
+        }
+
+        let mut addr_mapping: Vec<String> =
+            addr_mapping.iter().map(|addr| addr.to_string()).collect();
+        let mut sock_addr_mapping: Vec<SocketAddr> = Vec::with_capacity(addr_mapping.len());
+
+        for addr in &mut addr_mapping {
+            if addr == "ANY" {
+                sock_addr_mapping.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+            } else {
+                if !addr.contains(':') {
+                    *addr = format!("127.0.0.1:{}", addr);
+                }
+                sock_addr_mapping.push(
+                    addr.parse::<SocketAddr>()
+                        .context(format!("invalid address mapping:[{}]", addr_mapping_str))?,
+                );
+            }
+        }
+
+        config.cert_path = cert.to_string();
+        config.cipher = cipher.to_string();
+        config.server_addr = server_addr.to_string();
+        config.threads = if threads > 0 {
+            threads
+        } else {
+            num_cpus::get()
+        };
+        config.wait_before_retry_ms = wait_before_retry_ms;
+        config.max_idle_timeout_ms = max_idle_timeout_ms;
+        config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
+        config.mode = if mode == TUNNEL_MODE_IN {
+            TUNNEL_MODE_IN
+        } else {
+            TUNNEL_MODE_OUT
+        };
+
+        config.login_msg = if mode == TUNNEL_MODE_IN {
+            config.local_access_server_addr = Some(sock_addr_mapping[1]);
+            Some(TunnelMessage::ReqInLogin(LoginInfo {
+                password: password.to_string(),
+                access_server_addr: sock_addr_mapping[0],
+            }))
+        } else {
+            config.local_access_server_addr = Some(sock_addr_mapping[0]);
+            Some(TunnelMessage::ReqOutLogin(LoginInfo {
+                password: password.to_string(),
+                access_server_addr: sock_addr_mapping[1],
+            }))
+        };
+
+        Ok(config)
+    }
+}
+
 impl ReadResult {
     #![allow(dead_code)]
     pub fn is_eof(&self) -> bool {
@@ -187,6 +265,7 @@ pub mod android {
         jaddrMapping: JString,
         jpassword: JString,
         jcertFilePath: JString,
+        jcipher: JString,
         jthreads: jint,
         jwaitBeforeRetryMs: jint,
         jmaxIdleTimeoutMs: jint,
@@ -196,64 +275,27 @@ pub mod android {
         let addr_mapping = convert_jstring(&env, jaddrMapping);
         let password = convert_jstring(&env, jpassword);
         let cert_file_path = convert_jstring(&env, jcertFilePath);
+        let cipher = convert_jstring(&env, jcipher);
 
-        let addrs: Vec<&str> = addr_mapping.split("^").collect();
-        if addrs.len() != 2 {
-            error!("invalid address mapping: {}", addr_mapping);
-            return 0;
-        }
-        let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
-
-        for addr in &mut addrs {
-            if !addr.contains(":") {
-                *addr = format!("127.0.0.1:{}", addr);
-            }
-        }
-
-        let mut config = ClientConfig::default();
-        config.cert_path = cert_file_path;
-        config.server_addr = server_addr;
-        config.threads = if jthreads > 0 {
-            jthreads as usize
-        } else {
-            num_cpus::get()
-        };
-        config.connect_max_retry = 0;
-        config.wait_before_retry_ms = jwaitBeforeRetryMs as u64;
-        config.max_idle_timeout_ms = jmaxIdleTimeoutMs as u64;
-        config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
-        config.mode = if mode == TUNNEL_MODE_IN {
-            TUNNEL_MODE_IN
-        } else {
-            TUNNEL_MODE_OUT
-        };
-
-        let local_access_server_addr;
-        config.login_msg = if mode == TUNNEL_MODE_IN {
-            local_access_server_addr = addrs[1].to_string();
-            Some(TunnelMessage::ReqInLogin(LoginInfo {
-                password,
-                access_server_addr: addrs[0].to_string(),
-            }))
-        } else {
-            local_access_server_addr = addrs[0].to_string();
-            Some(TunnelMessage::ReqOutLogin(LoginInfo {
-                password,
-                access_server_addr: addrs[1].to_string(),
-            }))
-        };
-
-        config.local_access_server_addr = Some(
-            local_access_server_addr.parse().expect(
-                format!(
-                    "invalid local_access_server_addr: {}",
-                    local_access_server_addr
-                )
-                .as_str(),
-            ),
+        let config = ClientConfig::create(
+            &mode,
+            &server_addr,
+            &password,
+            &cert_file_path,
+            &cipher,
+            &addr_mapping,
+            jthreads as usize,
+            jwaitBeforeRetryMs as u64,
+            jmaxIdleTimeoutMs as u64,
         );
 
-        Box::into_raw(Box::new(Client::new(config))) as jlong
+        match config {
+            Ok(config) => Box::into_raw(Box::new(Client::new(config))) as jlong,
+            Err(e) => {
+                error!("failed create ClientConfig: {}", e);
+                0
+            }
+        }
     }
 
     #[no_mangle]

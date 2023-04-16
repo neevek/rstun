@@ -1,80 +1,35 @@
-use anyhow::{bail, Context, Result};
 use clap::Parser;
-use log::error;
-use rs_utilities::log_and_bail;
 use rstun::*;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn main() {
     let args = RstuncArgs::parse();
     rs_utilities::LogHelper::init_logger("rstunc", args.loglevel.as_ref());
-    if let Ok(config) = parse_command_line_args(args) {
+    let config = ClientConfig::create(
+        &args.mode,
+        &args.server_addr,
+        &args.password,
+        &args.cert,
+        &args.cipher,
+        &args.addr_mapping,
+        args.threads,
+        args.wait_before_retry_ms,
+        args.max_idle_timeout_ms,
+    );
+
+    if let Ok(config) = config {
         let mut client = Client::new(config);
-        // client.set_enable_on_info_report(true);
-        // client.set_on_info_listener(|s| {
-        //     error!("{}", s);
-        // });
+
+        #[cfg(target_os = "android")]
+        {
+            use log::info;
+            client.set_enable_on_info_report(true);
+            client.set_on_info_listener(|s| {
+                info!("{}", s);
+            });
+        }
+
         client.start_tunnelling();
     }
-}
-
-fn parse_command_line_args(args: RstuncArgs) -> Result<ClientConfig> {
-    let mut config = ClientConfig::default();
-    let addr_mapping: Vec<&str> = args.addr_mapping.split('^').collect();
-    if addr_mapping.len() != 2 {
-        log_and_bail!("invalid address mapping: {}", args.addr_mapping);
-    }
-
-    let mut addr_mapping: Vec<String> = addr_mapping.iter().map(|addr| addr.to_string()).collect();
-    let mut sock_addr_mapping: Vec<SocketAddr> = Vec::with_capacity(addr_mapping.len());
-
-    for addr in &mut addr_mapping {
-        if addr == "ANY" {
-            sock_addr_mapping.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
-        } else {
-            if !addr.contains(':') {
-                *addr = format!("127.0.0.1:{}", addr);
-            }
-            sock_addr_mapping.push(
-                addr.parse::<SocketAddr>()
-                    .context(format!("invalid address mapping:[{}]", args.addr_mapping))?,
-            );
-        }
-    }
-
-    config.cert_path = args.cert;
-    config.cipher = args.cipher;
-    config.server_addr = args.server_addr;
-    config.threads = if args.threads > 0 {
-        args.threads
-    } else {
-        num_cpus::get()
-    };
-    config.connect_max_retry = 0;
-    config.wait_before_retry_ms = args.wait_before_retry_ms;
-    config.max_idle_timeout_ms = args.max_idle_timeout_ms;
-    config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
-    config.mode = if args.mode == TUNNEL_MODE_IN {
-        TUNNEL_MODE_IN
-    } else {
-        TUNNEL_MODE_OUT
-    };
-
-    config.login_msg = if args.mode == TUNNEL_MODE_IN {
-        config.local_access_server_addr = Some(sock_addr_mapping[1]);
-        Some(TunnelMessage::ReqInLogin(LoginInfo {
-            password: args.password,
-            access_server_addr: sock_addr_mapping[0],
-        }))
-    } else {
-        config.local_access_server_addr = Some(sock_addr_mapping[0]);
-        Some(TunnelMessage::ReqOutLogin(LoginInfo {
-            password: args.password,
-            access_server_addr: sock_addr_mapping[1],
-        }))
-    };
-
-    Ok(config)
 }
 
 #[derive(Parser, Debug)]
