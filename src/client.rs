@@ -8,7 +8,7 @@ use log::{debug, error, info, warn};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
-use rs_utilities::{dns, log_and_bail, unwrap_or_continue};
+use rs_utilities::{dns, log_and_bail};
 use rustls::{client::ServerCertVerified, Certificate, RootCertStore, ServerName};
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
@@ -21,7 +21,6 @@ use std::{
 use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::mpsc::Receiver;
 use tokio::time::Duration;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -57,6 +56,7 @@ impl Display for ClientState {
 
 pub struct Client {
     pub config: ClientConfig,
+    access_server: Option<AccessServer>,
     remote_conn: Option<Arc<RwLock<quinn::Connection>>>,
     ctrl_stream: Option<ControlStream>,
     is_terminated: Arc<Mutex<bool>>,
@@ -71,6 +71,7 @@ impl Client {
     pub fn new(config: ClientConfig) -> Self {
         Client {
             config,
+            access_server: None,
             remote_conn: None,
             ctrl_stream: None,
             is_terminated: Arc::new(Mutex::new(false)),
@@ -89,27 +90,26 @@ impl Client {
             .build()
             .unwrap()
             .block_on(async {
+                self.start_access_server()
+                    .await
+                    .map_err(|e| error!("failed to start access server: {}", e))
+                    .unwrap();
+
                 self.connect_and_serve()
                     .await
-                    .unwrap_or_else(|e| error!("connect failed: {}", e));
+                    .unwrap_or_else(|e| error!("failed to connect: {}", e));
             });
     }
 
-    pub async fn connect_and_serve(&mut self) -> Result<()> {
-        info!(
-            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
-            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
-        );
-
+    pub async fn start_access_server(&mut self) -> Result<SocketAddr> {
         self.post_tunnel_log("preparing...");
         self.set_and_post_tunnel_state(ClientState::Preparing);
 
         // create a local access server for 'out' tunnel
-        let mut access_server = None;
         if self.config.mode == TUNNEL_MODE_OUT {
             self.post_tunnel_log(
                 format!(
-                    "starting access server for [Out] tunneling: {:?}",
+                    "starting access server for [TunnelOut] tunneling: {:?}",
                     self.config.local_access_server_addr.unwrap()
                 )
                 .as_str(),
@@ -117,10 +117,24 @@ impl Client {
 
             let mut tmp_access_server =
                 AccessServer::new(self.config.local_access_server_addr.unwrap());
-            tmp_access_server.bind().await?;
+            let bound_addr = tmp_access_server.bind().await?;
             tmp_access_server.start().await?;
-            access_server = Some(tmp_access_server);
+            self.access_server = Some(tmp_access_server);
+
+            info!("==========================================================");
+            info!("[TunnelOut] access server bound to: {}", bound_addr);
+            info!("==========================================================");
+            return Ok(bound_addr);
         }
+
+        bail!("call start_access_server() for TunnelOut mode only")
+    }
+
+    pub async fn connect_and_serve(&mut self) -> Result<()> {
+        info!(
+            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
+            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
+        );
 
         let mut connect_retry_count = 0;
         let connect_max_retry = self.config.connect_max_retry;
@@ -132,8 +146,7 @@ impl Client {
                     connect_retry_count = 0;
 
                     if self.config.mode == TUNNEL_MODE_OUT {
-                        self.serve_outgoing(access_server.as_mut().unwrap().tcp_receiver_ref())
-                            .await;
+                        self.serve_outgoing().await;
                     } else {
                         self.serve_incoming().await.ok();
                     }
@@ -242,7 +255,7 @@ impl Client {
         Ok(())
     }
 
-    async fn serve_outgoing(&mut self, local_conn_receiver: &mut Receiver<Option<TcpStream>>) {
+    async fn serve_outgoing(&mut self) {
         self.post_tunnel_log("start serving in [TunnelOut] mode...");
 
         self.report_traffic_data_in_background();
@@ -251,9 +264,7 @@ impl Client {
         let ref conn = remote_conn.read().unwrap();
 
         // accept local connections and build a tunnel to remote
-        while let Some(tcp_stream) = local_conn_receiver.recv().await {
-            let tcp_stream = unwrap_or_continue!(tcp_stream);
-
+        while let Some(tcp_stream) = self.access_server.as_mut().unwrap().recv().await {
             match conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
@@ -613,8 +624,8 @@ impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
         _now: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         warn!("======================================= WARNING ======================================");
-        warn!("=      Connecting to a server without verifying its certificate is DANGEROUS!!!      =");
-        warn!("= Provide the self-signed certificate for verification or connect with a domain name =");
+        warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
+        warn!("Provide the self-signed certificate for verification or connect with a domain name");
         warn!("======================= Be cautious, this is for TEST only!!! ========================");
         Ok(ServerCertVerified::assertion())
     }

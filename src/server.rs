@@ -1,11 +1,11 @@
 use crate::{AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
-use quinn::{congestion, TransportConfig};
+use quinn::{congestion, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::{Certificate, PrivateKey};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -15,6 +15,7 @@ use tokio::time::Duration;
 pub struct Server {
     config: ServerConfig,
     access_server_ports: Mutex<Vec<u16>>,
+    endpoint: Option<Endpoint>,
 }
 
 impl Server {
@@ -22,10 +23,11 @@ impl Server {
         Arc::new(Server {
             config,
             access_server_ports: Mutex::new(Vec::new()),
+            endpoint: None,
         })
     }
 
-    pub async fn start(self: &Arc<Self>) -> Result<()> {
+    pub async fn start(mut self: &mut Arc<Self>) -> Result<SocketAddr> {
         let config = &self.config;
         let (cert, key) =
             Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str())
@@ -65,6 +67,17 @@ impl Server {
             endpoint.local_addr()?,
             config.max_idle_timeout_ms
         );
+
+        Arc::get_mut(&mut self).unwrap().endpoint = Some(endpoint);
+
+        Ok(addr)
+    }
+
+    pub async fn serve(self: &Arc<Self>) -> Result<()> {
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .context("make sure start call succeeded!")?;
 
         while let Some(client_conn) = endpoint.accept().await {
             let mut this = self.clone();
@@ -132,19 +145,45 @@ impl Server {
                 info!("received OutLogin request, addr: {}", remote_addr);
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let downstream_addr = login_info.access_server_addr.parse().context(format!(
-                    "invalid access server address: {}",
-                    login_info.access_server_addr
-                ))?;
 
-                if !self.config.downstreams.is_empty()
-                    && !self.config.downstreams.contains(&downstream_addr)
-                {
-                    log_and_bail!("invalid addr: {}", downstream_addr);
+                let downstreams = &self.config.downstreams;
+                let access_server_addr = &login_info.access_server_addr;
+
+                let is_local = match access_server_addr.ip() {
+                    IpAddr::V4(ipv4) => {
+                        ipv4.is_private() || ipv4.is_loopback() || ipv4.is_unspecified()
+                    }
+                    IpAddr::V6(ipv6) => {
+                        ipv6.is_loopback() || ipv6.is_loopback() || ipv6.is_unspecified()
+                    }
+                };
+                if !is_local {
+                    log_and_bail!(
+                        "only local IPs are allowed for downstream, addr: {}",
+                        access_server_addr
+                    );
                 }
 
+                let downstream_addr = if access_server_addr.port() == 0 {
+                    if downstreams.is_empty() {
+                        log_and_bail!("explicit downstream address must be specified because there's no default set for the server");
+                    }
+                    let addr = downstreams.first().unwrap();
+                    info!(
+                        "will bind incoming TunnelIn request({}) to default address({})",
+                        client_conn.remote_address(),
+                        addr
+                    );
+                    addr
+                } else {
+                    if !downstreams.is_empty() && !downstreams.contains(access_server_addr) {
+                        log_and_bail!("downstream address not set: {}", access_server_addr);
+                    }
+                    access_server_addr
+                };
+
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::Out((client_conn, downstream_addr));
+                tunnel_type = TunnelType::Out((client_conn, *downstream_addr));
                 info!("sent response for OutLogin request, addr: {}", remote_addr);
             }
 
@@ -152,9 +191,19 @@ impl Server {
                 info!("received InLogin request, addr: {}", remote_addr);
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let upstream_addr: SocketAddr = login_info.access_server_addr.parse().context(
-                    format!("invalid address: {}", login_info.access_server_addr),
-                )?;
+                if login_info.access_server_addr.port() == 0 {
+                    log_and_bail!(
+                        "explicit access_server_addr for TunnelIn mode tunelling is required, addr: {:?}", login_info.access_server_addr
+                    );
+                }
+                if !login_info.access_server_addr.ip().is_unspecified()
+                    && !login_info.access_server_addr.ip().is_loopback()
+                {
+                    log_and_bail!(
+                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling, addr: {:?}", login_info.access_server_addr
+                    );
+                }
+                let upstream_addr = login_info.access_server_addr;
 
                 let mut guarded_access_server_ports = self.access_server_ports.lock().await;
                 if guarded_access_server_ports.contains(&upstream_addr.port()) {
@@ -305,8 +354,8 @@ impl Server {
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
         let (cert, key) = if cert_path.is_empty() {
             warn!("============================= WARNING ==============================");
-            warn!("= No valid certificate path is provided, a self-signed certificate =");
-            warn!("=           for the domain \"localhost\" is generated.             =");
+            warn!("No valid certificate path is provided, a self-signed certificate");
+            warn!("for the domain \"localhost\" is generated.");
             warn!("============== Be cautious, this is for TEST only!!! ===============");
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
             let key = cert.serialize_private_key_der();

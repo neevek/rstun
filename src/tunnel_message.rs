@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use anyhow::{bail, Context};
 use enum_as_inner::EnumAsInner;
@@ -19,7 +21,7 @@ pub enum TunnelMessage {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
-    pub access_server_addr: String, // ip:port tuple
+    pub access_server_addr: SocketAddr,
 }
 
 impl TunnelMessage {

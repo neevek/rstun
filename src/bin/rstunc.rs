@@ -1,11 +1,14 @@
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use log::error;
+use rs_utilities::log_and_bail;
 use rstun::*;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 fn main() {
     let args = RstuncArgs::parse();
     rs_utilities::LogHelper::init_logger("rstunc", args.loglevel.as_ref());
-    if let Some(config) = parse_command_line_args(args) {
+    if let Ok(config) = parse_command_line_args(args) {
         let mut client = Client::new(config);
         // client.set_enable_on_info_report(true);
         // client.set_on_info_listener(|s| {
@@ -15,18 +18,27 @@ fn main() {
     }
 }
 
-fn parse_command_line_args(args: RstuncArgs) -> Option<ClientConfig> {
+fn parse_command_line_args(args: RstuncArgs) -> Result<ClientConfig> {
     let mut config = ClientConfig::default();
-    let addrs: Vec<&str> = args.addr_mapping.split('^').collect();
-    if addrs.len() != 2 {
-        error!("invalid address mapping: {}", args.addr_mapping);
-        return None;
+    let addr_mapping: Vec<&str> = args.addr_mapping.split('^').collect();
+    if addr_mapping.len() != 2 {
+        log_and_bail!("invalid address mapping: {}", args.addr_mapping);
     }
-    let mut addrs: Vec<String> = addrs.iter().map(|s| s.to_string()).collect();
 
-    for addr in &mut addrs {
-        if !addr.contains(':') {
-            *addr = format!("127.0.0.1:{}", addr);
+    let mut addr_mapping: Vec<String> = addr_mapping.iter().map(|addr| addr.to_string()).collect();
+    let mut sock_addr_mapping: Vec<SocketAddr> = Vec::with_capacity(addr_mapping.len());
+
+    for addr in &mut addr_mapping {
+        if addr == "ANY" {
+            sock_addr_mapping.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+        } else {
+            if !addr.contains(':') {
+                *addr = format!("127.0.0.1:{}", addr);
+            }
+            sock_addr_mapping.push(
+                addr.parse::<SocketAddr>()
+                    .context(format!("invalid address mapping:[{}]", args.addr_mapping))?,
+            );
         }
     }
 
@@ -48,29 +60,21 @@ fn parse_command_line_args(args: RstuncArgs) -> Option<ClientConfig> {
         TUNNEL_MODE_OUT
     };
 
-    let local_access_server_addr;
     config.login_msg = if args.mode == TUNNEL_MODE_IN {
-        local_access_server_addr = addrs[1].to_string();
+        config.local_access_server_addr = Some(sock_addr_mapping[1]);
         Some(TunnelMessage::ReqInLogin(LoginInfo {
             password: args.password,
-            access_server_addr: addrs[0].to_string(),
+            access_server_addr: sock_addr_mapping[0],
         }))
     } else {
-        local_access_server_addr = addrs[0].to_string();
+        config.local_access_server_addr = Some(sock_addr_mapping[0]);
         Some(TunnelMessage::ReqOutLogin(LoginInfo {
             password: args.password,
-            access_server_addr: addrs[1].to_string(),
+            access_server_addr: sock_addr_mapping[1],
         }))
     };
 
-    config.local_access_server_addr = Some(local_access_server_addr.parse().unwrap_or_else(|e| {
-        panic!(
-            "invalid local_access_server_addr: {}, {}",
-            local_access_server_addr, e
-        )
-    }));
-
-    Some(config)
+    Ok(config)
 }
 
 #[derive(Parser, Debug)]
@@ -89,6 +93,7 @@ struct RstuncArgs {
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
+    /// ANY^ANY means
     #[clap(short = 'a', long, display_order = 4)]
     addr_mapping: String,
 

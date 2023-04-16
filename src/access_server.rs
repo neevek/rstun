@@ -26,12 +26,14 @@ impl AccessServer {
         }
     }
 
-    pub async fn bind(&mut self) -> Result<()> {
+    pub async fn bind(&mut self) -> Result<SocketAddr> {
         info!("starting access server, addr: {}", self.addr);
-        self.tcp_listener = Some(Arc::new(TcpListener::bind(self.addr).await?));
+        let tcp_listener = TcpListener::bind(self.addr).await?;
+        let bound_addr = tcp_listener.local_addr().unwrap();
+        self.tcp_listener = Some(Arc::new(tcp_listener));
         info!("started access server, addr: {}", self.addr);
 
-        Ok(())
+        Ok(bound_addr)
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -81,8 +83,8 @@ impl AccessServer {
         &self.addr
     }
 
-    pub fn tcp_receiver_ref(&mut self) -> &mut Receiver<Option<TcpStream>> {
-        self.tcp_receiver.as_mut().unwrap()
+    pub async fn recv(&mut self) -> Option<TcpStream> {
+        self.tcp_receiver.as_mut().unwrap().recv().await?
     }
 
     pub fn take_tcp_receiver(&mut self) -> Receiver<Option<TcpStream>> {

@@ -34,6 +34,10 @@ fn main() {
 }
 
 async fn run(mut args: RstundArgs) -> Result<()> {
+    if args.addr.is_empty() {
+        args.addr = "0.0.0.0:0".to_string();
+    }
+
     if !args.addr.contains(':') {
         args.addr = format!("127.0.0.1:{}", args.addr);
     }
@@ -64,16 +68,18 @@ async fn run(mut args: RstundArgs) -> Result<()> {
     config.downstreams = downstreams;
     config.max_idle_timeout_ms = args.max_idle_timeout_ms;
 
-    let server = Server::new(config);
+    let mut server = Server::new(config);
     server.start().await?;
+    server.serve().await?;
     Ok(())
 }
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct RstundArgs {
-    /// Address ([ip:]port pair) to listen on
-    #[clap(short = 'l', long, display_order = 1)]
+    /// Address ([ip:]port pair) to listen on, a random port will be chosen
+    /// and binding to all network interfaces (0.0.0.0) if empty
+    #[clap(short = 'a', long, default_value = "", display_order = 1)]
     addr: String,
 
     /// Exposed downstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
@@ -102,6 +108,6 @@ struct RstundArgs {
     #[clap(short = 'w', long, default_value = "40000", display_order = 7)]
     max_idle_timeout_ms: u64,
 
-    #[clap(short = 'L', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 8)]
+    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 8)]
     loglevel: String,
 }
