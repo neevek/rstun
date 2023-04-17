@@ -28,10 +28,17 @@ impl AccessServer {
 
     pub async fn bind(&mut self) -> Result<SocketAddr> {
         info!("starting access server, addr: {}", self.addr);
-        let tcp_listener = TcpListener::bind(self.addr).await?;
+        let tcp_listener = TcpListener::bind(self.addr).await.map_err(|e| {
+            error!(
+                "failed to bind tunnel access server on address: {}, error: {}",
+                self.addr, e
+            );
+            e
+        })?;
+
         let bound_addr = tcp_listener.local_addr().unwrap();
         self.tcp_listener = Some(Arc::new(tcp_listener));
-        info!("started access server, addr: {}", self.addr);
+        info!("bound tunnel access server on address: {}", self.addr);
 
         Ok(bound_addr)
     }

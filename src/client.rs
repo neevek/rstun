@@ -90,15 +90,11 @@ impl Client {
             .build()
             .unwrap()
             .block_on(async {
-                self.start_access_server()
-                    .await
-                    .map_err(|e| error!("failed to start access server: {}", e))
-                    .unwrap();
-
-                self.connect_and_serve()
-                    .await
-                    .unwrap_or_else(|e| error!("failed to connect: {}", e));
-            });
+                self.start_access_server().await?;
+                self.connect_and_serve().await;
+                Ok::<(), anyhow::Error>(())
+            })
+            .ok();
     }
 
     pub async fn start_access_server(&mut self) -> Result<SocketAddr> {
@@ -130,7 +126,7 @@ impl Client {
         bail!("call start_access_server() for TunnelOut mode only")
     }
 
-    pub async fn connect_and_serve(&mut self) -> Result<()> {
+    pub async fn connect_and_serve(&mut self) {
         info!(
             "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
             self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
@@ -183,7 +179,6 @@ impl Client {
 
         self.post_tunnel_log("quit");
         self.set_and_post_tunnel_state(ClientState::Terminated);
-        Ok(())
     }
 
     async fn connect(&mut self) -> Result<()> {

@@ -14,10 +14,7 @@ use log::error;
 use quinn::{RecvStream, SendStream};
 use rs_utilities::log_and_bail;
 pub use server::Server;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    ops::Deref,
-};
+use std::{net::SocketAddr, ops::Deref};
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
@@ -164,19 +161,19 @@ impl ClientConfig {
 
         let mut addr_mapping: Vec<String> =
             addr_mapping.iter().map(|addr| addr.to_string()).collect();
-        let mut sock_addr_mapping: Vec<SocketAddr> = Vec::with_capacity(addr_mapping.len());
+        let mut sock_addr_mapping: Vec<Option<SocketAddr>> = Vec::with_capacity(addr_mapping.len());
 
         for addr in &mut addr_mapping {
             if addr == "ANY" {
-                sock_addr_mapping.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
+                sock_addr_mapping.push(None);
             } else {
                 if !addr.contains(':') {
                     *addr = format!("127.0.0.1:{}", addr);
                 }
-                sock_addr_mapping.push(
+                sock_addr_mapping.push(Some(
                     addr.parse::<SocketAddr>()
                         .context(format!("invalid address mapping:[{}]", addr_mapping_str))?,
-                );
+                ));
             }
         }
 
@@ -198,13 +195,13 @@ impl ClientConfig {
         };
 
         config.login_msg = if mode == TUNNEL_MODE_IN {
-            config.local_access_server_addr = Some(sock_addr_mapping[1]);
+            config.local_access_server_addr = sock_addr_mapping[1];
             Some(TunnelMessage::ReqInLogin(LoginInfo {
                 password: password.to_string(),
                 access_server_addr: sock_addr_mapping[0],
             }))
         } else {
-            config.local_access_server_addr = Some(sock_addr_mapping[0]);
+            config.local_access_server_addr = sock_addr_mapping[0];
             Some(TunnelMessage::ReqOutLogin(LoginInfo {
                 password: password.to_string(),
                 access_server_addr: sock_addr_mapping[1],

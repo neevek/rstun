@@ -5,7 +5,7 @@ use quinn::{congestion, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::{Certificate, PrivateKey};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -153,7 +153,10 @@ impl Server {
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
 
                 let downstreams = &self.config.downstreams;
-                let access_server_addr = &login_info.access_server_addr;
+                let access_server_addr = match login_info.access_server_addr {
+                    Some(access_server_addr) => access_server_addr,
+                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                };
 
                 let is_local = match access_server_addr.ip() {
                     IpAddr::V4(ipv4) => {
@@ -182,10 +185,10 @@ impl Server {
                     );
                     addr
                 } else {
-                    if !downstreams.is_empty() && !downstreams.contains(access_server_addr) {
+                    if !downstreams.is_empty() && !downstreams.contains(&access_server_addr) {
                         log_and_bail!("downstream address not set: {}", access_server_addr);
                     }
-                    access_server_addr
+                    &access_server_addr
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -197,19 +200,23 @@ impl Server {
                 info!("received InLogin request, addr: {}", remote_addr);
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                if login_info.access_server_addr.port() == 0 {
+                let access_server_addr = match login_info.access_server_addr {
+                    Some(access_server_addr) => access_server_addr,
+                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+                };
+                if access_server_addr.port() == 0 {
                     log_and_bail!(
-                        "explicit access_server_addr for TunnelIn mode tunelling is required, addr: {:?}", login_info.access_server_addr
+                        "explicit access_server_addr for TunnelIn mode tunelling is required, addr: {:?}", access_server_addr
                     );
                 }
-                if !login_info.access_server_addr.ip().is_unspecified()
-                    && !login_info.access_server_addr.ip().is_loopback()
+                if !access_server_addr.ip().is_unspecified()
+                    && !access_server_addr.ip().is_loopback()
                 {
                     log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling, addr: {:?}", login_info.access_server_addr
+                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling, addr: {:?}", access_server_addr
                     );
                 }
-                let upstream_addr = login_info.access_server_addr;
+                let upstream_addr = access_server_addr;
 
                 let mut guarded_access_server_ports = self.access_server_ports.lock().await;
                 if guarded_access_server_ports.contains(&upstream_addr.port()) {
