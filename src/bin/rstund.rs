@@ -69,7 +69,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
     config.max_idle_timeout_ms = args.max_idle_timeout_ms;
 
     let mut server = Server::new(config);
-    server.start().await?;
+    server.bind().await?;
     server.serve().await?;
     Ok(())
 }

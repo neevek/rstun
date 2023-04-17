@@ -43,7 +43,7 @@ rstunc
   --addr-mapping 0.0.0.0:9900^8800
 ```
   - `mode` here is `OUT` for `TunnelOut`, for securing traffic from local to the server through the tunnel.
-  - `server-addr`, a TCP server that runs locally for accepting requests and forwarding all the traffic to the server through the tunnel.
+  - `server-addr`, domain name or IP address of the server.
   - `password`, same as that for the server.
   - `cert`, see explanation above for `rstund`. Note this is also optional if connecting to the server with a domain name, or the server `rstund` runs with an auto-generated self-signed certificate (see the TEST example below).
   - `addr-mapping` is an address mapping between two `ip:port` pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` server that runs `rstund`. i.e. all traffic from the local port `9900` will be forwarded to the remote port `8800` through the tunnel. `addr-mapping` also supports the following 3 combinations:

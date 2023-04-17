@@ -27,7 +27,7 @@ impl Server {
         })
     }
 
-    pub async fn start(mut self: &mut Arc<Self>) -> Result<SocketAddr> {
+    pub async fn bind(mut self: &mut Arc<Self>) -> Result<SocketAddr> {
         let config = &self.config;
         let (cert, key) =
             Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str())
@@ -60,10 +60,16 @@ impl Server {
             .parse()
             .context(format!("invalid address: {}", config.addr))?;
 
-        let endpoint = quinn::Endpoint::server(cfg, addr)?;
+        let endpoint = quinn::Endpoint::server(cfg, addr).map_err(|e| {
+            error!(
+                "failed to bind tunnel server on address: {}, error: {}",
+                addr, e
+            );
+            e
+        })?;
 
         info!(
-            "server is bound to: {}, idle_timeout: {}",
+            "tunnel server is bound on address: {}, idle_timeout: {}",
             endpoint.local_addr()?,
             config.max_idle_timeout_ms
         );
@@ -353,6 +359,7 @@ impl Server {
 
     fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
         let (cert, key) = if cert_path.is_empty() {
+            info!("will use auto-generated self-signed certificate.");
             warn!("============================= WARNING ==============================");
             warn!("No valid certificate path is provided, a self-signed certificate");
             warn!("for the domain \"localhost\" is generated.");
