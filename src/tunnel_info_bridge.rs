@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 
 #[derive(Serialize, Default)]
-pub(crate) struct TrafficData {
+pub(crate) struct TunnelTraffic {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub tx_dgrams: u64,
@@ -14,7 +14,7 @@ pub(crate) struct TrafficData {
 pub(crate) enum TunnelInfoType {
     TunnelState,
     TunnelLog,
-    Traffic,
+    TunnelTraffic,
 }
 
 #[derive(Serialize)]

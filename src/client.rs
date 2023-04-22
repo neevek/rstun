@@ -1,5 +1,5 @@
 use crate::{
-    tunnel_info_bridge::{TrafficData, TunnelInfo, TunnelInfoBridge, TunnelInfoType},
+    tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     AccessServer, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel, TunnelMessage,
     TUNNEL_MODE_OUT,
 };
@@ -63,7 +63,7 @@ pub struct Client {
     scheduled_start: bool,
     tunnel_info_bridge: TunnelInfoBridge,
     on_info_report_enabled: bool,
-    total_traffic_data: Arc<Mutex<TrafficData>>,
+    total_traffic_data: Arc<Mutex<TunnelTraffic>>,
     state: ClientState,
 }
 
@@ -78,7 +78,7 @@ impl Client {
             scheduled_start: false,
             tunnel_info_bridge: TunnelInfoBridge::new(),
             on_info_report_enabled: false,
-            total_traffic_data: Arc::new(Mutex::new(TrafficData::default())),
+            total_traffic_data: Arc::new(Mutex::new(TunnelTraffic::default())),
             state: ClientState::Idle,
         }
     }
@@ -332,14 +332,14 @@ impl Client {
                     Some(remote_conn) => {
                         let stats = remote_conn.read().unwrap().stats();
                         let total_traffic_data = total_traffic_data.as_ref().lock().unwrap();
-                        let data = TrafficData {
+                        let data = TunnelTraffic {
                             rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
                             tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
                             rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
                             tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
                         };
                         tunnel_info_bridge.post_tunnel_info(&TunnelInfo::new(
-                            TunnelInfoType::Traffic,
+                            TunnelInfoType::TunnelTraffic,
                             Box::new(data),
                         ));
                     }
