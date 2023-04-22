@@ -376,8 +376,10 @@ impl Server {
             let cert = cert.serialize_der()?;
             (cert, key)
         } else {
-            let cert = std::fs::read(cert_path).context("failed to read cert file")?;
-            let key = std::fs::read(key_path).context("failed to read key file")?;
+            let cert = std::fs::read(cert_path)
+                .context(format!("failed to read cert file: {}", cert_path))?;
+            let key = std::fs::read(key_path)
+                .context(format!("failed to read key file: {}", key_path))?;
             (cert, key)
         };
 

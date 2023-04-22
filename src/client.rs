@@ -103,14 +103,6 @@ impl Client {
 
         // create a local access server for 'out' tunnel
         if self.config.mode == TUNNEL_MODE_OUT {
-            self.post_tunnel_log(
-                format!(
-                    "starting access server for [TunnelOut] tunneling: {:?}",
-                    self.config.local_access_server_addr.unwrap()
-                )
-                .as_str(),
-            );
-
             let mut tmp_access_server =
                 AccessServer::new(self.config.local_access_server_addr.unwrap());
             let bound_addr = tmp_access_server.bind().await?;
@@ -120,6 +112,15 @@ impl Client {
             info!("==========================================================");
             info!("[TunnelOut] access server bound to: {}", bound_addr);
             info!("==========================================================");
+
+            self.post_tunnel_log(
+                format!(
+                    "Tunnel access server for [TunnelOut] bound to: {:?}",
+                    bound_addr
+                )
+                .as_str(),
+            );
+
             return Ok(bound_addr);
         }
 
@@ -385,6 +386,8 @@ impl Client {
             rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
         })?;
 
+        self.post_tunnel_log(format!("will use cipher: {}", self.config.cipher).as_str());
+
         if !Self::is_ip_addr(&self.config.server_addr) {
             let domain = match self.config.server_addr.rfind(':') {
                 Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
@@ -481,7 +484,8 @@ impl Client {
     }
 
     fn read_cert(cert_path: &str) -> Result<rustls::Certificate> {
-        let cert = std::fs::read(cert_path).context("failed to read cert file")?;
+        let cert =
+            std::fs::read(cert_path).context(format!("failed to read cert file: {}", cert_path))?;
         let cert = rustls::Certificate(cert);
 
         Ok(cert)
