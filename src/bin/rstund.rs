@@ -42,9 +42,9 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         args.addr = format!("127.0.0.1:{}", args.addr);
     }
 
-    let mut downstreams = Vec::<SocketAddr>::new();
+    let mut upstreams = Vec::<SocketAddr>::new();
 
-    for d in &mut args.downstreams {
+    for d in &mut args.upstreams {
         if d.starts_with("0.0.0.0:") {
             *d = d.replace("0.0.0.0:", "127.0.0.1:");
         }
@@ -54,9 +54,9 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         }
 
         if let Ok(addr) = d.parse() {
-            downstreams.push(addr);
+            upstreams.push(addr);
         } else {
-            log_and_bail!("invalid downstreams address: {}", d);
+            log_and_bail!("invalid upstreams address: {}", d);
         }
     }
 
@@ -65,7 +65,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
     config.password = args.password;
     config.cert_path = args.cert;
     config.key_path = args.key;
-    config.downstreams = downstreams;
+    config.upstreams = upstreams;
     config.max_idle_timeout_ms = args.max_idle_timeout_ms;
 
     let mut server = Server::new(config);
@@ -82,10 +82,10 @@ struct RstundArgs {
     #[clap(short = 'a', long, default_value = "", display_order = 1)]
     addr: String,
 
-    /// Exposed downstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
+    /// Exposed upstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
     /// The entire local network is exposed through the tunnel if empty
     #[clap(short = 'd', long, required = false, display_order = 2)]
-    downstreams: Vec<String>,
+    upstreams: Vec<String>,
 
     /// Password of the tunnel server
     #[clap(short = 'p', long, required = true, display_order = 3)]

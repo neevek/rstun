@@ -125,9 +125,9 @@ pub struct ServerConfig {
     pub max_idle_timeout_ms: u64,
 
     /// traffics to the rstun server will be relayed to servers
-    /// specified by downstreams, client must specify a target
-    /// downstream when it connects to the rstun server in OUT mode.
-    pub downstreams: Vec<SocketAddr>,
+    /// specified by upstreams, client must specify a target
+    /// upstream when it connects to the rstun server in OUT mode.
+    pub upstreams: Vec<SocketAddr>,
 
     /// 0.0.0.0:3515
     pub dashboard_server: String,

@@ -22,13 +22,13 @@ Usage
 ```
 rstund \
   --addr 0.0.0.0:6060 \
-  --downstreams 8800 \
+  --upstreams 8800 \
   --password 123456 \
   --cert path/to/cert.der \
   --key path/to/key.der
 ```
   - `addr` specifies the ip:port that the server is listening on.
-  - `downstreams` specifies a TCP port which traffic from the client through the tunnel will be relayed to on the server, this is applicable for `OUT` mode tunnels only, multiple space-separated downstreams can be set. Note this argument is optional, if it is not specified, all open ports of the server are exposed to the clients through the tunnel. So make sure to specify downstreams if exposing all open ports of the server is not desired.
+  - `upstreams` specifies a TCP port which traffic from the client through the tunnel will be relayed to on the server, this is applicable for `OUT` mode tunnels only, multiple space-separated upstreams can be set. Note this argument is optional, if it is not specified, all open ports of the server are exposed to the clients through the tunnel. So make sure to specify upstreams if exposing all open ports of the server is not desired.
   - `password`, password of the server, the client `rstunc` is required to send this password to successfully build a tunnel with the server.
   - `cert` and `key` are certificate and private key for the domain of the server and they must be in `DER` format (binary format), self-signed certificate is allowed, but you will have to connect to the server using IP address and the certificate will also be required by `rstunc` for verification in this case (see below). Anyway, getting a certificate for your domain from a trusted CA and connecting to the server using domain name is always recommended. Note `cert` and `key` are optional, if they are not specified, the domain `localhost` is assumed and a self-signed certificate is generated on the fly, but this is for TEST only, Man-In-The-Middle attack can occur with such setting, so make sure **it is only used for TEST**!
 
@@ -48,7 +48,7 @@ rstunc
   - `cert`, see explanation above for `rstund`. Note this is also optional if connecting to the server with a domain name, or the server `rstund` runs with an auto-generated self-signed certificate (see the TEST example below).
   - `addr-mapping` is an address mapping between two `ip:port` pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` server that runs `rstund`. i.e. all traffic from the local port `9900` will be forwarded to the remote port `8800` through the tunnel. `addr-mapping` also supports the following 3 combinations:
     - `ANY^8000` for not explicitly specifying a port for the local access server (the client), the bound port will be printed to the terminal as following `[TunnelOut] access server bound to: 0.0.0.0:60001`, in which `60001` is a random port.
-    - `8000^ANY` for not explicitly specifying a port to bind with the remote server, the server decides that port, so it depends on that the server is started with explicitly setting the `--downstreams` option.
+    - `8000^ANY` for not explicitly specifying a port to bind with the remote server, the server decides that port, so it depends on that the server is started with explicitly setting the `--upstreams` option.
     - `ANY^ANY` both the cases of the settings above.
 
 * Simple TEST example
@@ -76,8 +76,8 @@ OPTIONS:
             Address ([ip:]port pair) to listen on, a random port will be chosen and binding to all
             network interfaces (0.0.0.0) if empty [default: ]
 
-    -d, --downstreams <DOWNSTREAMS>
-            Exposed downstreams as the receiving end of the tunnel, e.g. -d [ip:]port, The entire
+    -u, --upstreams <UPSTREAMS>
+            Exposed upstreams as the receiving end of the tunnel, e.g. -d [ip:]port, The entire
             local network is exposed through the tunnel if empty
 
     -p, --password <PASSWORD>
@@ -129,7 +129,7 @@ OPTIONS:
             `ANY^8000` for not explicitly specifying a port for the local access server (the client)
             `8000^ANY` for not explicitly specifying a port to bind with the remote server, the
             server decides that port, so it depends on that the server is started with explicitly
-            setting the `--downstreams` option. `ANY^ANY` both the cases of the settings above
+            setting the `--upstreams` option. `ANY^ANY` both the cases of the settings above
 
     -c, --cert <CERT>
             Path to the certificate file in DER format, only needed for self signed certificate

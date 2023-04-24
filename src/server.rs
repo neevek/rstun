@@ -152,7 +152,7 @@ impl Server {
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
 
-                let downstreams = &self.config.downstreams;
+                let upstreams = &self.config.upstreams;
                 let access_server_addr = match login_info.access_server_addr {
                     Some(access_server_addr) => access_server_addr,
                     None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -168,16 +168,16 @@ impl Server {
                 };
                 if !is_local {
                     log_and_bail!(
-                        "only local IPs are allowed for downstream, addr: {}",
+                        "only local IPs are allowed for upstream, addr: {}",
                         access_server_addr
                     );
                 }
 
-                let downstream_addr = if access_server_addr.port() == 0 {
-                    if downstreams.is_empty() {
-                        log_and_bail!("explicit downstream address must be specified because there's no default set for the server");
+                let upstream_addr = if access_server_addr.port() == 0 {
+                    if upstreams.is_empty() {
+                        log_and_bail!("explicit upstream address must be specified because there's no default set for the server");
                     }
-                    let addr = downstreams.first().unwrap();
+                    let addr = upstreams.first().unwrap();
                     info!(
                         "will bind incoming TunnelIn request({}) to default address({})",
                         client_conn.remote_address(),
@@ -185,14 +185,14 @@ impl Server {
                     );
                     addr
                 } else {
-                    if !downstreams.is_empty() && !downstreams.contains(&access_server_addr) {
-                        log_and_bail!("downstream address not set: {}", access_server_addr);
+                    if !upstreams.is_empty() && !upstreams.contains(&access_server_addr) {
+                        log_and_bail!("upstream address not set: {}", access_server_addr);
                     }
                     &access_server_addr
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::Out((client_conn, *downstream_addr));
+                tunnel_type = TunnelType::Out((client_conn, *upstream_addr));
                 info!("sent response for OutLogin request, addr: {}", remote_addr);
             }
 
@@ -275,7 +275,7 @@ impl Server {
     async fn process_out_connection(
         self: &Arc<Self>,
         client_conn: quinn::Connection,
-        downstream_addr: SocketAddr,
+        upstream_addr: SocketAddr,
     ) -> Result<()> {
         let remote_addr = &client_conn.remote_address();
 
@@ -297,12 +297,12 @@ impl Server {
                     );
                 }
                 Ok(quic_stream) => tokio::spawn(async move {
-                    match TcpStream::connect(&downstream_addr).await {
+                    match TcpStream::connect(&upstream_addr).await {
                         Ok(tcp_stream) => {
                             debug!(
                                 "[Out] open stream for conn, {} -> {}",
                                 quic_stream.0.id().index(),
-                                downstream_addr,
+                                upstream_addr,
                             );
 
                             let tcp_stream = tcp_stream.into_split();
@@ -310,7 +310,7 @@ impl Server {
                         }
 
                         Err(e) => {
-                            error!("failed to connect to {}, err: {}", downstream_addr, e);
+                            error!("failed to connect to {}, err: {}", upstream_addr, e);
                         }
                     }
                 }),
