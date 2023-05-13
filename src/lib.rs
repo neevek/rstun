@@ -9,6 +9,7 @@ pub use access_server::AccessServer;
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 pub use client::Client;
+pub use client::ClientState;
 use lazy_static::lazy_static;
 use log::error;
 use quinn::{RecvStream, SendStream};
@@ -101,7 +102,7 @@ pub struct ControlStream {
     pub quic_recv: RecvStream,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClientConfig {
     pub local_access_server_addr: Option<SocketAddr>,
     pub cert_path: String,
@@ -116,7 +117,7 @@ pub struct ClientConfig {
     pub mode: &'static str,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct ServerConfig {
     pub addr: String,
     pub password: String,

@@ -8,7 +8,7 @@ use rs_utilities::Utils;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
-#[derive(EnumAsInner, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TunnelMessage {
     ReqInLogin(LoginInfo),
     ReqOutLogin(LoginInfo),
@@ -18,7 +18,7 @@ pub enum TunnelMessage {
     RespSuccess,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
     pub access_server_addr: Option<SocketAddr>,
