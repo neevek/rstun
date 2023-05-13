@@ -6,12 +6,17 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
+pub enum ChannelMessage {
+    Request(TcpStream),
+    Reconnect,
+}
+
 #[derive(Debug)]
 pub struct AccessServer {
     addr: SocketAddr,
     tcp_listener: Option<Arc<TcpListener>>,
-    tcp_sender: Sender<Option<TcpStream>>,
-    tcp_receiver: Option<Receiver<Option<TcpStream>>>,
+    tcp_sender: Sender<Option<ChannelMessage>>,
+    tcp_receiver: Option<Receiver<Option<ChannelMessage>>>,
 }
 
 impl AccessServer {
@@ -56,7 +61,7 @@ impl AccessServer {
                     Ok((socket, addr)) => {
                         debug!("received new local connection, addr: {}", addr);
                         if tcp_sender
-                            .send(Some(socket))
+                            .send(Some(ChannelMessage::Request(socket)))
                             .await
                             .map_err(|e| {
                                 error!("failed to send connection over channel, err: {}", e);
@@ -77,7 +82,7 @@ impl AccessServer {
         Ok(())
     }
 
-    pub async fn shutdown(&self, tcp_receiver: Receiver<Option<TcpStream>>) -> Result<()> {
+    pub async fn shutdown(&self, tcp_receiver: Receiver<Option<ChannelMessage>>) -> Result<()> {
         // drop the Receiver
         drop(tcp_receiver);
 
@@ -90,15 +95,15 @@ impl AccessServer {
         &self.addr
     }
 
-    pub async fn recv(&mut self) -> Option<TcpStream> {
+    pub async fn recv(&mut self) -> Option<ChannelMessage> {
         self.tcp_receiver.as_mut().unwrap().recv().await?
     }
 
-    pub fn take_tcp_receiver(&mut self) -> Receiver<Option<TcpStream>> {
+    pub fn take_tcp_receiver(&mut self) -> Receiver<Option<ChannelMessage>> {
         self.tcp_receiver.take().unwrap()
     }
 
-    pub fn clone_tcp_sender(&mut self) -> Sender<Option<TcpStream>> {
+    pub fn clone_tcp_sender(&self) -> Sender<Option<ChannelMessage>> {
         self.tcp_sender.clone()
     }
 }

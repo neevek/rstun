@@ -1,3 +1,4 @@
+use crate::access_server::ChannelMessage;
 use crate::{AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
@@ -336,7 +337,7 @@ impl Server {
         });
 
         let mut tcp_receiver = access_server.take_tcp_receiver();
-        while let Some(Some(tcp_stream)) = tcp_receiver.recv().await {
+        while let Some(Some(ChannelMessage::Request(tcp_stream))) = tcp_receiver.recv().await {
             match client_conn.open_bi().await {
                 Ok(quic_stream) => {
                     let tcp_stream = tcp_stream.into_split();

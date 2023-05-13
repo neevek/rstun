@@ -201,6 +201,9 @@ impl ClientConfig {
                 access_server_addr: sock_addr_mapping[0],
             }))
         } else {
+            if sock_addr_mapping[0] == None {
+                log_and_bail!("'ANY' is not allowed as local access server for OUT tunneling");
+            }
             config.local_access_server_addr = sock_addr_mapping[0];
             Some(TunnelMessage::ReqOutLogin(LoginInfo {
                 password: password.to_string(),

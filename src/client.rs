@@ -1,4 +1,5 @@
 use crate::{
+    access_server::ChannelMessage,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     AccessServer, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel, TunnelMessage,
     TUNNEL_MODE_OUT,
@@ -12,16 +13,18 @@ use rs_utilities::{dns, log_and_bail};
 use rustls::{client::ServerCertVerified, Certificate, RootCertStore, ServerName};
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
-use std::sync::{Arc, Mutex, RwLock};
 use std::{fmt::Display, str::FromStr};
 use std::{
     net::{IpAddr, SocketAddr},
     time::SystemTime,
 };
+use std::{
+    sync::{Arc, Mutex, RwLock},
+    time::Duration,
+};
 use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::time::Duration;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
@@ -125,6 +128,23 @@ impl Client {
         }
 
         bail!("call start_access_server() for TunnelOut mode only")
+    }
+
+    pub fn update_config(&mut self, config: ClientConfig) {
+        self.config = config;
+    }
+
+    pub async fn stop_and_reconnect(&self) {
+        match self.access_server {
+            Some(ref access_server) => {
+                access_server
+                    .clone_tcp_sender()
+                    .send(Some(ChannelMessage::Reconnect))
+                    .await
+                    .ok();
+            }
+            None => log::warn!("access server not started"),
+        }
     }
 
     pub async fn connect_and_serve(&mut self) {
@@ -260,7 +280,9 @@ impl Client {
         let ref conn = remote_conn.read().unwrap();
 
         // accept local connections and build a tunnel to remote
-        while let Some(tcp_stream) = self.access_server.as_mut().unwrap().recv().await {
+        while let Some(ChannelMessage::Request(tcp_stream)) =
+            self.access_server.as_mut().unwrap().recv().await
+        {
             match conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
