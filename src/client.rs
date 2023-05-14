@@ -381,12 +381,15 @@ impl Client {
                 match remote_conn.upgrade() {
                     Some(remote_conn) => {
                         let stats = remote_conn.read().await.stats();
-                        let total_traffic_data = &inner_state!(this, total_traffic_data);
-                        let data = TunnelTraffic {
-                            rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
-                            tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
-                            rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
-                            tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
+                        let data = {
+                            // have to be very careful to avoid deadlock, don't hold the lock for too long
+                            let total_traffic_data = &inner_state!(this, total_traffic_data);
+                            TunnelTraffic {
+                                rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
+                                tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
+                                rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
+                                tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
+                            }
                         };
                         this.post_tunnel_info(TunnelInfo::new(
                             TunnelInfoType::TunnelTraffic,
@@ -621,10 +624,10 @@ impl Client {
 
     fn set_and_post_tunnel_state(self: &Arc<Self>, state: ClientState) {
         info!("client state: {state}");
-        inner_state!(self, client_state) = state;
+        inner_state!(self, client_state) = state.clone();
         self.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelState,
-            Box::new(inner_state!(self, client_state).to_string()),
+            Box::new(state),
         ));
     }
 
@@ -633,7 +636,7 @@ impl Client {
         T: ?Sized + Serialize,
     {
         if inner_state!(self, on_info_report_enabled) {
-            inner_state!(self, tunnel_info_bridge).post_tunnel_info(&server_info);
+            inner_state!(self, tunnel_info_bridge).post_tunnel_info(server_info);
         }
     }
 

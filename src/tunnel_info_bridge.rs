@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub(crate) struct TunnelTraffic {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
@@ -53,12 +53,12 @@ impl TunnelInfoBridge {
         self.listener.is_some()
     }
 
-    pub(crate) fn post_tunnel_info<T>(&self, data: &TunnelInfo<T>)
+    pub(crate) fn post_tunnel_info<T>(&self, data: TunnelInfo<T>)
     where
         T: ?Sized + Serialize,
     {
         if let Some(ref listener) = self.listener {
-            if let Ok(json) = serde_json::to_string(data) {
+            if let Ok(json) = serde_json::to_string(&data) {
                 listener.lock().unwrap()(json.as_str());
             }
         }
