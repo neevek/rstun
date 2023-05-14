@@ -22,10 +22,10 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc::Sender;
+use tokio::{net::TcpStream, task::JoinHandle};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
@@ -61,6 +61,7 @@ impl Display for ClientState {
 struct ThreadSafeState {
     remote_conn: Option<Arc<tokio::sync::RwLock<quinn::Connection>>>,
     ctrl_stream: Option<ControlStream>,
+    access_server: Option<AccessServer>,
     client_state: ClientState,
     channel_message_sender: Option<Sender<Option<ChannelMessage>>>,
     total_traffic_data: TunnelTraffic,
@@ -73,6 +74,7 @@ impl ThreadSafeState {
     fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             ctrl_stream: None,
+            access_server: None,
             remote_conn: None,
             client_state: ClientState::Idle,
             channel_message_sender: None,
@@ -114,7 +116,7 @@ impl Client {
             .block_on(async { self.connect_and_serve().await });
     }
 
-    pub async fn start_access_server(self: &Arc<Self>) -> Result<AccessServer> {
+    pub async fn start_access_server(self: &Arc<Self>) -> Result<SocketAddr> {
         self.post_tunnel_log("preparing...");
         self.set_and_post_tunnel_state(ClientState::Preparing);
 
@@ -123,6 +125,7 @@ impl Client {
             let mut access_server =
                 AccessServer::new(self.config.local_access_server_addr.unwrap());
             let bound_addr = access_server.bind().await?;
+
             access_server.start().await?;
 
             info!("==========================================================");
@@ -133,8 +136,9 @@ impl Client {
                 format!("Tunnel access server for [TunnelOut] bound to: {bound_addr}").as_str(),
             );
 
-            inner_state!(self, channel_message_sender) = Some(access_server.clone_tcp_sender());
-            return Ok(access_server);
+            inner_state!(self, access_server) = Some(access_server);
+            // inner_state!(self, channel_message_sender) = Some(access_server.clone_tcp_sender());
+            return Ok(bound_addr);
         }
 
         bail!("call start_access_server() for TunnelOut mode only")
@@ -156,9 +160,9 @@ impl Client {
         }
     }
 
-    pub async fn connect_and_serve_async(self: &Arc<Self>) {
+    pub async fn connect_and_serve_async(self: &Arc<Self>) -> JoinHandle<()> {
         let this = self.clone();
-        tokio::spawn(async move { this.connect_and_serve().await });
+        tokio::spawn(async move { this.connect_and_serve().await })
     }
 
     async fn connect_and_serve(self: &Arc<Self>) {
@@ -288,7 +292,10 @@ impl Client {
     async fn serve_outgoing(self: &Arc<Self>) -> Result<()> {
         self.post_tunnel_log("start serving in [TunnelOut] mode...");
         self.report_traffic_data_in_background().await;
-        let mut access_server = self.start_access_server().await?;
+        if inner_state!(self, access_server).is_none() {
+            self.start_access_server().await?;
+        }
+        let mut access_server = inner_state!(self, access_server).take().unwrap();
         let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
         let remote_conn = remote_conn.read().await;
 
