@@ -17,7 +17,7 @@ fn main() {
     );
 
     if let Ok(config) = config {
-        let mut client = Client::new(config);
+        let client = Client::new(config);
 
         #[cfg(target_os = "android")]
         {

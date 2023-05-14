@@ -19,12 +19,13 @@ use std::{
     time::SystemTime,
 };
 use std::{
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::net::TcpStream;
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::mpsc::Sender;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
@@ -57,74 +58,83 @@ impl Display for ClientState {
     }
 }
 
-pub struct Client {
-    pub config: ClientConfig,
-    access_server: Option<AccessServer>,
-    remote_conn: Option<Arc<RwLock<quinn::Connection>>>,
+struct ThreadSafeState {
+    remote_conn: Option<Arc<tokio::sync::RwLock<quinn::Connection>>>,
     ctrl_stream: Option<ControlStream>,
-    is_terminated: Arc<Mutex<bool>>,
-    scheduled_start: bool,
+    client_state: ClientState,
+    channel_message_sender: Option<Sender<Option<ChannelMessage>>>,
+    total_traffic_data: TunnelTraffic,
     tunnel_info_bridge: TunnelInfoBridge,
     on_info_report_enabled: bool,
-    total_traffic_data: Arc<Mutex<TunnelTraffic>>,
-    state: ClientState,
+    is_terminated: bool,
+}
+
+impl ThreadSafeState {
+    fn new() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self {
+            ctrl_stream: None,
+            remote_conn: None,
+            client_state: ClientState::Idle,
+            channel_message_sender: None,
+            total_traffic_data: TunnelTraffic::default(),
+            tunnel_info_bridge: TunnelInfoBridge::new(),
+            on_info_report_enabled: false,
+            is_terminated: false,
+        }))
+    }
+}
+
+macro_rules! inner_state {
+    ($self:ident, $field:ident) => {
+        (*$self.inner_state.lock().unwrap()).$field
+    };
+}
+
+pub struct Client {
+    pub config: ClientConfig,
+    scheduled_start: bool,
+    inner_state: Arc<Mutex<ThreadSafeState>>,
 }
 
 impl Client {
-    pub fn new(config: ClientConfig) -> Self {
-        Client {
+    pub fn new(config: ClientConfig) -> Arc<Self> {
+        Arc::new(Client {
             config,
-            access_server: None,
-            remote_conn: None,
-            ctrl_stream: None,
-            is_terminated: Arc::new(Mutex::new(false)),
             scheduled_start: false,
-            tunnel_info_bridge: TunnelInfoBridge::new(),
-            on_info_report_enabled: false,
-            total_traffic_data: Arc::new(Mutex::new(TunnelTraffic::default())),
-            state: ClientState::Idle,
-        }
+            inner_state: ThreadSafeState::new(),
+        })
     }
 
-    pub fn start_tunnelling(&mut self) {
+    pub fn start_tunnelling(self: &Arc<Self>) {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(self.config.threads)
             .build()
             .unwrap()
-            .block_on(async {
-                self.start_access_server().await?;
-                self.connect_and_serve().await;
-                Ok::<(), anyhow::Error>(())
-            })
-            .ok();
+            .block_on(async { self.connect_and_serve().await });
     }
 
-    pub async fn start_access_server(&mut self) -> Result<SocketAddr> {
+    pub async fn start_access_server(self: &Arc<Self>) -> Result<AccessServer> {
         self.post_tunnel_log("preparing...");
         self.set_and_post_tunnel_state(ClientState::Preparing);
 
         // create a local access server for 'out' tunnel
         if self.config.mode == TUNNEL_MODE_OUT {
-            let mut tmp_access_server =
+            let mut access_server =
                 AccessServer::new(self.config.local_access_server_addr.unwrap());
-            let bound_addr = tmp_access_server.bind().await?;
-            tmp_access_server.start().await?;
-            self.access_server = Some(tmp_access_server);
+            let bound_addr = access_server.bind().await?;
+            access_server.start().await?;
 
             info!("==========================================================");
-            info!("[TunnelOut] access server bound to: {}", bound_addr);
+            info!("[TunnelOut] access server bound to: {bound_addr}");
             info!("==========================================================");
 
             self.post_tunnel_log(
-                format!(
-                    "Tunnel access server for [TunnelOut] bound to: {:?}",
-                    bound_addr
-                )
-                .as_str(),
+                format!("Tunnel access server for [TunnelOut] bound to: {bound_addr}").as_str(),
             );
 
-            return Ok(bound_addr);
+            inner_state!(self, channel_message_sender) = Some(access_server.clone_tcp_sender());
+            return Ok(access_server);
         }
 
         bail!("call start_access_server() for TunnelOut mode only")
@@ -134,11 +144,10 @@ impl Client {
         self.config = config;
     }
 
-    pub async fn stop_and_reconnect(&self) {
-        match self.access_server {
-            Some(ref access_server) => {
-                access_server
-                    .clone_tcp_sender()
+    pub async fn stop_and_reconnect(self: &Arc<Self>) {
+        match inner_state!(self, channel_message_sender) {
+            Some(ref channel_message_sender) => {
+                channel_message_sender
                     .send(Some(ChannelMessage::Reconnect))
                     .await
                     .ok();
@@ -147,7 +156,12 @@ impl Client {
         }
     }
 
-    pub async fn connect_and_serve(&mut self) {
+    pub async fn connect_and_serve_async(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move { this.connect_and_serve().await });
+    }
+
+    async fn connect_and_serve(self: &Arc<Self>) {
         info!(
             "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
             self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
@@ -163,7 +177,7 @@ impl Client {
                     connect_retry_count = 0;
 
                     if self.config.mode == TUNNEL_MODE_OUT {
-                        self.serve_outgoing().await;
+                        self.serve_outgoing().await.ok();
                     } else {
                         self.serve_incoming().await.ok();
                     }
@@ -202,7 +216,7 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Terminated);
     }
 
-    async fn connect(&mut self) -> Result<()> {
+    async fn connect(self: &Arc<Self>) -> Result<()> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
         let mut transport_cfg = TransportConfig::default();
@@ -262,8 +276,8 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Tunnelling);
         self.post_tunnel_log("logged in!");
 
-        self.remote_conn = Some(Arc::new(RwLock::new(connection)));
-        self.ctrl_stream = Some(ControlStream {
+        inner_state!(self, remote_conn) = Some(Arc::new(tokio::sync::RwLock::new(connection)));
+        inner_state!(self, ctrl_stream) = Some(ControlStream {
             quic_send,
             quic_recv,
         });
@@ -271,24 +285,21 @@ impl Client {
         Ok(())
     }
 
-    async fn serve_outgoing(&mut self) {
+    async fn serve_outgoing(self: &Arc<Self>) -> Result<()> {
         self.post_tunnel_log("start serving in [TunnelOut] mode...");
-
-        self.report_traffic_data_in_background();
-
-        let remote_conn = self.remote_conn.as_ref().unwrap();
-        let ref conn = remote_conn.read().unwrap();
+        self.report_traffic_data_in_background().await;
+        let mut access_server = self.start_access_server().await?;
+        let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
+        let remote_conn = remote_conn.read().await;
 
         // accept local connections and build a tunnel to remote
-        while let Some(ChannelMessage::Request(tcp_stream)) =
-            self.access_server.as_mut().unwrap().recv().await
-        {
-            match conn.open_bi().await {
+        while let Some(ChannelMessage::Request(tcp_stream)) = access_server.recv().await {
+            match remote_conn.open_bi().await {
                 Ok(quic_stream) => {
                     debug!(
-                        "[Out] open stream for conn, {} -> {}",
+                        "[TunnelOut] open stream for conn, {} -> {}",
                         quic_stream.0.id().index(),
-                        conn.remote_address(),
+                        remote_conn.remote_address(),
                     );
 
                     let tcp_stream = tcp_stream.into_split();
@@ -304,15 +315,17 @@ impl Client {
             }
         }
 
-        let stats = conn.stats();
-        let mut data = self.total_traffic_data.as_ref().lock().unwrap();
+        let stats = remote_conn.stats();
+        let data = &mut inner_state!(self, total_traffic_data);
         data.rx_bytes += stats.udp_rx.bytes;
         data.tx_bytes += stats.udp_tx.bytes;
         data.rx_dgrams += stats.udp_rx.datagrams;
         data.tx_dgrams += stats.udp_tx.datagrams;
+
+        Ok(())
     }
 
-    async fn serve_incoming(&mut self) -> Result<()> {
+    async fn serve_incoming(self: &Arc<Self>) -> Result<()> {
         self.post_tunnel_log("start serving in [TunnelIn] mode...");
 
         self.observe_terminate_signals().await.map_err(|e| {
@@ -320,29 +333,36 @@ impl Client {
             e
         })?;
 
-        // this will take the lock exclusively, so remote_conn cannot be shared and we cannot
-        // implement traffic data report for [IN] mode tunnelling using the same technique that
-        // [Out] mode tunnelling uses
-        let remote_conn = self.remote_conn.as_mut().unwrap().write().unwrap();
-        while let Ok(quic_stream) = remote_conn.open_bi().await {
+        let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
+        let remote_conn = remote_conn.read().await;
+        while let Ok(quic_stream) = remote_conn.accept_bi().await {
             match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
                 Ok(tcp_stream) => {
+                    debug!(
+                        "[TunnelIn] open stream for conn, {} <- {}",
+                        quic_stream.0.id().index(),
+                        remote_conn.remote_address(),
+                    );
+
                     let tcp_stream = tcp_stream.into_split();
                     Tunnel::new().start(tcp_stream, quic_stream).await;
                 }
-                _ => {
-                    error!("failed to connect to access server");
+                Err(e) => {
+                    error!(
+                        "failed to connect to access server: {e}, {}",
+                        self.config.local_access_server_addr.unwrap(),
+                    );
                 }
             }
         }
         Ok(())
     }
 
-    fn report_traffic_data_in_background(&self) {
-        let remote_conn = Arc::downgrade(self.remote_conn.as_ref().unwrap());
-        let total_traffic_data = self.total_traffic_data.clone();
-        let tunnel_info_bridge = self.tunnel_info_bridge.clone();
+    async fn report_traffic_data_in_background(self: &Arc<Self>) {
+        let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
+        let remote_conn = Arc::downgrade(&remote_conn);
 
+        let this = self.clone();
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(Duration::from_secs(POST_TRAFFIC_DATA_INTERVAL_SECS));
@@ -353,15 +373,15 @@ impl Client {
 
                 match remote_conn.upgrade() {
                     Some(remote_conn) => {
-                        let stats = remote_conn.read().unwrap().stats();
-                        let total_traffic_data = total_traffic_data.as_ref().lock().unwrap();
+                        let stats = remote_conn.read().await.stats();
+                        let total_traffic_data = &inner_state!(this, total_traffic_data);
                         let data = TunnelTraffic {
                             rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
                             tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
                             rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
                             tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
                         };
-                        tunnel_info_bridge.post_tunnel_info(&TunnelInfo::new(
+                        this.post_tunnel_info(TunnelInfo::new(
                             TunnelInfoType::TunnelTraffic,
                             Box::new(data),
                         ));
@@ -375,13 +395,11 @@ impl Client {
         });
     }
 
-    async fn observe_terminate_signals(&mut self) -> Result<()> {
+    async fn observe_terminate_signals(self: &Arc<Self>) -> Result<()> {
         #[cfg(not(target_os = "windows"))]
         {
-            let mut quic_send = self.ctrl_stream.take().unwrap().quic_send;
-
-            let is_terminated_flag = self.is_terminated.clone();
-
+            let this = self.clone();
+            let mut quic_send = inner_state!(self, ctrl_stream).take().unwrap().quic_send;
             tokio::spawn(async move {
                 let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
                 let mut terminate = signal(SignalKind::terminate()).unwrap();
@@ -389,7 +407,7 @@ impl Client {
                     _ = ctrlc.recv() => debug!("received SIGINT"),
                     _ = terminate.recv() => debug!("received SIGTERM"),
                 }
-                *is_terminated_flag.lock().unwrap() = true;
+                inner_state!(this, is_terminated) = true;
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
                     .await
@@ -403,7 +421,7 @@ impl Client {
         Ok(())
     }
 
-    fn parse_client_config_and_domain(&self) -> Result<(rustls::ClientConfig, String)> {
+    fn parse_client_config_and_domain(self: &Arc<Self>) -> Result<(rustls::ClientConfig, String)> {
         let cipher = *SelectedCipherSuite::from_str(&self.config.cipher).map_err(|_| {
             rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
         })?;
@@ -471,19 +489,19 @@ impl Client {
         ))
     }
 
-    fn should_retry(&mut self) -> bool {
-        return !*self.is_terminated.lock().unwrap();
+    fn should_retry(&self) -> bool {
+        inner_state!(self, is_terminated)
     }
 
-    pub fn get_state(&self) -> ClientState {
-        self.state.clone()
+    pub fn get_state(self: &Arc<Self>) -> ClientState {
+        inner_state!(self, client_state).clone()
     }
 
     pub fn set_scheduled_start(&mut self, start: bool) {
         self.scheduled_start = start;
     }
 
-    pub fn has_scheduled_start(&self) -> bool {
+    pub fn has_scheduled_start(self: &Arc<Self>) -> bool {
         self.scheduled_start
     }
 
@@ -582,7 +600,7 @@ impl Client {
         Ok(ip)
     }
 
-    fn post_tunnel_log(&self, log: &str) {
+    fn post_tunnel_log(self: &Arc<Self>, log: &str) {
         info!("{}", log);
         self.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelLog,
@@ -594,35 +612,38 @@ impl Client {
         ));
     }
 
-    fn set_and_post_tunnel_state(&mut self, state: ClientState) {
-        info!("client state: {}", state);
-        self.state = state;
+    fn set_and_post_tunnel_state(self: &Arc<Self>, state: ClientState) {
+        info!("client state: {state}");
+        inner_state!(self, client_state) = state;
         self.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelState,
-            Box::new(self.state.to_string()),
+            Box::new(inner_state!(self, client_state).to_string()),
         ));
     }
 
-    fn post_tunnel_info<T>(&self, server_info: TunnelInfo<T>)
+    fn post_tunnel_info<T>(self: &Arc<Self>, server_info: TunnelInfo<T>)
     where
         T: ?Sized + Serialize,
     {
-        if self.on_info_report_enabled {
-            self.tunnel_info_bridge.post_tunnel_info(&server_info);
+        if inner_state!(self, on_info_report_enabled) {
+            inner_state!(self, tunnel_info_bridge).post_tunnel_info(&server_info);
         }
     }
 
-    pub fn set_on_info_listener(&mut self, callback: impl FnMut(&str) + 'static + Send + Sync) {
-        self.tunnel_info_bridge.set_listener(callback);
+    pub fn set_on_info_listener(
+        self: &Arc<Self>,
+        callback: impl FnMut(&str) + 'static + Send + Sync,
+    ) {
+        inner_state!(self, tunnel_info_bridge).set_listener(callback);
     }
 
-    pub fn has_on_info_listener(&self) -> bool {
-        self.tunnel_info_bridge.has_listener()
+    pub fn has_on_info_listener(self: &Arc<Self>) -> bool {
+        inner_state!(self, tunnel_info_bridge).has_listener()
     }
 
-    pub fn set_enable_on_info_report(&mut self, enable: bool) {
-        info!("set_enable_on_info_report, enable:{}", enable);
-        self.on_info_report_enabled = enable
+    pub fn set_enable_on_info_report(self: &Arc<Self>, enable: bool) {
+        info!("set_enable_on_info_report, enable:{enable}");
+        inner_state!(self, on_info_report_enabled) = enable;
     }
 }
 
