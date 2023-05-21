@@ -84,7 +84,7 @@ impl Server {
         let endpoint = self
             .endpoint
             .as_ref()
-            .context("make sure start call succeeded!")?;
+            .context("make sure bind() call succeeded!")?;
 
         while let Some(client_conn) = endpoint.accept().await {
             let mut this = self.clone();

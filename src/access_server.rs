@@ -8,7 +8,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub enum ChannelMessage {
     Request(TcpStream),
-    Reconnect,
+    Stop,
 }
 
 #[derive(Debug)]

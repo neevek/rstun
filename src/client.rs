@@ -136,31 +136,34 @@ impl Client {
                 format!("Tunnel access server for [TunnelOut] bound to: {bound_addr}").as_str(),
             );
 
+            inner_state!(self, channel_message_sender) = Some(access_server.clone_tcp_sender());
             inner_state!(self, access_server) = Some(access_server);
-            // inner_state!(self, channel_message_sender) = Some(access_server.clone_tcp_sender());
             return Ok(bound_addr);
         }
 
         bail!("call start_access_server() for TunnelOut mode only")
     }
 
-    pub fn update_config(&mut self, config: ClientConfig) {
-        self.config = config;
+    pub fn get_config(self: &Arc<Self>) -> ClientConfig {
+        self.config.clone()
     }
 
-    pub async fn stop_and_reconnect(self: &Arc<Self>) {
-        match inner_state!(self, channel_message_sender) {
-            Some(ref channel_message_sender) => {
-                channel_message_sender
-                    .send(Some(ChannelMessage::Reconnect))
-                    .await
-                    .ok();
+    pub fn stop(self: &Arc<Self>) -> Result<()> {
+        match inner_state!(self, channel_message_sender).take() {
+            Some(sender) => {
+                tokio::spawn(async move {
+                    sender.send(Some(ChannelMessage::Stop)).await.ok();
+                });
             }
-            None => log::warn!("access server not started"),
-        }
+            None => {
+                log_and_bail!("access server not started");
+            }
+        };
+
+        Ok(())
     }
 
-    pub async fn connect_and_serve_async(self: &Arc<Self>) -> JoinHandle<()> {
+    pub fn connect_and_serve_async(self: &Arc<Self>) -> JoinHandle<()> {
         let this = self.clone();
         tokio::spawn(async move { this.connect_and_serve().await })
     }
@@ -322,6 +325,9 @@ impl Client {
             }
         }
 
+        // the access server will be reused when tunnel reconnects
+        inner_state!(self, access_server) = Some(access_server);
+
         let stats = remote_conn.stats();
         let data = &mut inner_state!(self, total_traffic_data);
         data.rx_bytes += stats.udp_rx.bytes;
@@ -397,7 +403,6 @@ impl Client {
                         ));
                     }
                     _ => {
-                        info!("connection dropped!");
                         break;
                     }
                 }
@@ -500,7 +505,7 @@ impl Client {
     }
 
     fn should_retry(&self) -> bool {
-        inner_state!(self, is_terminated)
+        !inner_state!(self, is_terminated)
     }
 
     pub fn get_state(self: &Arc<Self>) -> ClientState {
