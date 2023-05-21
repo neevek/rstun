@@ -236,6 +236,7 @@ pub mod android {
     use self::jni::{JNIEnv, JavaVM};
     use super::*;
     use std::os::raw::c_void;
+    use std::sync::Arc;
     use std::thread;
 
     #[no_mangle]
@@ -291,7 +292,7 @@ pub mod android {
         );
 
         match config {
-            Ok(config) => Box::into_raw(Box::new(Client::new(config))) as jlong,
+            Ok(config) => Box::into_raw(Box::new(Arc::new(Client::new(config)))) as jlong,
             Err(e) => {
                 error!("failed create ClientConfig: {}", e);
                 0
@@ -320,17 +321,10 @@ pub mod android {
             return;
         }
 
-        let client = &mut *(client_ptr as *mut Client);
-        if client.has_scheduled_start() {
-            return;
-        }
-
-        client.set_scheduled_start(true);
         thread::spawn(move || {
-            let client = &mut *(client_ptr as *mut Client);
+            let client = &mut *(client_ptr as *mut Arc<Client>);
             client.start_tunnelling();
         });
-        client.set_scheduled_start(false);
     }
 
     #[no_mangle]
@@ -343,7 +337,7 @@ pub mod android {
             return env.new_string("").unwrap().into_inner();
         }
 
-        let client = &mut *(client_ptr as *mut Client);
+        let client = &mut *(client_ptr as *mut Arc<Client>);
         env.new_string(client.get_state().to_string())
             .unwrap()
             .into_inner()
@@ -360,7 +354,7 @@ pub mod android {
             return;
         }
 
-        let client = &mut *(client_ptr as *mut Client);
+        let client = &mut *(client_ptr as *mut Arc<Client>);
         let bool_enable = enable == 1;
         if bool_enable && !client.has_on_info_listener() {
             let jvm = env.get_java_vm().unwrap();

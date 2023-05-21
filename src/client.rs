@@ -94,7 +94,6 @@ macro_rules! inner_state {
 
 pub struct Client {
     pub config: ClientConfig,
-    scheduled_start: bool,
     inner_state: Arc<Mutex<ThreadSafeState>>,
 }
 
@@ -102,7 +101,6 @@ impl Client {
     pub fn new(config: ClientConfig) -> Arc<Self> {
         Arc::new(Client {
             config,
-            scheduled_start: false,
             inner_state: ThreadSafeState::new(),
         })
     }
@@ -510,14 +508,6 @@ impl Client {
 
     pub fn get_state(self: &Arc<Self>) -> ClientState {
         inner_state!(self, client_state).clone()
-    }
-
-    pub fn set_scheduled_start(&mut self, start: bool) {
-        self.scheduled_start = start;
-    }
-
-    pub fn has_scheduled_start(self: &Arc<Self>) -> bool {
-        self.scheduled_start
     }
 
     async fn login(
