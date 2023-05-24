@@ -225,8 +225,9 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
-        transport_cfg.send_window(1024 * 1024);
+        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024 * 1));
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
+        transport_cfg.send_window(1024 * 1024 * 8);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
@@ -255,8 +256,7 @@ impl Client {
 
         self.post_tunnel_log(
             format!(
-                "connecting to {}, local_addr: {}",
-                remote_addr,
+                "connecting to {remote_addr}, local_addr: {}",
                 endpoint.local_addr().unwrap()
             )
             .as_str(),
@@ -270,7 +270,7 @@ impl Client {
         let (mut quic_send, mut quic_recv) = connection
             .open_bi()
             .await
-            .map_err(|e| error!("open bidirectional connection failed: {}", e))
+            .map_err(|e| error!("open bidirectional connection failed: {e}"))
             .unwrap();
 
         self.set_and_post_tunnel_state(ClientState::LoggingIn);
@@ -299,6 +299,7 @@ impl Client {
         let mut access_server = inner_state!(self, access_server).take().unwrap();
         let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
         let remote_conn = remote_conn.read().await;
+        access_server.set_drop_conn(false);
 
         // accept local connections and build a tunnel to remote
         while let Some(ChannelMessage::Request(tcp_stream)) = access_server.recv().await {
@@ -314,9 +315,9 @@ impl Client {
                     Tunnel::new().start(tcp_stream, quic_stream).await;
                 }
                 Err(e) => {
-                    error!("failed to open_bi on remote connection: {}", e);
+                    error!("failed to open_bi on remote connection: {e}");
                     self.post_tunnel_log(
-                        format!("connection failed, will reconnect: {}", e).as_str(),
+                        format!("connection failed, will reconnect: {e}").as_str(),
                     );
                     break;
                 }
@@ -324,6 +325,7 @@ impl Client {
         }
 
         // the access server will be reused when tunnel reconnects
+        access_server.set_drop_conn(true);
         inner_state!(self, access_server) = Some(access_server);
 
         let stats = remote_conn.stats();

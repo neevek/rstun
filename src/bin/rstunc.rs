@@ -73,7 +73,7 @@ struct RstuncArgs {
     wait_before_retry_ms: u64,
 
     /// Max idle timeout for the connection
-    #[clap(short = 'i', long, default_value = "150000", display_order = 9)]
+    #[clap(short = 'i', long, default_value = "30000", display_order = 9)]
     max_idle_timeout_ms: u64,
 
     /// Log level

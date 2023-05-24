@@ -58,7 +58,7 @@ The following commands run a server and a client that connects to the server in 
 
 ```
 # Remote: run the server with auto-generated self-signed certificate
-rstund -l 9000 -p 1234
+rstund -a 9000 -p 1234
 
 # Local: connect to the server (127.0.0.1:9000) and bind the local port 9900 to remote port 8800
 rstunc -m OUT -r 127.0.0.1:9000 -p 1234 -a 0.0.0.0:9900^8800
@@ -109,8 +109,6 @@ OPTIONS:
 * Complete options for `rstunc`
 
 ```
-rstun 0.4.1
-
 USAGE:
     rstunc [OPTIONS] --mode <MODE> --server-addr <SERVER_ADDR> --password <PASSWORD> --addr-mapping <ADDR_MAPPING>
 
@@ -146,7 +144,7 @@ OPTIONS:
             Wait time before trying [default: 5000]
 
     -i, --max-idle-timeout-ms <MAX_IDLE_TIMEOUT_MS>
-            Max idle timeout for the connection [default: 150000]
+            Max idle timeout for the connection [default: 30000]
 
     -l, --loglevel <LOGLEVEL>
             Log level [default: I] [possible values: T, D, I, W, E]

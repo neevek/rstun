@@ -2,8 +2,10 @@ use anyhow::{bail, Result};
 use log::{debug, error, info};
 use rs_utilities::log_and_bail;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::error::SendTimeoutError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub enum ChannelMessage {
@@ -17,17 +19,21 @@ pub struct AccessServer {
     tcp_listener: Option<Arc<TcpListener>>,
     tcp_sender: Sender<Option<ChannelMessage>>,
     tcp_receiver: Option<Receiver<Option<ChannelMessage>>>,
+    drop_conn: Arc<Mutex<bool>>,
 }
 
 impl AccessServer {
     pub fn new(addr: SocketAddr) -> Self {
-        let (sender, receiver) = channel(1024);
+        let (sender, receiver) = channel(4);
 
         AccessServer {
             addr,
             tcp_listener: None,
             tcp_sender: sender,
             tcp_receiver: Some(receiver),
+            // unless being explicitly requested, always drop the connections because we are not
+            // sure whether the receiver is ready to aceept connections
+            drop_conn: Arc::new(Mutex::new(true)),
         }
     }
 
@@ -35,8 +41,8 @@ impl AccessServer {
         info!("starting access server, addr: {}", self.addr);
         let tcp_listener = TcpListener::bind(self.addr).await.map_err(|e| {
             error!(
-                "failed to bind tunnel access server on address: {}, error: {}",
-                self.addr, e
+                "failed to bind tunnel access server on address: {}, error: {e}",
+                self.addr
             );
             e
         })?;
@@ -55,26 +61,40 @@ impl AccessServer {
 
         let listener = self.tcp_listener.clone().unwrap();
         let tcp_sender = self.tcp_sender.clone();
+        let drop_conn = self.drop_conn.clone();
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((socket, addr)) => {
-                        debug!("received new local connection, addr: {}", addr);
-                        if tcp_sender
-                            .send(Some(ChannelMessage::Request(socket)))
+                        if *drop_conn.lock().unwrap() {
+                            // silently drop the connection
+                            debug!("drop connection: {addr}");
+                            continue;
+                        }
+
+                        debug!("received new local connection, addr: {addr}");
+                        match tcp_sender
+                            .send_timeout(
+                                Some(ChannelMessage::Request(socket)),
+                                Duration::from_millis(100),
+                            )
                             .await
-                            .map_err(|e| {
-                                error!("failed to send connection over channel, err: {}", e);
-                            })
-                            .is_err()
                         {
-                            info!("channel is closed, will quit access server");
-                            break;
+                            Ok(_) => {
+                                // succeeded
+                            }
+                            Err(SendTimeoutError::Timeout(_)) => {
+                                debug!("timedout sending the request, drop the socket");
+                            }
+                            Err(e) => {
+                                info!("channel is closed, will quit access server, err:{e}");
+                                break;
+                            }
                         }
                     }
 
                     Err(e) => {
-                        error!("access server failed, err: {}", e);
+                        error!("access server failed, err: {e}");
                     }
                 }
             }
@@ -105,5 +125,9 @@ impl AccessServer {
 
     pub fn clone_tcp_sender(&self) -> Sender<Option<ChannelMessage>> {
         self.tcp_sender.clone()
+    }
+
+    pub fn set_drop_conn(&self, flag: bool) {
+        *self.drop_conn.lock().unwrap() = flag;
     }
 }

@@ -42,8 +42,9 @@ impl Server {
             .with_single_cert(vec![cert], key)?;
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024)); //.unwrap();
-        transport_cfg.send_window(1024 * 1024);
+        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024 * 1));
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
+        transport_cfg.send_window(1024 * 1024 * 8);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         if config.max_idle_timeout_ms > 0 {
             let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
