@@ -1,10 +1,10 @@
 [package]
 name = "rstun"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 
 [lib]
-crate-type = ["dylib", "lib"]
+crate-type = ["lib"]
 
 [dependencies]
 rustls = { version = "0.21", features = ["dangerous_configuration", "quic"] }
