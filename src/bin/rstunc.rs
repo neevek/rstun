@@ -1,9 +1,13 @@
+use clap::builder::PossibleValuesParser;
+use clap::builder::TypedValueParser as _;
 use clap::Parser;
 use rstun::*;
 
 fn main() {
     let args = RstuncArgs::parse();
-    rs_utilities::LogHelper::init_logger("rstunc", args.loglevel.as_ref());
+    let log_filter = format!("rstun={},rs_utilities={}", args.loglevel, args.loglevel);
+    rs_utilities::LogHelper::init_logger("rstunc", log_filter.as_str());
+
     let config = ClientConfig::create(
         &args.mode,
         &args.server_addr,
@@ -33,18 +37,18 @@ fn main() {
 }
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None)]
 struct RstuncArgs {
     /// Create a tunnel running in IN or OUT mode
-    #[clap(short = 'm', long, possible_values = &[TUNNEL_MODE_IN, TUNNEL_MODE_OUT], display_order = 1)]
+    #[arg(short = 'm', long, value_parser = PossibleValuesParser::new([TUNNEL_MODE_IN, TUNNEL_MODE_OUT]))]
     mode: String,
 
     /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
-    #[clap(short = 'r', long, display_order = 2)]
+    #[arg(short = 'r', long, display_order = 2)]
     server_addr: String,
 
     /// Password to connect with rstund
-    #[clap(short = 'p', long, required = true, display_order = 3)]
+    #[arg(short = 'p', long, required = true, display_order = 3)]
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
@@ -53,30 +57,39 @@ struct RstuncArgs {
     ///            the server decides that port, so it depends on that the server is started
     ///            with explicitly setting the `--upstreams` option.
     /// `ANY^ANY` both the cases of the settings above.
-    #[clap(short = 'a', long, display_order = 4)]
+    #[arg(short = 'a', long, display_order = 4)]
     addr_mapping: String,
 
     /// Path to the certificate file in DER format, only needed for self signed certificate
-    #[clap(short = 'c', long, default_value = "", display_order = 5)]
+    #[arg(short = 'c', long, default_value = "", display_order = 5)]
     cert: String,
 
     /// Preferred cipher suite
-    #[clap(short = 'e', long, default_value = SUPPORTED_CIPHER_SUITES[0], display_order = 6, possible_values = SUPPORTED_CIPHER_SUITES)]
+    #[arg(short = 'e', long, default_value_t = String::from(SUPPORTED_CIPHER_SUITES[0]),
+        value_parser = PossibleValuesParser::new(SUPPORTED_CIPHER_SUITES).map(|v| v.to_string()))]
     cipher: String,
 
     /// Threads to run async tasks
-    #[clap(short = 't', long, default_value = "0", display_order = 7)]
+    #[arg(short = 't', long, default_value_t = 0)]
     threads: usize,
 
     /// Wait time before trying
-    #[clap(short = 'w', long, default_value = "5000", display_order = 8)]
+    #[arg(short = 'w', long, default_value_t = 5000)]
     wait_before_retry_ms: u64,
 
     /// Max idle timeout for the connection
-    #[clap(short = 'i', long, default_value = "30000", display_order = 9)]
+    #[arg(short = 'i', long, default_value_t = 30000)]
     max_idle_timeout_ms: u64,
 
     /// Log level
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 10)]
+    #[arg(short = 'l', long, default_value_t = String::from("I"),
+        value_parser = PossibleValuesParser::new(["T", "D", "I", "W", "E"]).map(|v| match v.as_str() {
+            "T" => "trace",
+            "D" => "debug",
+            "I" => "info",
+            "W" => "warn",
+            "E" => "error",
+            _ => "info",
+        }.to_string()))]
     loglevel: String,
 }

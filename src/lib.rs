@@ -229,10 +229,10 @@ pub mod android {
     extern crate jni;
 
     use jni::sys::{jlong, jstring};
-    use log::error;
+    use log::{error, info};
 
-    use self::jni::objects::{JClass, JString};
-    use self::jni::sys::{jboolean, jint, JNI_FALSE, JNI_TRUE, JNI_VERSION_1_6};
+    use self::jni::objects::{JClass, JObject, JString};
+    use self::jni::sys::{jboolean, jint, JNI_TRUE, JNI_VERSION_1_6};
     use self::jni::{JNIEnv, JavaVM};
     use super::*;
     use std::os::raw::c_void;
@@ -241,26 +241,39 @@ pub mod android {
 
     #[no_mangle]
     pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
-        let _env = vm.get_env().expect("failed to get JNIEnv");
+        let env = vm.get_env().expect("failed to get JNIEnv");
+        let s = env.new_string("".to_string()).unwrap();
+        if let Err(e) = rustls_platform_verifier::android::init_hosted(&env, JObject::from(s)) {
+            error!("failed to init rustls_platform_verifier: {}", e);
+        } else {
+            info!("initializing rustls_platform_verifier succeeded!");
+        }
+
         JNI_VERSION_1_6
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeInitLogger(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _: JClass,
         jlogLevel: JString,
     ) -> jboolean {
-        if let Ok(log_level) = env.get_string(jlogLevel) {
-            rs_utilities::LogHelper::init_logger("rstc", log_level.to_str().unwrap());
-            return JNI_TRUE;
-        }
-        JNI_FALSE
+        let log_level = match convert_jstring(&mut env, jlogLevel).as_str() {
+            "T" => "trace",
+            "D" => "debug",
+            "I" => "info",
+            "W" => "warn",
+            "E" => "error",
+            _ => "info",
+        };
+        let log_filter = format!("rstun={},rs_utilities={}", log_level, log_level);
+        rs_utilities::LogHelper::init_logger("rstunc", log_filter.as_str());
+        return JNI_TRUE;
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeCreate(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _: JClass,
         jmode: JString,
         jserverAddr: JString,
@@ -272,12 +285,12 @@ pub mod android {
         jwaitBeforeRetryMs: jint,
         jmaxIdleTimeoutMs: jint,
     ) -> jlong {
-        let mode = convert_jstring(&env, jmode);
-        let server_addr = convert_jstring(&env, jserverAddr);
-        let addr_mapping = convert_jstring(&env, jaddrMapping);
-        let password = convert_jstring(&env, jpassword);
-        let cert_file_path = convert_jstring(&env, jcertFilePath);
-        let cipher = convert_jstring(&env, jcipher);
+        let mode = convert_jstring(&mut env, jmode);
+        let server_addr = convert_jstring(&mut env, jserverAddr);
+        let addr_mapping = convert_jstring(&mut env, jaddrMapping);
+        let password = convert_jstring(&mut env, jpassword);
+        let cert_file_path = convert_jstring(&mut env, jcertFilePath);
+        let cipher = convert_jstring(&mut env, jcipher);
 
         let config = ClientConfig::create(
             &mode,
@@ -376,7 +389,7 @@ pub mod android {
         client.set_enable_on_info_report(bool_enable);
     }
 
-    fn convert_jstring(env: &JNIEnv, jstr: JString) -> String {
+    fn convert_jstring(env: &mut JNIEnv, jstr: JString) -> String {
         if !jstr.is_null() {
             env.get_string(jstr).unwrap().into()
         } else {

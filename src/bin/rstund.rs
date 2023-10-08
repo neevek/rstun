@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+use clap::builder::PossibleValuesParser;
+use clap::builder::TypedValueParser as _;
 use clap::Parser;
 use log::error;
 use log::info;
@@ -8,7 +10,8 @@ use std::net::SocketAddr;
 
 fn main() {
     let args = RstundArgs::parse();
-    rs_utilities::LogHelper::init_logger("rstund", args.loglevel.as_str());
+    let log_filter = format!("rstun={},rs_utilities={}", args.loglevel, args.loglevel);
+    rs_utilities::LogHelper::init_logger("rstund", log_filter.as_str());
 
     let worker_threads = if args.threads > 0 {
         args.threads
@@ -75,39 +78,47 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 }
 
 #[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None)]
 struct RstundArgs {
     /// Address ([ip:]port pair) to listen on, a random port will be chosen
     /// and binding to all network interfaces (0.0.0.0) if empty
-    #[clap(short = 'a', long, default_value = "", display_order = 1)]
+    #[arg(short = 'a', long, default_value_t = String::from(""))]
     addr: String,
 
     /// Exposed upstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
     /// The entire local network is exposed through the tunnel if empty
-    #[clap(short = 'd', long, required = false, display_order = 2)]
+    #[arg(short = 'd', long, required = false)]
     upstreams: Vec<String>,
 
     /// Password of the tunnel server
-    #[clap(short = 'p', long, required = true, display_order = 3)]
+    #[arg(short = 'p', long, required = true)]
     password: String,
 
     /// Path to the certificate file in DER format, if empty, a self-signed certificate
     /// with the domain "localhost" will be used
-    #[clap(short = 'c', long, default_value = "", display_order = 4)]
+    #[arg(short = 'c', long, default_value_t = String::from(""))]
     cert: String,
 
     /// Path to the key file in DER format, can be empty if no cert is provided
-    #[clap(short = 'k', long, default_value = "", display_order = 5)]
+    #[arg(short = 'k', long, default_value_t = String::from(""))]
     key: String,
 
     /// Threads to run async tasks
-    #[clap(short = 't', long, default_value = "0", display_order = 6)]
+    #[arg(short = 't', long, default_value_t = 0)]
     threads: usize,
 
     /// Max idle timeout for the connection
-    #[clap(short = 'w', long, default_value = "40000", display_order = 7)]
+    #[arg(short = 'w', long, default_value_t = 40000)]
     max_idle_timeout_ms: u64,
 
-    #[clap(short = 'l', long, possible_values = &["T", "D", "I", "W", "E"], default_value = "I", display_order = 8)]
+    #[arg(short = 'l', long, default_value_t = String::from("I"),
+        value_parser = PossibleValuesParser::new(["T", "D", "I", "W", "E"]).map(|v| match v.as_str() {
+            "T" => "trace",
+            "D" => "debug",
+            "I" => "info",
+            "W" => "warn",
+            "E" => "error",
+            _ => "info",
+        }.to_string()))]
     loglevel: String,
 }
