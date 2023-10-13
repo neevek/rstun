@@ -1,5 +1,6 @@
 use crate::{
     access_server::ChannelMessage,
+    pem_util,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     AccessServer, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel, TunnelMessage,
     TUNNEL_MODE_OUT,
@@ -471,10 +472,13 @@ impl Client {
             return Ok((client_config, "localhost".to_string()));
         }
 
-        let cert: Certificate = Client::read_cert(self.config.cert_path.as_str())?;
+        let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
+            .context("failed to read from cert file")?;
+        let cert = certs.first().unwrap();
+
         let mut roots = RootCertStore::empty();
         roots.add(&cert).context(format!(
-            "certificate is not in DER format: {}",
+            "failed to add certificate: {}",
             self.config.cert_path
         ))?;
 
@@ -528,14 +532,6 @@ impl Client {
         TunnelMessage::handle_message(&resp)?;
         debug!("finished login request!");
         Ok(())
-    }
-
-    fn read_cert(cert_path: &str) -> Result<rustls::Certificate> {
-        let cert =
-            std::fs::read(cert_path).context(format!("failed to read cert file: {}", cert_path))?;
-        let cert = rustls::Certificate(cert);
-
-        Ok(cert)
     }
 
     fn is_ip_addr(addr: &str) -> bool {

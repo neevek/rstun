@@ -1,5 +1,6 @@
 mod access_server;
 mod client;
+mod pem_util;
 mod server;
 mod tunnel;
 mod tunnel_info_bridge;

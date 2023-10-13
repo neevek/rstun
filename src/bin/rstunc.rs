@@ -60,7 +60,7 @@ struct RstuncArgs {
     #[arg(short = 'a', long, display_order = 4)]
     addr_mapping: String,
 
-    /// Path to the certificate file in DER format, only needed for self signed certificate
+    /// Path to the certificate file, only needed for self signed certificate
     #[arg(short = 'c', long, default_value = "", display_order = 5)]
     cert: String,
 

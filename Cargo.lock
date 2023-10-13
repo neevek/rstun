@@ -1032,8 +1032,6 @@ dependencies = [
 [[package]]
 name = "rs-utilities"
 version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3553b0f1ed4ba6c3765936e67eca109e6706763db3fc7a69d8fa4097957a10"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -1071,6 +1069,7 @@ dependencies = [
  "ring 0.17.2",
  "rs-utilities",
  "rustls",
+ "rustls-pemfile",
  "rustls-platform-verifier",
  "serde",
  "serde_json",

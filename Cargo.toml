@@ -31,8 +31,9 @@ rustls-platform-verifier = { git = "https://github.com/rustls/rustls-platform-ve
 byte-pool = { git = "https://github.com/neevek/byte-pool" }
 x509-parser = "0.15"
 lazy_static = "1.4"
+rustls-pemfile = "1.0"
 
-# [dev-dependencies]
+[dev-dependencies]
 jni = "0.19"
 android_logger = "0.13"
 

@@ -1,5 +1,7 @@
 use crate::access_server::ChannelMessage;
-use crate::{AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType};
+use crate::{
+    pem_util, AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
+};
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 use quinn::{congestion, Endpoint, TransportConfig};
@@ -30,8 +32,8 @@ impl Server {
 
     pub async fn bind(mut self: &mut Arc<Self>) -> Result<SocketAddr> {
         let config = &self.config;
-        let (cert, key) =
-            Server::read_cert_and_key(config.cert_path.as_str(), config.key_path.as_str())
+        let (certs, key) =
+            Server::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
                 .context("failed to read certificate or key")?;
 
         let crypto = rustls::ServerConfig::builder()
@@ -39,7 +41,7 @@ impl Server {
             .with_safe_default_kx_groups()
             .with_protocol_versions(&[&rustls::version::TLS13])?
             .with_no_client_auth()
-            .with_single_cert(vec![cert], key)?;
+            .with_single_cert(certs, key)?;
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024 * 1));
@@ -366,8 +368,11 @@ impl Server {
         Ok(())
     }
 
-    fn read_cert_and_key(cert_path: &str, key_path: &str) -> Result<(Certificate, PrivateKey)> {
-        let (cert, key) = if cert_path.is_empty() {
+    fn read_certs_and_key(
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<(Vec<Certificate>, PrivateKey)> {
+        let (certs, key) = if cert_path.is_empty() {
             info!("will use auto-generated self-signed certificate.");
             warn!("============================= WARNING ==============================");
             warn!("No valid certificate path is provided, a self-signed certificate");
@@ -376,16 +381,16 @@ impl Server {
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
             let key = cert.serialize_private_key_der();
             let cert = cert.serialize_der()?;
-            (cert, key)
+            (vec![Certificate(cert)], PrivateKey(key))
         } else {
-            let cert = std::fs::read(cert_path)
+            let certs = pem_util::load_certificates_from_pem(cert_path)
                 .context(format!("failed to read cert file: {}", cert_path))?;
-            let key = std::fs::read(key_path)
+            let key = pem_util::load_private_key_from_pem(key_path)
                 .context(format!("failed to read key file: {}", key_path))?;
-            (cert, key)
+            (certs, key)
         };
 
-        Ok((Certificate(cert), PrivateKey(key)))
+        Ok((certs, key))
     }
 
     fn check_password(password1: &str, password2: &str) -> Result<()> {

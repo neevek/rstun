@@ -30,7 +30,7 @@ rstund \
   - `addr` specifies the ip:port that the server is listening on.
   - `upstreams` specifies a TCP port which traffic from the client through the tunnel will be relayed to on the server, this is applicable for `OUT` mode tunnels only, multiple space-separated upstreams can be set. Note this argument is optional, if it is not specified, all open ports of the server are exposed to the clients through the tunnel. So make sure to specify upstreams if exposing all open ports of the server is not desired.
   - `password`, password of the server, the client `rstunc` is required to send this password to successfully build a tunnel with the server.
-  - `cert` and `key` are certificate and private key for the domain of the server and they must be in `DER` format (binary format), self-signed certificate is allowed, but you will have to connect to the server using IP address and the certificate will also be required by `rstunc` for verification in this case (see below). Anyway, getting a certificate for your domain from a trusted CA and connecting to the server using domain name is always recommended. Note `cert` and `key` are optional, if they are not specified, the domain `localhost` is assumed and a self-signed certificate is generated on the fly, but this is for TEST only, Man-In-The-Middle attack can occur with such setting, so make sure **it is only used for TEST**!
+  - `cert` and `key` are certificate and private key for the domain of the server, self-signed certificate is allowed, but you will have to connect to the server using IP address and the certificate will also be required by `rstunc` for verification in this case (see below). Anyway, getting a certificate for your domain from a trusted CA and connecting to the server using domain name is always recommended. Note `cert` and `key` are optional, if they are not specified, the domain `localhost` is assumed and a self-signed certificate is generated on the fly, but this is for TEST only, Man-In-The-Middle attack can occur with such setting, so make sure **it is only used for TEST**!
 
 * Start the client
 
@@ -84,11 +84,11 @@ OPTIONS:
             Password of the tunnel server
 
     -c, --cert <CERT>
-            Path to the certificate file in DER format, if empty, a self-signed certificate with the
+            Path to the certificate file, if empty, a self-signed certificate with the
             domain "localhost" will be used [default: ]
 
     -k, --key <KEY>
-            Path to the key file in DER format, can be empty if no cert is provided [default: ]
+            Path to the key file, can be empty if no cert is provided [default: ]
 
     -t, --threads <THREADS>
             Threads to run async tasks [default: 0]
@@ -130,7 +130,7 @@ OPTIONS:
             setting the `--upstreams` option. `ANY^ANY` both the cases of the settings above
 
     -c, --cert <CERT>
-            Path to the certificate file in DER format, only needed for self signed certificate
+            Path to the certificate file, only needed for self signed certificate
             [default: ]
 
     -e, --cipher <CIPHER>
