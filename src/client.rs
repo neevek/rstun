@@ -474,7 +474,7 @@ impl Client {
 
         let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
             .context("failed to read from cert file")?;
-        let cert = certs.first().unwrap();
+        let cert = certs.first().context("certificate is not in PEM format")?;
 
         let mut roots = RootCertStore::empty();
         roots.add(&cert).context(format!(
