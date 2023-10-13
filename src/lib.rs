@@ -229,6 +229,7 @@ impl ReadResult {
 pub mod android {
     extern crate jni;
 
+    use jni::objects::JValue;
     use jni::sys::{jlong, jstring};
     use log::{error, info};
 
@@ -243,11 +244,15 @@ pub mod android {
     #[no_mangle]
     pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         let env = vm.get_env().expect("failed to get JNIEnv");
-        let s = env.new_string("".to_string()).unwrap();
-        if let Err(e) = rustls_platform_verifier::android::init_hosted(&env, JObject::from(s)) {
-            error!("failed to init rustls_platform_verifier: {}", e);
-        } else {
-            info!("initializing rustls_platform_verifier succeeded!");
+        if let Ok(cls) = env.find_class("net/neevek/rsproxy/RsProxy") {
+            if let Err(e) = rustls_platform_verifier::android::init_hosted(
+                &env,
+                JObject::try_from(cls).unwrap(),
+            ) {
+                error!("failed to init rustls_platform_verifier: {}", e);
+            } else {
+                info!("initializing rustls_platform_verifier succeeded!");
+            }
         }
 
         JNI_VERSION_1_6
