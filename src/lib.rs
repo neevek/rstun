@@ -229,7 +229,6 @@ impl ReadResult {
 pub mod android {
     extern crate jni;
 
-    use jni::objects::JValue;
     use jni::sys::{jlong, jstring};
     use log::{error, info};
 
@@ -242,20 +241,24 @@ pub mod android {
     use std::thread;
 
     #[no_mangle]
-    pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
-        let env = vm.get_env().expect("failed to get JNIEnv");
-        if let Ok(cls) = env.find_class("net/neevek/omnip/Omnip") {
-            if let Err(e) = rustls_platform_verifier::android::init_hosted(
-                &env,
-                JObject::try_from(cls).unwrap(),
-            ) {
-                error!("failed to init rustls_platform_verifier: {}", e);
-            } else {
-                info!("initializing rustls_platform_verifier succeeded!");
-            }
-        }
-
+    pub extern "system" fn JNI_OnLoad(_vm: JavaVM, _: *mut c_void) -> jint {
         JNI_VERSION_1_6
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_initCertificateVerifier(
+        env: JNIEnv,
+        _: JClass,
+        context: JObject,
+    ) {
+        if let Err(e) = rustls_platform_verifier::android::init_hosted(
+            &env,
+            JObject::try_from(context).unwrap(),
+        ) {
+            error!("failed to init rustls_platform_verifier: {}", e);
+        } else {
+            info!("initializing rustls_platform_verifier succeeded!");
+        }
     }
 
     #[no_mangle]
