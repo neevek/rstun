@@ -244,7 +244,7 @@ pub mod android {
     #[no_mangle]
     pub extern "system" fn JNI_OnLoad(vm: JavaVM, _: *mut c_void) -> jint {
         let env = vm.get_env().expect("failed to get JNIEnv");
-        if let Ok(cls) = env.find_class("net/neevek/rsproxy/RsProxy") {
+        if let Ok(cls) = env.find_class("net/neevek/omnip/Omnip") {
             if let Err(e) = rustls_platform_verifier::android::init_hosted(
                 &env,
                 JObject::try_from(cls).unwrap(),
@@ -259,7 +259,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeInitLogger(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeInitLogger(
         mut env: JNIEnv,
         _: JClass,
         jlogLevel: JString,
@@ -278,7 +278,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeCreate(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeCreate(
         mut env: JNIEnv,
         _: JClass,
         jmode: JString,
@@ -320,7 +320,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeStop(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStop(
         _env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -331,7 +331,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeStartTunnelling(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStartTunnelling(
         _env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -347,7 +347,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeGetState(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeGetState(
         env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -363,7 +363,7 @@ pub mod android {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn Java_net_neevek_rsproxy_RsTunc_nativeSetEnableOnInfoReport(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeSetEnableOnInfoReport(
         env: JNIEnv,
         jobj: JClass,
         client_ptr: jlong,
