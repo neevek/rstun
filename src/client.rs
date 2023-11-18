@@ -1,6 +1,6 @@
 use crate::{
     access_server::ChannelMessage,
-    pem_util,
+    pem_util, socket_addr_with_unspecified_ip_port,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     AccessServer, ClientConfig, ControlStream, SelectedCipherSuite, Tunnel, TunnelMessage,
     TUNNEL_MODE_OUT,
@@ -30,7 +30,6 @@ use tokio::{net::TcpStream, task::JoinHandle};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
-const LOCAL_ADDR_STR: &str = "0.0.0.0:0";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
 
@@ -250,7 +249,7 @@ impl Client {
         cfg.transport_config(Arc::new(transport_cfg));
 
         let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
-        let local_addr: SocketAddr = LOCAL_ADDR_STR.parse().unwrap();
+        let local_addr: SocketAddr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
 
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
         endpoint.set_default_client_config(cfg);

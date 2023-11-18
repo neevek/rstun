@@ -16,6 +16,9 @@ use log::error;
 use quinn::{RecvStream, SendStream};
 use rs_utilities::log_and_bail;
 pub use server::Server;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
@@ -221,6 +224,14 @@ impl ReadResult {
     #![allow(dead_code)]
     pub fn is_eof(&self) -> bool {
         matches!(self, Self::EOF)
+    }
+}
+
+pub fn socket_addr_with_unspecified_ip_port(ipv6: bool) -> SocketAddr {
+    if ipv6 {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
     }
 }
 
