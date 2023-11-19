@@ -10,7 +10,10 @@ use log::{debug, error, info, warn};
 use quinn::{congestion, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
-use rs_utilities::{dns, log_and_bail};
+use rs_utilities::{
+    dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
+    log_and_bail,
+};
 use rustls::{client::ServerCertVerified, Certificate, RootCertStore, ServerName};
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
@@ -589,12 +592,18 @@ impl Client {
         dot_server: &str,
         name_servers: Vec<String>,
     ) -> Result<IpAddr> {
+        let dns_config = DNSResolverConfig {
+            strategy: DNSResolverLookupIpStrategy::Ipv6thenIpv4,
+            num_conccurent_reqs: 3,
+            ordering: DNSQueryOrdering::QueryStatistics,
+        };
+
         let resolver = if !dot_server.is_empty() {
-            dns::resolver(dot_server, vec![])
+            dns::resolver2(dot_server, vec![], dns_config)
         } else if !name_servers.is_empty() {
-            dns::resolver("", name_servers)
+            dns::resolver2("", name_servers, dns_config)
         } else {
-            rs_utilities::dns::resolver("", vec![])
+            dns::resolver2("", vec![], dns_config)
         };
 
         let ip = resolver.await.lookup_first(domain).await?;
