@@ -339,6 +339,7 @@ impl Server {
             }
         });
 
+        access_server.set_drop_conn(false);
         let mut tcp_receiver = access_server.take_tcp_receiver();
         while let Some(Some(ChannelMessage::Request(tcp_stream))) = tcp_receiver.recv().await {
             match client_conn.open_bi().await {
@@ -363,7 +364,7 @@ impl Server {
 
         access_server.shutdown(tcp_receiver).await.ok();
 
-        info!("will quit access server: {}", addr);
+        info!("access server quit: {}", addr);
 
         Ok(())
     }

@@ -107,6 +107,7 @@ impl AccessServer {
         drop(tcp_receiver);
 
         // initiate a new connection to wake up the accept() loop
+        self.set_drop_conn(false);
         TcpStream::connect(self.addr).await?;
         Ok(())
     }
