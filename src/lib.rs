@@ -142,7 +142,7 @@ pub struct ServerConfig {
 
 pub(crate) enum ReadResult {
     Succeeded,
-    EOF,
+    Eof,
 }
 
 impl ClientConfig {
@@ -223,7 +223,7 @@ impl ClientConfig {
 impl ReadResult {
     #![allow(dead_code)]
     pub fn is_eof(&self) -> bool {
-        matches!(self, Self::EOF)
+        matches!(self, Self::Eof)
     }
 }
 

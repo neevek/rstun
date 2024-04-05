@@ -87,7 +87,7 @@ struct RstundArgs {
 
     /// Exposed upstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
     /// The entire local network is exposed through the tunnel if empty
-    #[arg(short = 'd', long, required = false)]
+    #[arg(short = 'u', long, required = false)]
     upstreams: Vec<String>,
 
     /// Password of the tunnel server

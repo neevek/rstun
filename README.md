@@ -1,13 +1,13 @@
 rstun
 =====
 
-A secured UDP tunnel written in Rust.
+A secure UDP tunnel written in Rust.
 
 rstun builds on [Quinn](https://github.com/quinn-rs/quinn), which is an implementation of the IETF [QUIC](https://quicwg.org/) transport protocol.
 
 rstun consists of two binaries, `rstunc` for client and `rstund` for server. `rstund` accepts connections from `rstunc`.
 
-`rstunc` connects to the server to build a secured tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
+`rstunc` connects to the server to build a secure tunnel to allow data to be exchanged between two ends, it initiates the connection in one of two modes:
 
   * The `IN` mode for exposing a local port to the internet through the server.
   * The `OUT` mode for securing data going out from local to the internet through the server.
@@ -42,7 +42,7 @@ rstunc
   --cert path/to/cert.der \
   --addr-mapping 0.0.0.0:9900^8800
 ```
-  - `mode` here is `OUT` for `TunnelOut`, for securing traffic from local to the server through the tunnel.
+  - `mode` here is `OUT`, for securing traffic from local to the server through the tunnel.
   - `server-addr`, domain name or IP address of the server.
   - `password`, same as that for the server.
   - `cert`, see explanation above for `rstund`. Note this is also optional if connecting to the server with a domain name, or the server `rstund` runs with an auto-generated self-signed certificate (see the TEST example below).
@@ -53,7 +53,7 @@ rstunc
 
 * Simple TEST example
 
-The following commands run a server and a client that connects to the server in their simplest ways:
+The following commands run a server, then a client that connects to the server in their simplest ways:
 
 
 ```

@@ -30,7 +30,7 @@ impl Tunnel {
         tokio::spawn(async move {
             loop {
                 let result = Self::tcp_to_quic(&mut tcp_read, &mut quic_send).await;
-                if let Ok(ReadResult::EOF) | Err(_) = result {
+                if let Ok(ReadResult::Eof) | Err(_) = result {
                     break;
                 }
             }
@@ -39,7 +39,7 @@ impl Tunnel {
         tokio::spawn(async move {
             loop {
                 let result = Self::quic_to_tcp(&mut tcp_write, &mut quic_recv).await;
-                if let Ok(ReadResult::EOF) | Err(_) = result {
+                if let Ok(ReadResult::Eof) | Err(_) = result {
                     break;
                 }
             }
@@ -57,7 +57,7 @@ impl Tunnel {
             Ok(ReadResult::Succeeded)
         } else {
             quic_send.finish().await?;
-            Ok(ReadResult::EOF)
+            Ok(ReadResult::Eof)
         }
     }
 
@@ -71,7 +71,7 @@ impl Tunnel {
             tcp_write.write_all(&buffer[..len_read]).await?;
             Ok(ReadResult::Succeeded)
         } else {
-            Ok(ReadResult::EOF)
+            Ok(ReadResult::Eof)
         }
     }
 }
