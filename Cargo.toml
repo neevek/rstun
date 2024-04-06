@@ -27,7 +27,7 @@ rs-utilities = "0.4.2"
 # rs-utilities = { path = "../rs-utilities" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rustls-platform-verifier = { git = "https://github.com/rustls/rustls-platform-verifier" }
+rustls-platform-verifier = "0.1.1"
 byte-pool = { git = "https://github.com/neevek/byte-pool" }
 x509-parser = "0.15"
 lazy_static = "1.4"
