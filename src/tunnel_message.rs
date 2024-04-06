@@ -55,7 +55,7 @@ impl TunnelMessage {
     pub fn handle_message(msg: &TunnelMessage) -> Result<()> {
         match msg {
             TunnelMessage::RespSuccess => Ok(()),
-            TunnelMessage::RespFailure(msg) => bail!(format!("received failure, err: {}", msg)),
+            TunnelMessage::RespFailure(msg) => bail!(format!("received failure, err: {msg}")),
             _ => bail!("unexpected message type"),
         }
     }

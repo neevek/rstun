@@ -75,3 +75,9 @@ impl Tunnel {
         }
     }
 }
+
+impl Default for Tunnel {
+    fn default() -> Self {
+        Self::new()
+    }
+}

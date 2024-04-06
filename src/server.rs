@@ -30,41 +30,15 @@ impl Server {
         })
     }
 
-    pub async fn bind(mut self: &mut Arc<Self>) -> Result<SocketAddr> {
+    pub fn bind(self: &mut Arc<Self>) -> Result<SocketAddr> {
         let config = &self.config;
-        let (certs, key) =
-            Server::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
-                .context("failed to read certificate or key")?;
-
-        let crypto = rustls::ServerConfig::builder()
-            .with_safe_default_cipher_suites()
-            .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS13])?
-            .with_no_client_auth()
-            .with_single_cert(certs, key)?;
-
-        let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024 * 1));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
-        transport_cfg.send_window(1024 * 1024 * 8);
-        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        if config.max_idle_timeout_ms > 0 {
-            let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
-            transport_cfg.max_idle_timeout(Some(timeout));
-            transport_cfg
-                .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
-        }
-        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
-
-        let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        cfg.transport = Arc::new(transport_cfg);
-
         let addr: SocketAddr = config
             .addr
             .parse()
             .context(format!("invalid address: {}", config.addr))?;
 
-        let endpoint = quinn::Endpoint::server(cfg, addr).map_err(|e| {
+        let quinn_server_cfg = Self::load_quinn_server_config(&self.config)?;
+        let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).map_err(|e| {
             error!(
                 "failed to bind tunnel server on address: {}, error: {}",
                 addr, e
@@ -78,9 +52,56 @@ impl Server {
             config.max_idle_timeout_ms
         );
 
-        Arc::get_mut(&mut self).unwrap().endpoint = Some(endpoint);
+        let ep = endpoint.clone();
+        let config = self.config.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600 * 24)).await;
+                match Self::load_quinn_server_config(&config) {
+                    Ok(quinn_server_cfg) => {
+                        info!("updated quinn server config!");
+                        ep.set_server_config(Some(quinn_server_cfg));
+                    }
+                    Err(e) => {
+                        error!("failed to load quinn server config:{e}");
+                    }
+                }
+            }
+        });
+
+        Arc::get_mut(self).unwrap().endpoint = Some(endpoint);
 
         Ok(addr)
+    }
+
+    fn load_quinn_server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
+        let (certs, key) =
+            Server::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
+                .context("failed to read certificate or key")?;
+
+        let crypto = rustls::ServerConfig::builder()
+            .with_safe_default_cipher_suites()
+            .with_safe_default_kx_groups()
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+
+        let mut transport_cfg = TransportConfig::default();
+        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
+        transport_cfg.send_window(1024 * 1024 * 8);
+        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
+        if config.max_idle_timeout_ms > 0 {
+            let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
+            transport_cfg.max_idle_timeout(Some(timeout));
+            transport_cfg
+                .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
+        }
+        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+
+        let mut server_cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        server_cfg.transport = Arc::new(transport_cfg);
+        Ok(server_cfg)
     }
 
     pub async fn serve(self: &Arc<Self>) -> Result<()> {
