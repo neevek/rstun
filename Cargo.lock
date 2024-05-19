@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "rstun"
-version = "0.4.9"
+version = "0.4.12"
 dependencies = [
  "android_logger",
  "anyhow",
