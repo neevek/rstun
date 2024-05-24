@@ -1,156 +1,77 @@
-use std::time::Duration;
-
+use crate::ReadResult;
 use crate::BUFFER_POOL;
 use anyhow::Result;
-use log::debug;
+use log::info;
 use quinn::{RecvStream, SendStream};
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::time::error::Elapsed;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 pub struct Tunnel {}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum TransferError {
-    Timeout,
-    InternalError,
-}
 
 impl Tunnel {
     pub fn new() -> Self {
         Tunnel {}
     }
 
-    pub fn start(
+    pub async fn start(
         &self,
-        tunnel_out: bool,
-        tcp_stream: TcpStream,
+        tcp_stream: (OwnedReadHalf, OwnedWriteHalf),
         quic_stream: (SendStream, RecvStream),
     ) {
+        let (mut tcp_read, mut tcp_write) = tcp_stream;
+        let (mut quic_send, mut quic_recv) = quic_stream;
+
+        info!(
+            "built tunnel for local conn, {} <=> {}",
+            quic_send.id().index(),
+            tcp_read.peer_addr().unwrap(),
+        );
+
         tokio::spawn(async move {
-            Self::run(tunnel_out, tcp_stream, quic_stream).await.ok();
+            loop {
+                let result = Self::tcp_to_quic(&mut tcp_read, &mut quic_send).await;
+                if let Ok(ReadResult::Eof) | Err(_) = result {
+                    break;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                let result = Self::quic_to_tcp(&mut tcp_write, &mut quic_recv).await;
+                if let Ok(ReadResult::Eof) | Err(_) = result {
+                    break;
+                }
+            }
         });
     }
 
-    async fn run(
-        tunnel_out: bool,
-        mut tcp_stream: TcpStream,
-        quic_stream: (SendStream, RecvStream),
-    ) -> Result<(), TransferError> {
-        let (mut tcp_read, mut tcp_write) = tcp_stream.split();
-        let (mut quic_send, mut quic_recv) = quic_stream;
-
-        let tag = if tunnel_out { "OUT" } else { "IN" };
-        let index = quic_send.id().index();
-        let in_addr = tcp_read
-            .peer_addr()
-            .map_err(|_| TransferError::InternalError)?;
-
-        debug!("[{tag}] tunnel start   : {index:<3} ↔ {in_addr:<20}");
-
-        const BUFFER_SIZE: usize = 8192;
-        let mut inbound_buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
-        let mut outbound_buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
-
-        let mut tx_bytes = 0u64;
-        let mut rx_bytes = 0u64;
-        let mut tcp_stream_eos = false;
-        let mut quic_stream_eos = false;
-        let mut loop_count = 0;
-
-        loop {
-            loop_count += 1;
-            let result = if !tcp_stream_eos && !quic_stream_eos {
-                tokio::select! {
-                    result = Self::transfer_data_with_timeout(
-                        &mut tcp_read,
-                        &mut quic_send,
-                        &mut inbound_buffer,
-                        &mut tx_bytes,
-                        &mut tcp_stream_eos) => result,
-                    result = Self::transfer_data_with_timeout(
-                        &mut quic_recv,
-                        &mut tcp_write,
-                        &mut outbound_buffer,
-                        &mut rx_bytes,
-                        &mut quic_stream_eos) => result,
-                }
-            } else if !quic_stream_eos {
-                Self::transfer_data_with_timeout(
-                    &mut quic_recv,
-                    &mut tcp_write,
-                    &mut outbound_buffer,
-                    &mut rx_bytes,
-                    &mut quic_stream_eos,
-                )
-                .await
-            } else {
-                Self::transfer_data_with_timeout(
-                    &mut tcp_read,
-                    &mut quic_send,
-                    &mut inbound_buffer,
-                    &mut tx_bytes,
-                    &mut tcp_stream_eos,
-                )
-                .await
-            };
-
-            match result {
-                Ok(0) => {
-                    if tcp_stream_eos && quic_stream_eos {
-                        break;
-                    }
-                }
-                Err(TransferError::Timeout) => {
-                    debug!("[{tag}] tunnel timeout: {index:<3} ↔ {in_addr:<20} | ⟳ {loop_count:<8}| ↑ {tx_bytes:<10} ↓ {rx_bytes:<10}");
-                    break;
-                }
-                Err(_) => break,
-                Ok(_) => {}
-            }
+    async fn tcp_to_quic(
+        tcp_read: &mut OwnedReadHalf,
+        quic_send: &mut SendStream, //local_read: &mut OwnedReadHalf,
+    ) -> Result<ReadResult> {
+        let mut buffer = BUFFER_POOL.alloc_and_fill(8192);
+        let len_read = tcp_read.read(&mut buffer[..]).await?;
+        if len_read > 0 {
+            quic_send.write_all(&buffer[..len_read]).await?;
+            Ok(ReadResult::Succeeded)
+        } else {
+            quic_send.finish().await?;
+            Ok(ReadResult::Eof)
         }
-
-        debug!("[{tag}] tunnel end    : {index:<3} ↔ {in_addr:<20} | ⟳ {loop_count:<8}| ↑ {tx_bytes:<10} ↓ {rx_bytes:<10}");
-
-        Ok(())
     }
 
-    async fn transfer_data_with_timeout<R, W>(
-        reader: &mut R,
-        writer: &mut W,
-        buffer: &mut [u8],
-        out_bytes: &mut u64,
-        eos_flag: &mut bool,
-    ) -> Result<usize, TransferError>
-    where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin,
-    {
-        match tokio::time::timeout(Duration::from_secs(15), reader.read(buffer))
-            .await
-            .map_err(|_: Elapsed| TransferError::Timeout)?
-        {
-            Ok(0) => {
-                if !*eos_flag {
-                    *eos_flag = true;
-                    writer
-                        .shutdown()
-                        .await
-                        .map_err(|_| TransferError::InternalError)?;
-                }
-                Ok(0)
-            }
-            Ok(n) => {
-                *out_bytes += n as u64;
-                writer
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|_| TransferError::InternalError)?;
-                Ok(n)
-            }
-            Err(_) => Err(TransferError::InternalError), // Connection mostly reset by peer
+    async fn quic_to_tcp(
+        tcp_write: &mut OwnedWriteHalf,
+        quic_recv: &mut RecvStream,
+    ) -> Result<ReadResult> {
+        let mut buffer = BUFFER_POOL.alloc_and_fill(8192);
+        let result = quic_recv.read(&mut buffer[..]).await?;
+        if let Some(len_read) = result {
+            tcp_write.write_all(&buffer[..len_read]).await?;
+            Ok(ReadResult::Succeeded)
+        } else {
+            Ok(ReadResult::Eof)
         }
     }
 }

@@ -39,7 +39,10 @@ impl Server {
 
         let quinn_server_cfg = Self::load_quinn_server_config(&self.config)?;
         let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).map_err(|e| {
-            error!("failed to bind tunnel server on address: {addr}, err: {e}");
+            error!(
+                "failed to bind tunnel server on address: {}, error: {}",
+                addr, e
+            );
             e
         })?;
 
@@ -116,13 +119,14 @@ impl Server {
                 match tun_type {
                     TunnelType::Out((client_conn, addr)) => {
                         info!(
-                            "start tunnel streaming in TunnelOut mode, {} ↔ {addr}",
+                            "start tunnel streaming in OUT mode, {} -> {}",
                             client_conn.remote_address(),
+                            addr
                         );
 
                         this.process_out_connection(client_conn, addr)
                             .await
-                            .map_err(|e| error!("process_out_connection failed: {e}"))
+                            .map_err(|e| error!("process_out_connection failed: {}", e))
                             .ok();
                     }
 
@@ -135,7 +139,7 @@ impl Server {
 
                         this.process_in_connection(client_conn, access_server, ctrl_stream)
                             .await
-                            .map_err(|e| error!("process_in_connection failed: {e}"))
+                            .map_err(|e| error!("process_in_connection failed: {}", e))
                             .ok();
                     }
                 }
@@ -155,17 +159,21 @@ impl Server {
     ) -> Result<TunnelType> {
         let remote_addr = &client_conn.remote_address();
 
-        info!("received connection, authenticating... addr:{remote_addr}");
-        let (mut quic_send, mut quic_recv) = client_conn
-            .accept_bi()
-            .await
-            .context(format!("login request not received in time: {remote_addr}"))?;
+        info!(
+            "received connection, authenticating... addr:{}",
+            remote_addr
+        );
 
-        info!("received bi_stream request: {remote_addr}");
+        let (mut quic_send, mut quic_recv) = client_conn.accept_bi().await.context(format!(
+            "login request not received in time, addr: {}",
+            remote_addr
+        ))?;
+
+        info!("received bi_stream request, addr: {}", remote_addr);
         let tunnel_type;
         match TunnelMessage::recv(&mut quic_recv).await? {
             TunnelMessage::ReqOutLogin(login_info) => {
-                info!("received OutLogin request: {remote_addr}");
+                info!("received OutLogin request, addr: {}", remote_addr);
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
 
@@ -184,7 +192,10 @@ impl Server {
                     }
                 };
                 if !is_local {
-                    log_and_bail!("only local IPs are allowed for upstream: {access_server_addr}");
+                    log_and_bail!(
+                        "only local IPs are allowed for upstream, addr: {}",
+                        access_server_addr
+                    );
                 }
 
                 let upstream_addr = if access_server_addr.port() == 0 {
@@ -193,24 +204,25 @@ impl Server {
                     }
                     let addr = upstreams.first().unwrap();
                     info!(
-                        "will bind incoming TunnelIn request({}) to default address({addr})",
-                        client_conn.remote_address()
+                        "will bind incoming TunnelIn request({}) to default address({})",
+                        client_conn.remote_address(),
+                        addr
                     );
                     addr
                 } else {
                     if !upstreams.is_empty() && !upstreams.contains(&access_server_addr) {
-                        log_and_bail!("upstream address not set: {access_server_addr}");
+                        log_and_bail!("upstream address not set: {}", access_server_addr);
                     }
                     &access_server_addr
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 tunnel_type = TunnelType::Out((client_conn, *upstream_addr));
-                info!("sent response for OutLogin request: {remote_addr}");
+                info!("sent response for OutLogin request, addr: {}", remote_addr);
             }
 
             TunnelMessage::ReqInLogin(login_info) => {
-                info!("received InLogin request: {remote_addr}");
+                info!("received InLogin request, addr: {}", remote_addr);
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
                 let access_server_addr = match login_info.access_server_addr {
@@ -219,13 +231,15 @@ impl Server {
                 };
                 if access_server_addr.port() == 0 {
                     log_and_bail!(
-                        "explicit access_server_addr for TunnelIn mode tunelling is required: {access_server_addr:?}");
+                        "explicit access_server_addr for TunnelIn mode tunelling is required, addr: {:?}", access_server_addr
+                    );
                 }
                 if !access_server_addr.ip().is_unspecified()
                     && !access_server_addr.ip().is_loopback()
                 {
                     log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {access_server_addr:?}");
+                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling, addr: {:?}", access_server_addr
+                    );
                 }
                 let upstream_addr = access_server_addr;
 
@@ -270,7 +284,7 @@ impl Server {
 
                 guarded_access_server_ports.push(upstream_addr.port());
 
-                info!("sent response for InLogin request: {remote_addr}");
+                info!("sent response for InLogin request, addr: {}", remote_addr);
             }
 
             _ => {
@@ -278,7 +292,7 @@ impl Server {
             }
         }
 
-        info!("connection authenticated! addr: {remote_addr}");
+        info!("connection authenticated! addr: {}", remote_addr);
 
         Ok(tunnel_type)
     }
@@ -293,20 +307,36 @@ impl Server {
         loop {
             match client_conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut { .. }) => {
-                    info!("connection timeout: {remote_addr}");
+                    info!("connection timeout, addr: {}", remote_addr);
                     return Ok(());
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed: {remote_addr}");
+                    debug!("connection closed, addr: {}", remote_addr);
                     return Ok(());
                 }
                 Err(e) => {
-                    log_and_bail!("failed to open accpet_bi: {remote_addr}, err: {e}");
+                    log_and_bail!(
+                        "failed to open bi_streams, addr: {}, err: {}",
+                        remote_addr,
+                        e
+                    );
                 }
                 Ok(quic_stream) => tokio::spawn(async move {
                     match TcpStream::connect(&upstream_addr).await {
-                        Ok(tcp_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
-                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
+                        Ok(tcp_stream) => {
+                            debug!(
+                                "[Out] open stream for conn, {} -> {}",
+                                quic_stream.0.id().index(),
+                                upstream_addr,
+                            );
+
+                            let tcp_stream = tcp_stream.into_split();
+                            Tunnel::new().start(tcp_stream, quic_stream).await;
+                        }
+
+                        Err(e) => {
+                            error!("failed to connect to {}, err: {}", upstream_addr, e);
+                        }
                     }
                 }),
             };
@@ -321,17 +351,23 @@ impl Server {
     ) -> Result<()> {
         let tcp_sender = access_server.clone_tcp_sender();
         tokio::spawn(async move {
-            TunnelMessage::recv(&mut ctrl_stream.quic_recv).await.ok();
-            // send None to signify exit
-            tcp_sender.send(None).await.ok();
-            Ok::<(), anyhow::Error>(())
+            match TunnelMessage::recv(&mut ctrl_stream.quic_recv).await {
+                _ => {
+                    // send None to signify exit
+                    tcp_sender.send(None).await.ok();
+                    Ok::<(), anyhow::Error>(())
+                }
+            }
         });
 
         access_server.set_drop_conn(false);
         let mut tcp_receiver = access_server.take_tcp_receiver();
         while let Some(Some(ChannelMessage::Request(tcp_stream))) = tcp_receiver.recv().await {
             match client_conn.open_bi().await {
-                Ok(quic_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
+                Ok(quic_stream) => {
+                    let tcp_stream = tcp_stream.into_split();
+                    Tunnel::new().start(tcp_stream, quic_stream).await;
+                }
                 _ => {
                     log_and_bail!("failed to open bi_streams to client, quit");
                 }
@@ -349,7 +385,7 @@ impl Server {
 
         access_server.shutdown(tcp_receiver).await.ok();
 
-        info!("access server quit: {addr}");
+        info!("access server quit: {}", addr);
 
         Ok(())
     }
@@ -370,9 +406,9 @@ impl Server {
             (vec![Certificate(cert)], PrivateKey(key))
         } else {
             let certs = pem_util::load_certificates_from_pem(cert_path)
-                .context(format!("failed to read cert file: {cert_path}"))?;
+                .context(format!("failed to read cert file: {}", cert_path))?;
             let key = pem_util::load_private_key_from_pem(key_path)
-                .context(format!("failed to read key file: {key_path}"))?;
+                .context(format!("failed to read key file: {}", key_path))?;
             (certs, key)
         };
 

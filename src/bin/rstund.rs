@@ -30,7 +30,7 @@ fn main() {
             run(args)
                 .await
                 .map_err(|e| {
-                    error!("{e}");
+                    error!("{}", e);
                 })
                 .ok();
         })
@@ -53,13 +53,13 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         }
 
         if !d.contains(':') {
-            *d = format!("127.0.0.1:{d}");
+            *d = format!("127.0.0.1:{}", d);
         }
 
         if let Ok(addr) = d.parse() {
             upstreams.push(addr);
         } else {
-            log_and_bail!("invalid upstreams address: {d}");
+            log_and_bail!("invalid upstreams address: {}", d);
         }
     }
 

@@ -140,6 +140,11 @@ pub struct ServerConfig {
     pub dashboard_server_credential: String,
 }
 
+pub(crate) enum ReadResult {
+    Succeeded,
+    Eof,
+}
+
 impl ClientConfig {
     pub fn create(
         mode: &str,
@@ -156,7 +161,7 @@ impl ClientConfig {
         let addr_mapping_str = addr_mapping;
         let addr_mapping: Vec<&str> = addr_mapping_str.split('^').collect();
         if addr_mapping.len() != 2 {
-            log_and_bail!("invalid address mapping: {addr_mapping_str}");
+            log_and_bail!("invalid address mapping: {}", addr_mapping_str);
         }
 
         let mut addr_mapping: Vec<String> =
@@ -168,12 +173,12 @@ impl ClientConfig {
                 sock_addr_mapping.push(None);
             } else {
                 if !addr.contains(':') {
-                    *addr = format!("127.0.0.1:{addr}");
+                    *addr = format!("127.0.0.1:{}", addr);
                 }
-                sock_addr_mapping
-                    .push(Some(addr.parse::<SocketAddr>().context(format!(
-                        "invalid address mapping:[{addr_mapping_str}]"
-                    ))?));
+                sock_addr_mapping.push(Some(
+                    addr.parse::<SocketAddr>()
+                        .context(format!("invalid address mapping:[{}]", addr_mapping_str))?,
+                ));
             }
         }
 
@@ -201,7 +206,7 @@ impl ClientConfig {
                 access_server_addr: sock_addr_mapping[0],
             }))
         } else {
-            if sock_addr_mapping[0].is_none() {
+            if sock_addr_mapping[0] == None {
                 log_and_bail!("'ANY' is not allowed as local access server for OUT tunneling");
             }
             config.local_access_server_addr = sock_addr_mapping[0];
@@ -212,6 +217,13 @@ impl ClientConfig {
         };
 
         Ok(config)
+    }
+}
+
+impl ReadResult {
+    #![allow(dead_code)]
+    pub fn is_eof(&self) -> bool {
+        matches!(self, Self::Eof)
     }
 }
 

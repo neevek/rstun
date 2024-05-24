@@ -72,7 +72,7 @@ impl AccessServer {
                             continue;
                         }
 
-                        debug!("received conn :       {addr}");
+                        debug!("received new local connection, addr: {addr}");
                         match tcp_sender
                             .send_timeout(
                                 Some(ChannelMessage::Request(socket)),
