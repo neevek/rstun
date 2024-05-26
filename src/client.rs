@@ -192,22 +192,16 @@ impl Client {
                 }
 
                 Err(e) => {
-                    error!("connect failed, err: {}", e);
+                    error!("connect failed, err: {e}");
                     if connect_max_retry > 0 {
                         connect_retry_count += 1;
                         if connect_retry_count >= connect_max_retry {
-                            info!(
-                                "quit after having retried for {} times",
-                                connect_retry_count
-                            );
+                            info!("quit after having retried for {connect_retry_count} times");
                             break;
                         }
                     }
 
-                    debug!(
-                        "will wait for {}ms before retrying...",
-                        wait_before_retry_ms
-                    );
+                    debug!("will wait for {wait_before_retry_ms}ms before retrying...");
                     tokio::time::sleep(Duration::from_millis(wait_before_retry_ms)).await;
                 }
             }
@@ -268,7 +262,7 @@ impl Client {
         let connection = endpoint.connect(remote_addr, domain.as_str())?.await?;
 
         self.set_and_post_tunnel_state(ClientState::Connected);
-        self.post_tunnel_log(format!("connected to server: {:?}", remote_addr).as_str());
+        self.post_tunnel_log(format!("connected to server: {remote_addr:?}").as_str());
 
         let (mut quic_send, mut quic_recv) = connection
             .open_bi()
@@ -307,16 +301,7 @@ impl Client {
         // accept local connections and build a tunnel to remote
         while let Some(ChannelMessage::Request(tcp_stream)) = access_server.recv().await {
             match remote_conn.open_bi().await {
-                Ok(quic_stream) => {
-                    debug!(
-                        "[TunnelOut] open stream for conn, {} -> {}",
-                        quic_stream.0.id().index(),
-                        remote_conn.remote_address(),
-                    );
-
-                    let tcp_stream = tcp_stream.into_split();
-                    Tunnel::new().start(tcp_stream, quic_stream).await;
-                }
+                Ok(quic_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
                 Err(e) => {
                     error!("failed to open_bi on remote connection: {e}");
                     self.post_tunnel_log(
@@ -353,16 +338,7 @@ impl Client {
         let remote_conn = remote_conn.read().await;
         while let Ok(quic_stream) = remote_conn.accept_bi().await {
             match TcpStream::connect(self.config.local_access_server_addr.unwrap()).await {
-                Ok(tcp_stream) => {
-                    debug!(
-                        "[TunnelIn] open stream for conn, {} <- {}",
-                        quic_stream.0.id().index(),
-                        remote_conn.remote_address(),
-                    );
-
-                    let tcp_stream = tcp_stream.into_split();
-                    Tunnel::new().start(tcp_stream, quic_stream).await;
-                }
+                Ok(tcp_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
                 Err(e) => {
                     error!(
                         "failed to connect to access server: {e}, {}",
@@ -479,7 +455,7 @@ impl Client {
         let cert = certs.first().context("certificate is not in PEM format")?;
 
         let mut roots = RootCertStore::empty();
-        roots.add(&cert).context(format!(
+        roots.add(cert).context(format!(
             "failed to add certificate: {}",
             self.config.cert_path
         ))?;
@@ -584,7 +560,7 @@ impl Client {
             return Ok(SocketAddr::new(ip, port));
         }
 
-        bail!("failed to resolve domain: {}", domain);
+        bail!("failed to resolve domain: {domain}");
     }
 
     async fn lookup_server_ip(
@@ -607,7 +583,7 @@ impl Client {
         };
 
         let ip = resolver.await.lookup_first(domain).await?;
-        info!("resolved {} to {}", domain, ip);
+        info!("resolved {domain} to {ip}");
         Ok(ip)
     }
 
@@ -616,9 +592,8 @@ impl Client {
         self.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelLog,
             Box::new(format!(
-                "{} {}",
-                chrono::Local::now().format(TIME_FORMAT),
-                log
+                "{} {log}",
+                chrono::Local::now().format(TIME_FORMAT)
             )),
         ));
     }
