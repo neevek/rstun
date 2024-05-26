@@ -1,12 +1,11 @@
-use std::time::Duration;
-
 use crate::BUFFER_POOL;
 use anyhow::Result;
 use log::debug;
 use quinn::{RecvStream, SendStream};
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::time::error::Elapsed;
 
@@ -29,128 +28,115 @@ impl Tunnel {
         tcp_stream: TcpStream,
         quic_stream: (SendStream, RecvStream),
     ) {
-        tokio::spawn(async move {
-            Self::run(tunnel_out, tcp_stream, quic_stream).await.ok();
-        });
-    }
-
-    async fn run(
-        tunnel_out: bool,
-        mut tcp_stream: TcpStream,
-        quic_stream: (SendStream, RecvStream),
-    ) -> Result<(), TransferError> {
-        let (mut tcp_read, mut tcp_write) = tcp_stream.split();
+        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
         let (mut quic_send, mut quic_recv) = quic_stream;
 
         let tag = if tunnel_out { "OUT" } else { "IN" };
         let index = quic_send.id().index();
-        let in_addr = tcp_read
-            .peer_addr()
-            .map_err(|_| TransferError::InternalError)?;
+        let in_addr = match tcp_read.peer_addr() {
+            Ok(in_addr) => in_addr,
+            Err(e) => {
+                log::error!("failed to get peer_addr: {e:?}");
+                return;
+            }
+        };
 
-        debug!("[{tag}] tunnel start   : {index:<3} ↔ {in_addr:<20}");
+        debug!("[{tag}] START {index:<3} → {in_addr:<20}");
 
         const BUFFER_SIZE: usize = 8192;
-        let mut inbound_buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
-        let mut outbound_buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
 
-        let mut tx_bytes = 0u64;
-        let mut rx_bytes = 0u64;
-        let mut tcp_stream_eos = false;
-        let mut quic_stream_eos = false;
-        let mut loop_count = 0;
-
-        loop {
-            loop_count += 1;
-            let result = if !tcp_stream_eos && !quic_stream_eos {
-                tokio::select! {
-                    result = Self::transfer_data_with_timeout(
-                        &mut tcp_read,
-                        &mut quic_send,
-                        &mut inbound_buffer,
-                        &mut tx_bytes,
-                        &mut tcp_stream_eos) => result,
-                    result = Self::transfer_data_with_timeout(
-                        &mut quic_recv,
-                        &mut tcp_write,
-                        &mut outbound_buffer,
-                        &mut rx_bytes,
-                        &mut quic_stream_eos) => result,
-                }
-            } else if !quic_stream_eos {
-                Self::transfer_data_with_timeout(
+        tokio::spawn(async move {
+            let mut transfer_bytes = 0u64;
+            let mut loop_count = 0u32;
+            let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
+            loop {
+                loop_count += 1;
+                let result = Self::quic_to_tcp(
                     &mut quic_recv,
                     &mut tcp_write,
-                    &mut outbound_buffer,
-                    &mut rx_bytes,
-                    &mut quic_stream_eos,
+                    &mut buffer,
+                    &mut transfer_bytes,
                 )
-                .await
-            } else {
-                Self::transfer_data_with_timeout(
-                    &mut tcp_read,
-                    &mut quic_send,
-                    &mut inbound_buffer,
-                    &mut tx_bytes,
-                    &mut tcp_stream_eos,
-                )
-                .await
-            };
-
-            match result {
-                Ok(0) => {
-                    if tcp_stream_eos && quic_stream_eos {
-                        break;
-                    }
-                }
-                Err(TransferError::Timeout) => {
-                    debug!("[{tag}] tunnel timeout: {index:<3} ↔ {in_addr:<20} | ⟳ {loop_count:<8}| ↑ {tx_bytes:<10} ↓ {rx_bytes:<10}");
+                .await;
+                if let Ok(0) | Err(_) = result {
                     break;
                 }
-                Err(_) => break,
-                Ok(_) => {}
             }
-        }
 
-        debug!("[{tag}] tunnel end    : {index:<3} ↔ {in_addr:<20} | ⟳ {loop_count:<8}| ↑ {tx_bytes:<10} ↓ {rx_bytes:<10}");
+            debug!("[{tag}] END   {index:<3} → {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+        });
 
-        Ok(())
+        tokio::spawn(async move {
+            let mut transfer_bytes = 0u64;
+            let mut loop_count = 0u32;
+            let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
+            loop {
+                loop_count += 1;
+                let result = Self::tcp_to_quic(
+                    &mut tcp_read,
+                    &mut quic_send,
+                    &mut buffer,
+                    &mut transfer_bytes,
+                )
+                .await;
+                if let Ok(0) | Err(_) = result {
+                    break;
+                }
+            }
+
+            debug!("[{tag}] END   {index:<3} ← {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+        });
     }
 
-    async fn transfer_data_with_timeout<R, W>(
-        reader: &mut R,
-        writer: &mut W,
+    async fn tcp_to_quic(
+        tcp_read: &mut OwnedReadHalf,
+        quic_send: &mut SendStream, //local_read: &mut OwnedReadHalf,
         buffer: &mut [u8],
-        out_bytes: &mut u64,
-        eos_flag: &mut bool,
-    ) -> Result<usize, TransferError>
-    where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin,
-    {
-        match tokio::time::timeout(Duration::from_secs(15), reader.read(buffer))
+        transfer_bytes: &mut u64,
+    ) -> Result<usize, TransferError> {
+        let len_read = tokio::time::timeout(Duration::from_secs(15), tcp_read.read(buffer))
             .await
             .map_err(|_: Elapsed| TransferError::Timeout)?
-        {
-            Ok(0) => {
-                if !*eos_flag {
-                    *eos_flag = true;
-                    writer
-                        .shutdown()
-                        .await
-                        .map_err(|_| TransferError::InternalError)?;
-                }
-                Ok(0)
-            }
-            Ok(n) => {
-                *out_bytes += n as u64;
-                writer
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|_| TransferError::InternalError)?;
-                Ok(n)
-            }
-            Err(_) => Err(TransferError::InternalError), // Connection mostly reset by peer
+            .map_err(|_| TransferError::InternalError)?;
+        if len_read > 0 {
+            *transfer_bytes += len_read as u64;
+            quic_send
+                .write_all(&buffer[..len_read])
+                .await
+                .map_err(|_| TransferError::InternalError)?;
+            Ok(len_read)
+        } else {
+            quic_send
+                .finish()
+                .await
+                .map_err(|_| TransferError::InternalError)?;
+            Ok(0)
+        }
+    }
+
+    async fn quic_to_tcp(
+        quic_recv: &mut RecvStream,
+        tcp_write: &mut OwnedWriteHalf,
+        buffer: &mut [u8],
+        transfer_bytes: &mut u64,
+    ) -> Result<usize, TransferError> {
+        let result = quic_recv
+            .read(buffer)
+            .await
+            .map_err(|_| TransferError::InternalError)?;
+        if let Some(len_read) = result {
+            *transfer_bytes += len_read as u64;
+            tcp_write
+                .write_all(&buffer[..len_read])
+                .await
+                .map_err(|_| TransferError::InternalError)?;
+            Ok(len_read)
+        } else {
+            tcp_write
+                .shutdown()
+                .await
+                .map_err(|_| TransferError::InternalError)?;
+            Ok(0)
         }
     }
 }
@@ -160,3 +146,4 @@ impl Default for Tunnel {
         Self::new()
     }
 }
+
