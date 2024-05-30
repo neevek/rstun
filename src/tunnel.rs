@@ -108,7 +108,6 @@ impl Tunnel {
         } else {
             quic_send
                 .finish()
-                .await
                 .map_err(|_| TransferError::InternalError)?;
             Ok(0)
         }
@@ -146,4 +145,3 @@ impl Default for Tunnel {
         Self::new()
     }
 }
-

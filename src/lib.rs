@@ -15,6 +15,7 @@ use lazy_static::lazy_static;
 use log::error;
 use quinn::{RecvStream, SendStream};
 use rs_utilities::log_and_bail;
+use rustls::crypto::ring::cipher_suite;
 pub use server::Server;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -33,7 +34,7 @@ lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
 
-pub const SUPPORTED_CIPHER_SUITES: &[&str] = &[
+pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[
     "chacha20-poly1305",
     "aes-256-gcm",
     "aes-128-gcm",
@@ -46,6 +47,12 @@ pub const SUPPORTED_CIPHER_SUITES: &[&str] = &[
     // "ecdhe-rsa-chacha20-poly1305",
 ];
 
+pub static SUPPORTED_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
+    cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+    cipher_suite::TLS13_AES_256_GCM_SHA384,
+    cipher_suite::TLS13_AES_128_GCM_SHA256,
+];
+
 pub(crate) struct SelectedCipherSuite(rustls::SupportedCipherSuite);
 
 impl std::str::FromStr for SelectedCipherSuite {
@@ -54,14 +61,10 @@ impl std::str::FromStr for SelectedCipherSuite {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "chacha20-poly1305" => Ok(SelectedCipherSuite(
-                rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
             )),
-            "aes-256-gcm" => Ok(SelectedCipherSuite(
-                rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
-            )),
-            "aes-128-gcm" => Ok(SelectedCipherSuite(
-                rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-            )),
+            "aes-256-gcm" => Ok(SelectedCipherSuite(cipher_suite::TLS13_AES_256_GCM_SHA384)),
+            "aes-128-gcm" => Ok(SelectedCipherSuite(cipher_suite::TLS13_AES_128_GCM_SHA256)),
             // "ecdhe-ecdsa-aes256-gcm" => Ok(SelectedCipherSuite(
             //     rustls::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
             // )),
@@ -81,7 +84,7 @@ impl std::str::FromStr for SelectedCipherSuite {
             //     rustls::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
             // )),
             _ => Ok(SelectedCipherSuite(
-                rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+                cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
             )),
         }
     }

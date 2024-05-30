@@ -1,13 +1,15 @@
 use crate::access_server::ChannelMessage;
 use crate::{
     pem_util, AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
+    SUPPORTED_CIPHER_SUITES,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
+use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{congestion, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -73,15 +75,21 @@ impl Server {
 
     fn load_quinn_server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
         let (certs, key) =
-            Server::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
+            Self::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
                 .context("failed to read certificate or key")?;
 
-        let crypto = rustls::ServerConfig::builder()
-            .with_safe_default_cipher_suites()
-            .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS13])?
+        let default_provider = rustls::crypto::ring::default_provider();
+        let provider = rustls::crypto::CryptoProvider {
+            cipher_suites: SUPPORTED_CIPHER_SUITES.into(),
+            ..default_provider
+        };
+
+        let tls_server_cfg = rustls::ServerConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
             .with_no_client_auth()
-            .with_single_cert(certs, key)?;
+            .with_single_cert(certs, key)
+            .unwrap();
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
@@ -96,9 +104,10 @@ impl Server {
         }
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
-        let mut server_cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-        server_cfg.transport = Arc::new(transport_cfg);
-        Ok(server_cfg)
+        let quic_server_cfg = Arc::new(QuicServerConfig::try_from(tls_server_cfg)?);
+        let mut quinn_server_cfg = quinn::ServerConfig::with_crypto(quic_server_cfg);
+        quinn_server_cfg.transport = Arc::new(transport_cfg);
+        Ok(quinn_server_cfg)
     }
 
     pub async fn serve(self: &Arc<Self>) -> Result<()> {
@@ -357,7 +366,7 @@ impl Server {
     fn read_certs_and_key(
         cert_path: &str,
         key_path: &str,
-    ) -> Result<(Vec<Certificate>, PrivateKey)> {
+    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let (certs, key) = if cert_path.is_empty() {
             info!("will use auto-generated self-signed certificate.");
             warn!("============================= WARNING ==============================");
@@ -365,9 +374,9 @@ impl Server {
             warn!("for the domain \"localhost\" is generated.");
             warn!("============== Be cautious, this is for TEST only!!! ===============");
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-            let key = cert.serialize_private_key_der();
-            let cert = cert.serialize_der()?;
-            (vec![Certificate(cert)], PrivateKey(key))
+            let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+            let cert = CertificateDer::from(cert.cert);
+            (vec![CertificateDer::from(cert)], PrivateKeyDer::Pkcs8(key))
         } else {
             let certs = pem_util::load_certificates_from_pem(cert_path)
                 .context(format!("failed to read cert file: {cert_path}"))?;
