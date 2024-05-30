@@ -65,8 +65,8 @@ struct RstuncArgs {
     cert: String,
 
     /// Preferred cipher suite
-    #[arg(short = 'e', long, default_value_t = String::from(SUPPORTED_CIPHER_SUITES[0]),
-        value_parser = PossibleValuesParser::new(SUPPORTED_CIPHER_SUITES).map(|v| v.to_string()))]
+    #[arg(short = 'e', long, default_value_t = String::from(SUPPORTED_CIPHER_SUITE_STRS[0]),
+        value_parser = PossibleValuesParser::new(SUPPORTED_CIPHER_SUITE_STRS).map(|v| v.to_string()))]
     cipher: String,
 
     /// Threads to run async tasks

@@ -7,24 +7,25 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
-use quinn::{congestion, TransportConfig};
+use quinn::{congestion, crypto::rustls::QuicClientConfig, TransportConfig};
 use quinn::{RecvStream, SendStream};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::{
     dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
     log_and_bail,
 };
-use rustls::{client::ServerCertVerified, Certificate, RootCertStore, ServerName};
+use rustls::{
+    client::danger::ServerCertVerified,
+    crypto::{ring::cipher_suite, CryptoProvider},
+    RootCertStore, SupportedCipherSuite,
+};
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
-use std::{fmt::Display, str::FromStr};
 use std::{
     net::{IpAddr, SocketAddr},
-    time::SystemTime,
-};
-use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
     time::Duration,
+    {fmt::Display, str::FromStr},
 };
 #[cfg(not(target_os = "windows"))]
 use tokio::signal::unix::{signal, SignalKind};
@@ -35,6 +36,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
+static INIT: Once = Once::new();
 
 #[derive(Clone, Serialize)]
 pub enum ClientState {
@@ -102,6 +104,12 @@ pub struct Client {
 
 impl Client {
     pub fn new(config: ClientConfig) -> Arc<Self> {
+        INIT.call_once(|| {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .unwrap();
+        });
+
         Arc::new(Client {
             config,
             inner_state: ThreadSafeState::new(),
@@ -241,15 +249,15 @@ impl Client {
         }
 
         let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
-
-        let mut cfg = quinn::ClientConfig::new(Arc::new(tls_client_cfg));
-        cfg.transport_config(Arc::new(transport_cfg));
+        let quic_client_cfg = Arc::new(QuicClientConfig::try_from(tls_client_cfg)?);
+        let mut quinn_client_cfg = quinn::ClientConfig::new(quic_client_cfg);
+        quinn_client_cfg.transport_config(Arc::new(transport_cfg));
 
         let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
         let local_addr: SocketAddr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
 
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
-        endpoint.set_default_client_config(cfg);
+        endpoint.set_default_client_config(quinn_client_cfg);
 
         self.post_tunnel_log(
             format!(
@@ -415,12 +423,36 @@ impl Client {
         Ok(())
     }
 
+    fn get_crypto_provider(self: &Arc<Self>, cipher: &SupportedCipherSuite) -> Arc<CryptoProvider> {
+        let default_provider = rustls::crypto::ring::default_provider();
+        let mut cipher_suites = vec![*cipher];
+        // Quinn assumes that the cipher suites contain this one
+        cipher_suites.push(cipher_suite::TLS13_AES_128_GCM_SHA256);
+        Arc::new(rustls::crypto::CryptoProvider {
+            cipher_suites,
+            ..default_provider
+        })
+    }
+
+    fn create_client_config_builder(
+        self: &Arc<Self>,
+        cipher: &SupportedCipherSuite,
+    ) -> std::result::Result<
+        rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+        rustls::Error,
+    > {
+        let cfg_builder =
+            rustls::ClientConfig::builder_with_provider(self.get_crypto_provider(cipher))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap();
+        Ok(cfg_builder)
+    }
+
     fn parse_client_config_and_domain(self: &Arc<Self>) -> Result<(rustls::ClientConfig, String)> {
+        self.post_tunnel_log(format!("will use cipher: {}", self.config.cipher).as_str());
         let cipher = *SelectedCipherSuite::from_str(&self.config.cipher).map_err(|_| {
             rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
         })?;
-
-        self.post_tunnel_log(format!("will use cipher: {}", self.config.cipher).as_str());
 
         if self.config.cert_path.is_empty() {
             if !Self::is_ip_addr(&self.config.server_addr) {
@@ -429,21 +461,21 @@ impl Client {
                     None => self.config.server_addr.to_string(),
                 };
 
-                let client_config = rustls::ClientConfig::builder()
-                    .with_cipher_suites(&[cipher])
-                    .with_safe_default_kx_groups()
-                    .with_safe_default_protocol_versions()?
+                let client_config = self
+                    .create_client_config_builder(&cipher)?
+                    .dangerous()
                     .with_custom_certificate_verifier(Arc::new(Verifier::new()))
                     .with_no_client_auth();
 
                 return Ok((client_config, domain));
             }
 
-            let client_config = rustls::ClientConfig::builder()
-                .with_cipher_suites(&[cipher])
-                .with_safe_default_kx_groups()
-                .with_safe_default_protocol_versions()?
-                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier::new()))
+            let client_config = self
+                .create_client_config_builder(&cipher)?
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier::new(
+                    self.get_crypto_provider(&cipher),
+                )))
                 .with_no_client_auth();
 
             warn!("No certificate is provided for verification, domain \"localhost\" is assumed");
@@ -452,7 +484,10 @@ impl Client {
 
         let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
             .context("failed to read from cert file")?;
-        let cert = certs.first().context("certificate is not in PEM format")?;
+        let cert = certs
+            .first()
+            .context("certificate is not in PEM format")?
+            .clone();
 
         let mut roots = RootCertStore::empty();
         roots.add(cert).context(format!(
@@ -460,10 +495,9 @@ impl Client {
             self.config.cert_path
         ))?;
 
-        let (_rem, cert) = X509Certificate::from_der(cert.as_ref()).context(format!(
-            "not a valid X509Certificate: {}",
-            self.config.cert_path
-        ))?;
+        let (_rem, cert) = X509Certificate::from_der(certs.first().unwrap().as_ref()).context(
+            format!("not a valid X509Certificate: {}", self.config.cert_path),
+        )?;
 
         let common_name = cert
             .subject()
@@ -476,10 +510,7 @@ impl Client {
             ))?;
 
         Ok((
-            rustls::ClientConfig::builder()
-                .with_cipher_suites(&[cipher])
-                .with_safe_default_kx_groups()
-                .with_safe_default_protocol_versions()?
+            self.create_client_config_builder(&cipher)?
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
             common_name.to_string(),
@@ -633,24 +664,58 @@ impl Client {
     }
 }
 
-struct InsecureCertVerifier {}
+#[derive(Debug)]
+struct InsecureCertVerifier(Arc<rustls::crypto::CryptoProvider>);
 
 impl InsecureCertVerifier {
-    pub fn new() -> Self {
-        InsecureCertVerifier {}
+    pub fn new(crypto: Arc<CryptoProvider>) -> Self {
+        Self(crypto)
     }
 }
 
-impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
+impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::prelude::v1::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::prelude::v1::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: SystemTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
         warn!("======================================= WARNING ======================================");
         warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
         warn!("Provide the self-signed certificate for verification or connect with a domain name");
