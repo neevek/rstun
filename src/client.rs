@@ -422,23 +422,23 @@ impl Client {
 
         self.post_tunnel_log(format!("will use cipher: {}", self.config.cipher).as_str());
 
-        if !Self::is_ip_addr(&self.config.server_addr) {
-            let domain = match self.config.server_addr.rfind(':') {
-                Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
-                None => self.config.server_addr.to_string(),
-            };
-
-            let client_config = rustls::ClientConfig::builder()
-                .with_cipher_suites(&[cipher])
-                .with_safe_default_kx_groups()
-                .with_safe_default_protocol_versions()?
-                .with_custom_certificate_verifier(Arc::new(Verifier::new()))
-                .with_no_client_auth();
-
-            return Ok((client_config, domain));
-        }
-
         if self.config.cert_path.is_empty() {
+            if !Self::is_ip_addr(&self.config.server_addr) {
+                let domain = match self.config.server_addr.rfind(':') {
+                    Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
+                    None => self.config.server_addr.to_string(),
+                };
+
+                let client_config = rustls::ClientConfig::builder()
+                    .with_cipher_suites(&[cipher])
+                    .with_safe_default_kx_groups()
+                    .with_safe_default_protocol_versions()?
+                    .with_custom_certificate_verifier(Arc::new(Verifier::new()))
+                    .with_no_client_auth();
+
+                return Ok((client_config, domain));
+            }
+
             let client_config = rustls::ClientConfig::builder()
                 .with_cipher_suites(&[cipher])
                 .with_safe_default_kx_groups()
