@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug rstunc",
+      "type": "codelldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/rstunc",
+      "args": [
+        "-mOUT", "-r127.0.0.1:9701", "-p1234", "-a0.0.0.0:9500^ANY", "-lD"
+      ],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"],
+      "stopOnEntry": false,
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Debug rstund",
+      "type": "codelldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/rstund",
+      "args": [
+        "-a127.0.0.1:9701", "-p1234", "-lD"
+      ],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"],
+      "stopOnEntry": false,
+      "console": "integratedTerminal"
+    }
+  ]
+}
