@@ -2,18 +2,15 @@ use crate::BUFFER_POOL;
 use anyhow::Result;
 use log::debug;
 use quinn::{RecvStream, SendStream};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-use tokio::time::error::Elapsed;
 
 pub struct Tunnel {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransferError {
-    Timeout,
     InternalError,
 }
 
@@ -94,9 +91,9 @@ impl Tunnel {
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
-        let len_read = tokio::time::timeout(Duration::from_secs(15), tcp_read.read(buffer))
+        let len_read = tcp_read
+            .read(buffer)
             .await
-            .map_err(|_: Elapsed| TransferError::Timeout)?
             .map_err(|_| TransferError::InternalError)?;
         if len_read > 0 {
             *transfer_bytes += len_read as u64;
@@ -146,4 +143,3 @@ impl Default for Tunnel {
         Self::new()
     }
 }
-
