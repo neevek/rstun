@@ -58,7 +58,16 @@ impl Tunnel {
                     &mut transfer_bytes,
                 )
                 .await;
-                if let Ok(0) | Err(_) = result {
+                // if let Ok(0) | Err(e) = result {
+                //     log::error!(">>>>>> haha quic to tcp: {e:?}");
+                //     break;
+                // }
+                if let Ok(0) = result {
+                    log::error!(">>>>>> haha quic to tcp1");
+                    break;
+                }
+                if let Err(e) = result {
+                    log::error!(">>>>>> haha quic to tcp2: {e:?}");
                     break;
                 }
             }
@@ -79,7 +88,15 @@ impl Tunnel {
                     &mut transfer_bytes,
                 )
                 .await;
-                if let Ok(0) | Err(_) = result {
+                // if let Ok(0) | Err(_) = result {
+                //     break;
+                // }
+                if let Ok(0) = result {
+                    log::warn!(">>>>>> haha tcp to quic1");
+                    break;
+                }
+                if let Err(e) = result {
+                    log::warn!(">>>>>> haha tcp to quic2: {e:?}");
                     break;
                 }
             }
@@ -94,9 +111,11 @@ impl Tunnel {
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
-        let len_read = tokio::time::timeout(Duration::from_secs(15), tcp_read.read(buffer))
+        // let len_read = tokio::time::timeout(Duration::from_secs(15), tcp_read.read(buffer))
+        let len_read = tcp_read
+            .read(buffer)
             .await
-            .map_err(|_: Elapsed| TransferError::Timeout)?
+            // .map_err(|_: Elapsed| TransferError::Timeout)?
             .map_err(|_| TransferError::InternalError)?;
         if len_read > 0 {
             *transfer_bytes += len_read as u64;
@@ -106,10 +125,10 @@ impl Tunnel {
                 .map_err(|_| TransferError::InternalError)?;
             Ok(len_read)
         } else {
-            quic_send
-                .finish()
-                .await
-                .map_err(|_| TransferError::InternalError)?;
+            // quic_send
+            //     .finish()
+            //     .await
+            //     .map_err(|_| TransferError::InternalError)?;
             Ok(0)
         }
     }
@@ -146,4 +165,3 @@ impl Default for Tunnel {
         Self::new()
     }
 }
-
