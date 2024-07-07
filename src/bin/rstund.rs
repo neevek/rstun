@@ -47,19 +47,22 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 
     let mut upstreams = Vec::<SocketAddr>::new();
 
-    for d in &mut args.upstreams {
-        if d.starts_with("0.0.0.0:") {
-            *d = d.replace("0.0.0.0:", "127.0.0.1:");
+    for mut u in &mut args.upstreams.split(',').map(|u| u.to_string()) {
+        if u.starts_with("0.0.0.0:") {
+            u = u.replace("0.0.0.0:", "127.0.0.1:");
         }
 
-        if !d.contains(':') {
-            *d = format!("127.0.0.1:{d}");
+        if !u.contains(':') {
+            u = format!("127.0.0.1:{u}");
         }
 
-        if let Ok(addr) = d.parse() {
-            upstreams.push(addr);
+        if let Ok(addr) = u.parse() {
+            if !upstreams.contains(&addr) {
+                info!("upstream: {addr}");
+                upstreams.push(addr);
+            }
         } else {
-            log_and_bail!("invalid upstreams address: {d}");
+            log_and_bail!("invalid upstreams address: {u}");
         }
     }
 
@@ -85,10 +88,11 @@ struct RstundArgs {
     #[arg(short = 'a', long, default_value_t = String::from(""))]
     addr: String,
 
-    /// Exposed upstreams as the receiving end of the tunnel, e.g. -d [ip:]port,
+    /// Exposed upstreams (comma separated) as the receiving end of the tunnel,
+    /// e.g. -u "[ip:]port,[ip:]port,[ip:]port",
     /// The entire local network is exposed through the tunnel if empty
     #[arg(short = 'u', long, required = false)]
-    upstreams: Vec<String>,
+    upstreams: String,
 
     /// Password of the tunnel server
     #[arg(short = 'p', long, required = true)]
