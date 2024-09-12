@@ -1,30 +1,55 @@
-use crate::BUFFER_POOL;
+use super::tcp_server::TcpMessage;
+use crate::{TcpServer, BUFFER_POOL};
 use anyhow::Result;
-use log::debug;
-use quinn::{RecvStream, SendStream};
+use log::{debug, error, info};
+use quinn::{Connection, RecvStream, SendStream};
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
-
-pub struct Tunnel {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransferError {
     InternalError,
 }
 
-impl Tunnel {
-    pub fn new() -> Self {
-        Tunnel {}
+pub struct TcpTunnel;
+
+impl TcpTunnel {
+    pub async fn start(
+        tunnel_out: bool,
+        conn: &Connection,
+        tcp_server: &mut TcpServer,
+        pending_stream: &mut Option<TcpStream>,
+    ) {
+        tcp_server.set_active(true);
+        loop {
+            let tcp_stream = match pending_stream.take() {
+                Some(tcp_stream) => tcp_stream,
+                None => match tcp_server.recv().await {
+                    Some(TcpMessage::Request(tcp_stream)) => tcp_stream,
+                    _ => break,
+                },
+            };
+
+            match conn.open_bi().await {
+                Ok(quic_stream) => TcpTunnel::run(tunnel_out, tcp_stream, quic_stream),
+                Err(e) => {
+                    error!("failed to open_bi, will retry: {e}");
+                    // self.post_tunnel_log(
+                    //     format!("connection failed, will reconnect: {e}").as_str(),
+                    // );
+                    *pending_stream = Some(tcp_stream);
+                    break;
+                }
+            }
+        }
+        // the tcp server will be reused when tunnel reconnects
+        tcp_server.set_active(false);
     }
 
-    pub fn start(
-        &self,
-        tunnel_out: bool,
-        tcp_stream: TcpStream,
-        quic_stream: (SendStream, RecvStream),
-    ) {
+    fn run(tunnel_out: bool, tcp_stream: TcpStream, quic_stream: (SendStream, RecvStream)) {
         let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
         let (mut quic_send, mut quic_recv) = quic_stream;
 
@@ -81,13 +106,13 @@ impl Tunnel {
                 }
             }
 
-            debug!("[{tag}] END   {index:<3} ←  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+            debug!("[{tag}] END  {index:<3} ←  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
         });
     }
 
     async fn tcp_to_quic(
         tcp_read: &mut OwnedReadHalf,
-        quic_send: &mut SendStream, //local_read: &mut OwnedReadHalf,
+        quic_send: &mut SendStream,
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
@@ -135,10 +160,32 @@ impl Tunnel {
             Ok(0)
         }
     }
-}
 
-impl Default for Tunnel {
-    fn default() -> Self {
-        Self::new()
+    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr) {
+        let remote_addr = &conn.remote_address();
+        info!("start tcp streaming, {remote_addr} ↔ {upstream_addr}");
+
+        loop {
+            match conn.accept_bi().await {
+                Err(quinn::ConnectionError::TimedOut { .. }) => {
+                    info!("connection timeout: {remote_addr}");
+                    break;
+                }
+                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                    debug!("connection closed: {remote_addr}");
+                    break;
+                }
+                Err(e) => {
+                    error!("failed to open accpet_bi: {remote_addr}, err: {e}");
+                    break;
+                }
+                Ok(quic_stream) => tokio::spawn(async move {
+                    match TcpStream::connect(&upstream_addr).await {
+                        Ok(tcp_stream) => Self::run(true, tcp_stream, quic_stream),
+                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
+                    }
+                }),
+            };
+        }
     }
 }

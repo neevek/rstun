@@ -1,6 +1,5 @@
-use std::sync::{Arc, Mutex};
-
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Default, Clone)]
 pub(crate) struct TunnelTraffic {
