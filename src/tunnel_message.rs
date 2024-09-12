@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use anyhow::Result;
 use anyhow::{bail, Context};
 use enum_as_inner::EnumAsInner;
@@ -7,6 +5,8 @@ use quinn::{RecvStream, SendStream};
 use rs_utilities::Utils;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
+
+use crate::Upstream;
 
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TunnelMessage {
@@ -21,7 +21,8 @@ pub enum TunnelMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
-    pub tcp_server_addr: Option<SocketAddr>,
+    pub tcp_upstream: Upstream,
+    pub udp_upstream: Upstream,
 }
 
 impl TunnelMessage {

@@ -45,9 +45,31 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         args.addr = format!("127.0.0.1:{}", args.addr);
     }
 
-    let mut upstreams = Vec::<SocketAddr>::new();
+    let config = ServerConfig {
+        addr: args.addr,
+        password: args.password,
+        cert_path: args.cert,
+        key_path: args.key,
+        tcp_upstreams: parse_upstreams("tcp", &args.tcp_upstreams)?,
+        udp_upstreams: parse_upstreams("udp", &args.udp_upstreams)?,
+        max_idle_timeout_ms: args.max_idle_timeout_ms,
+        dashboard_server: "".to_string(),
+        dashboard_server_credential: "".to_string(),
+    };
 
-    for mut u in &mut args.upstreams.split(',').map(|u| u.to_string()) {
+    let mut server = Server::new(config);
+    server.bind()?;
+    server.serve().await?;
+    Ok(())
+}
+
+fn parse_upstreams(upstream_type: &str, upstreams_str: &str) -> Result<Vec<SocketAddr>> {
+    if upstreams_str == "ANY" {
+        return Ok(vec![]);
+    }
+
+    let mut upstreams = Vec::<SocketAddr>::new();
+    for mut u in &mut upstreams_str.split(',').map(|u| u.to_string()) {
         if u.starts_with("0.0.0.0:") {
             u = u.replace("0.0.0.0:", "127.0.0.1:");
         }
@@ -58,26 +80,15 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 
         if let Ok(addr) = u.parse() {
             if !upstreams.contains(&addr) {
-                info!("upstream: {addr}");
+                info!("{upstream_type} upstream: {addr}");
                 upstreams.push(addr);
             }
         } else {
-            log_and_bail!("invalid upstreams address: {u}");
+            log_and_bail!("invalid {upstream_type} upstreams address: {u}");
         }
     }
 
-    let mut config = ServerConfig::default();
-    config.addr = args.addr;
-    config.password = args.password;
-    config.cert_path = args.cert;
-    config.key_path = args.key;
-    config.upstreams = upstreams;
-    config.max_idle_timeout_ms = args.max_idle_timeout_ms;
-
-    let mut server = Server::new(config);
-    server.bind()?;
-    server.serve().await?;
-    Ok(())
+    Ok(upstreams)
 }
 
 #[derive(Parser, Debug)]
@@ -85,14 +96,26 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 struct RstundArgs {
     /// Address ([ip:]port pair) to listen on, if empty, a random port will be chosen
     /// and binding to all network interfaces (0.0.0.0)
-    #[arg(short = 'a', long, default_value_t = String::from(""), verbatim_doc_comment)]
+    #[arg(
+        short = 'a',
+        long,
+        required = true,
+        default_value = "",
+        verbatim_doc_comment
+    )]
     addr: String,
 
-    /// Exposed upstreams (comma separated) as the receiving ends of the tunnel,
+    /// Exposed tcp upstreams (comma separated) as the receiving ends of the tunnel,
     /// e.g. -u "[ip:]port,[ip:]port,[ip:]port",
-    /// The entire local network is exposed through the tunnel if empty
-    #[arg(short = 'u', long, required = false, verbatim_doc_comment)]
-    upstreams: String,
+    /// Or the string "ANY" for exposing the entire internet through the tunnel
+    #[arg(long, required = false, default_value = "ANY", verbatim_doc_comment)]
+    tcp_upstreams: String,
+
+    /// Exposed tcp upstreams (comma separated) as the receiving ends of the tunnel,
+    /// e.g. -u "[ip:]port,[ip:]port,[ip:]port",
+    /// Or the string "ANY" for exposing the entire internet through the tunnel
+    #[arg(long, required = false, default_value = "ANY", verbatim_doc_comment)]
+    udp_upstreams: String,
 
     /// Password of the tunnel server
     #[arg(short = 'p', long, required = true)]
@@ -100,11 +123,11 @@ struct RstundArgs {
 
     /// Path to the certificate file, if empty, a self-signed certificate
     /// with the domain "localhost" will be used
-    #[arg(short = 'c', long, default_value_t = String::from(""), verbatim_doc_comment)]
+    #[arg(short = 'c', long, default_value = "", verbatim_doc_comment)]
     cert: String,
 
     /// Path to the key file, can be empty if no cert is provided
-    #[arg(short = 'k', long, default_value_t = String::from(""))]
+    #[arg(short = 'k', long, default_value = "")]
     key: String,
 
     /// Threads to run async tasks

@@ -1,6 +1,7 @@
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
 use clap::Parser;
+use log::error;
 use rstun::*;
 
 fn main() {
@@ -14,11 +15,15 @@ fn main() {
         &args.password,
         &args.cert,
         &args.cipher,
-        &args.addr_mapping,
+        &args.tcp_mapping,
+        &args.udp_mapping,
         args.threads,
         args.wait_before_retry_ms,
         args.max_idle_timeout_ms,
-    );
+    )
+    .map_err(|e| {
+        error!("{e}");
+    });
 
     if let Ok(config) = config {
         let client = Client::new(config);
@@ -32,7 +37,7 @@ fn main() {
             });
         }
 
-        client.start_tunnelling();
+        client.start_tunneling();
     }
 }
 
@@ -44,23 +49,31 @@ struct RstuncArgs {
     mode: String,
 
     /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
-    #[arg(short = 'r', long, display_order = 2)]
+    #[arg(short = 'r', long)]
     server_addr: String,
 
     /// Password to connect with rstund
-    #[arg(short = 'p', long, required = true, display_order = 3)]
+    #[arg(short = 'p', long, required = true)]
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
     /// `ANY^8000` for not explicitly specifying a port for the local tcp server (the client)
     /// `8000^ANY` for not explicitly specifying a port to bind on the server, the server
     ///            decides that port, so it depends on that the server is started with
-    ///            explicitly setting the `--upstreams` option.
-    #[arg(short = 'a', long, display_order = 4, verbatim_doc_comment)]
-    addr_mapping: String,
+    ///            explicitly setting the `--tcp-upstreams` option.
+    #[arg(long, verbatim_doc_comment, default_value = "")]
+    tcp_mapping: String,
+
+    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
+    /// `ANY^8000` for not explicitly specifying a port for the local udp server (the client)
+    /// `8000^ANY` for not explicitly specifying a port to bind on the server, the server
+    ///            decides that port, so it depends on that the server is started with
+    ///            explicitly setting the `--udp-upstreams` option.
+    #[arg(long, verbatim_doc_comment, default_value = "")]
+    udp_mapping: String,
 
     /// Path to the certificate file, only needed for self signed certificate
-    #[arg(short = 'c', long, default_value = "", display_order = 5)]
+    #[arg(short = 'c', long, default_value = "")]
     cert: String,
 
     /// Preferred cipher suite

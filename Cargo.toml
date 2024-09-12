@@ -1,6 +1,6 @@
 [package]
 name = "rstun"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 
 [lib]
@@ -32,6 +32,8 @@ byte-pool = { git = "https://github.com/neevek/byte-pool" }
 x509-parser = "0.16"
 lazy_static = "1.5"
 rustls-pemfile = "2.1"
+bytes = "1"
+backon = "1.2"
 
 [dev-dependencies]
 jni = "0.19"

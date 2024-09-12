@@ -1,9 +1,12 @@
-use crate::tcp::tcp_server::ChannelMessage;
+use crate::tcp::tcp_server::{TcpMessage, TcpSender};
+use crate::udp::udp_packet::UdpPacket;
+use crate::udp::udp_server::{UdpMessage, UdpServer};
 use crate::{
-    pem_util, ControlStream, ServerConfig, TcpServer, Tunnel, TunnelMessage, TunnelType,
-    SUPPORTED_CIPHER_SUITES,
+    pem_util, ControlStream, ServerConfig, TcpServer, Tunnel, TunnelInInfo, TunnelMessage,
+    TunnelOutInfo, TunnelType, Upstream, UpstreamType, SUPPORTED_CIPHER_SUITES,
 };
 use anyhow::{bail, Context, Result};
+use bytes::BytesMut;
 use log::{debug, error, info, warn};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{congestion, Endpoint, TransportConfig};
@@ -12,7 +15,7 @@ use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -20,6 +23,7 @@ use tokio::time::Duration;
 pub struct Server {
     config: ServerConfig,
     tcp_server_ports: Mutex<Vec<u16>>,
+    udp_server_ports: Mutex<Vec<u16>>,
     endpoint: Option<Endpoint>,
 }
 
@@ -28,6 +32,7 @@ impl Server {
         Arc::new(Server {
             config,
             tcp_server_ports: Mutex::new(Vec::new()),
+            udp_server_ports: Mutex::new(Vec::new()),
             endpoint: None,
         })
     }
@@ -112,11 +117,7 @@ impl Server {
     }
 
     pub async fn serve(self: &Arc<Self>) -> Result<()> {
-        let endpoint = self
-            .endpoint
-            .as_ref()
-            .context("make sure bind() call succeeded!")?;
-
+        let endpoint = self.endpoint.as_ref().context("failed")?;
         while let Some(client_conn) = endpoint.accept().await {
             let mut this = self.clone();
             tokio::spawn(async move {
@@ -124,29 +125,76 @@ impl Server {
                 let tun_type = this.authenticate_connection(client_conn).await?;
 
                 match tun_type {
-                    TunnelType::Out((client_conn, addr)) => {
-                        info!(
-                            "start tunnel streaming in TunnelOut mode, {} ↔ {addr}",
-                            client_conn.remote_address(),
-                        );
+                    TunnelType::Out(info) => {
+                        if let Some(addr) = info.udp_upstream_addr {
+                            let conn = info.conn.clone();
+                            if info.tcp_upstream_addr.is_some() {
+                                tokio::spawn(async move {
+                                    Self::process_udp_out(conn, addr).await;
+                                });
+                            } else {
+                                Self::process_udp_out(conn, addr).await;
+                            }
+                        }
 
-                        this.process_out_connection(client_conn, addr)
-                            .await
-                            .map_err(|e| error!("process_out_connection failed: {e}"))
-                            .ok();
+                        if let Some(addr) = info.tcp_upstream_addr {
+                            Self::process_tcp_out(info.conn.clone(), addr)
+                                .await
+                                .map_err(|e| error!("process_tcp_out failed: {e}"))
+                                .ok();
+                        }
                     }
 
-                    TunnelType::In((client_conn, tcp_server, ctrl_stream)) => {
-                        info!(
-                            "start tunnel streaming in IN mode, {} ↔ {}",
-                            tcp_server.addr(),
-                            client_conn.remote_address(),
-                        );
+                    TunnelType::In(info) => {
+                        let mut udp_server_addr = None;
+                        let mut tcp_server_addr = None;
 
-                        this.process_in_connection(client_conn, tcp_server, ctrl_stream)
-                            .await
-                            .map_err(|e| error!("process_in_connection failed: {e}"))
-                            .ok();
+                        if let Some(udp_server) = info.udp_server {
+                            let addr = udp_server.addr();
+                            this.udp_server_ports.lock().await.push(addr.port());
+                            udp_server_addr = Some(addr);
+
+                            let conn = info.conn.clone();
+                            match &info.tcp_server {
+                                Some(tcp_server) => {
+                                    let that = this.clone();
+                                    let tcp_sender = tcp_server.clone_tcp_sender();
+                                    tokio::spawn(async move {
+                                        that.process_udp_in(conn, udp_server, Some(tcp_sender))
+                                            .await
+                                            .ok();
+                                    });
+                                }
+                                None => {
+                                    this.process_udp_in(conn, udp_server, None).await.ok();
+                                }
+                            }
+                        }
+
+                        if let Some(tcp_server) = info.tcp_server {
+                            let addr = tcp_server.addr();
+                            this.tcp_server_ports.lock().await.push(addr.port());
+                            tcp_server_addr = Some(addr);
+
+                            this.process_tcp_in(info.conn.clone(), tcp_server, info.ctrl_stream)
+                                .await
+                                .map_err(|e| error!("process_in_connection failed: {e}"))
+                                .ok();
+                        }
+
+                        if let Some(addr) = udp_server_addr {
+                            let mut v = this.udp_server_ports.lock().await;
+                            if let Some(index) = v.iter().position(|x| *x == addr.port()) {
+                                v.remove(index);
+                            }
+                        }
+
+                        if let Some(addr) = tcp_server_addr {
+                            let mut v = this.tcp_server_ports.lock().await;
+                            if let Some(index) = v.iter().position(|x| *x == addr.port()) {
+                                v.remove(index);
+                            }
+                        }
                     }
                 }
 
@@ -161,12 +209,12 @@ impl Server {
 
     async fn authenticate_connection(
         self: &mut Arc<Self>,
-        client_conn: quinn::Connection,
+        conn: quinn::Connection,
     ) -> Result<TunnelType> {
-        let remote_addr = &client_conn.remote_address();
+        let remote_addr = &conn.remote_address();
 
         info!("received connection, authenticating... addr:{remote_addr}");
-        let (mut quic_send, mut quic_recv) = client_conn
+        let (mut quic_send, mut quic_recv) = conn
             .accept_bi()
             .await
             .context(format!("login request not received in time: {remote_addr}"))?;
@@ -179,43 +227,36 @@ impl Server {
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
 
-                let upstreams = &self.config.upstreams;
-                let tcp_server_addr = match login_info.tcp_server_addr {
-                    Some(tcp_server_addr) => tcp_server_addr,
-                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                };
+                let tcp_upstream_addr = self.obtain_upstream_addr(
+                    false,
+                    UpstreamType::Tcp,
+                    &login_info.tcp_upstream,
+                    &self.config.tcp_upstreams,
+                )?;
+                let udp_upstream_addr = self.obtain_upstream_addr(
+                    false,
+                    UpstreamType::Udp,
+                    &login_info.udp_upstream,
+                    &self.config.udp_upstreams,
+                )?;
 
-                let is_local = match tcp_server_addr.ip() {
-                    IpAddr::V4(ipv4) => {
-                        ipv4.is_private() || ipv4.is_loopback() || ipv4.is_unspecified()
-                    }
-                    IpAddr::V6(ipv6) => {
-                        ipv6.is_loopback() || ipv6.is_loopback() || ipv6.is_unspecified()
-                    }
-                };
-                if !is_local {
-                    log_and_bail!("only local IPs are allowed for upstream: {tcp_server_addr}");
+                if tcp_upstream_addr.is_none() && udp_upstream_addr.is_none() {
+                    TunnelMessage::send(
+                        &mut quic_send,
+                        &TunnelMessage::RespFailure(
+                            "both tcp and udp upstream address are none".to_string(),
+                        ),
+                    )
+                    .await?;
+                    log_and_bail!("both tcp and udp upstream address are none");
                 }
 
-                let upstream_addr = if tcp_server_addr.port() == 0 {
-                    if upstreams.is_empty() {
-                        log_and_bail!("explicit upstream address must be specified because there's no default set for the server");
-                    }
-                    let addr = upstreams.first().unwrap();
-                    info!(
-                        "will bind incoming TunnelIn request({}) to default address({addr})",
-                        client_conn.remote_address()
-                    );
-                    addr
-                } else {
-                    if !upstreams.is_empty() && !upstreams.contains(&tcp_server_addr) {
-                        log_and_bail!("upstream address not set: {tcp_server_addr}");
-                    }
-                    &tcp_server_addr
-                };
-
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::Out((client_conn, *upstream_addr));
+                tunnel_type = TunnelType::Out(TunnelOutInfo {
+                    conn,
+                    tcp_upstream_addr,
+                    udp_upstream_addr,
+                });
                 info!("sent response for OutLogin request: {remote_addr}");
             }
 
@@ -223,53 +264,110 @@ impl Server {
                 info!("received InLogin request: {remote_addr}");
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let tcp_server_addr = match login_info.tcp_server_addr {
-                    Some(tcp_server_addr) => tcp_server_addr,
-                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                };
-                if tcp_server_addr.port() == 0 {
-                    log_and_bail!(
-                        "explicit tcp_server_addr for TunnelIn mode tunelling is required: {tcp_server_addr:?}");
-                }
-                if !tcp_server_addr.ip().is_unspecified() && !tcp_server_addr.ip().is_loopback() {
-                    log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {tcp_server_addr:?}");
-                }
-                let upstream_addr = tcp_server_addr;
 
-                let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
-                if guarded_tcp_server_ports.contains(&upstream_addr.port()) {
+                let tcp_upstream_addr = self.obtain_upstream_addr(
+                    true,
+                    UpstreamType::Tcp,
+                    &login_info.tcp_upstream,
+                    &self.config.tcp_upstreams,
+                )?;
+                let udp_upstream_addr = self.obtain_upstream_addr(
+                    true,
+                    UpstreamType::Udp,
+                    &login_info.udp_upstream,
+                    &self.config.udp_upstreams,
+                )?;
+
+                if tcp_upstream_addr.is_none() && udp_upstream_addr.is_none() {
                     TunnelMessage::send(
                         &mut quic_send,
-                        &TunnelMessage::RespFailure("remote access port is in use".to_string()),
+                        &TunnelMessage::RespFailure(
+                            "both tcp and udp upstream address are none".to_string(),
+                        ),
                     )
                     .await?;
-                    log_and_bail!("remote access port is in use: {}", upstream_addr.port());
+                    log_and_bail!("both tcp and udp upstream address are none");
                 }
 
-                let tcp_server = match TcpServer::bind_and_start(upstream_addr).await {
-                    Ok(tcp_server) => tcp_server,
-                    Err(e) => {
-                        TunnelMessage::send(
-                            &mut quic_send,
-                            &TunnelMessage::RespFailure("access server failed to bind".to_string()),
-                        )
-                        .await?;
-                        log_and_bail!("access server failed to bind: {e}");
+                let tcp_server = match tcp_upstream_addr {
+                    Some(tcp_upstream_addr) => {
+                        let guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
+                        if guarded_tcp_server_ports.contains(&tcp_upstream_addr.port()) {
+                            TunnelMessage::send(
+                                &mut quic_send,
+                                &TunnelMessage::RespFailure(
+                                    "remote tcp port is in use".to_string(),
+                                ),
+                            )
+                            .await?;
+                            log_and_bail!("tcp port is in use: {}", tcp_upstream_addr.port());
+                        }
+
+                        match TcpServer::bind_and_start(tcp_upstream_addr).await {
+                            Ok(tcp_server) => Some(tcp_server),
+                            Err(e) => {
+                                TunnelMessage::send(
+                                    &mut quic_send,
+                                    &TunnelMessage::RespFailure(
+                                        "tcp server failed to bind".to_string(),
+                                    ),
+                                )
+                                .await?;
+                                log_and_bail!("remote tcp server failed to bind: {e}");
+                            }
+                        }
                     }
+                    _ => None,
+                };
+
+                let udp_server = match udp_upstream_addr {
+                    Some(udp_upstream_addr) => {
+                        let guarded_udp_server_ports = self.udp_server_ports.lock().await;
+                        if guarded_udp_server_ports.contains(&udp_upstream_addr.port()) {
+                            TunnelMessage::send(
+                                &mut quic_send,
+                                &TunnelMessage::RespFailure(
+                                    "remote udp port is in use".to_string(),
+                                ),
+                            )
+                            .await?;
+                            if let Some(mut tcp_server) = tcp_server {
+                                tcp_server.shutdown().await.ok();
+                            }
+                            log_and_bail!("udp port is in use: {}", udp_upstream_addr.port());
+                        }
+
+                        match UdpServer::bind_and_start(udp_upstream_addr).await {
+                            Ok(udp_server) => Some(udp_server),
+                            Err(e) => {
+                                TunnelMessage::send(
+                                    &mut quic_send,
+                                    &TunnelMessage::RespFailure(
+                                        "udp server failed to bind".to_string(),
+                                    ),
+                                )
+                                .await?;
+                                if let Some(mut tcp_server) = tcp_server {
+                                    tcp_server.shutdown().await.ok();
+                                }
+                                log_and_bail!("remote udp server failed to bind: {e}");
+                            }
+                        }
+                    }
+                    _ => None,
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::In((
-                    client_conn,
+
+                tunnel_type = TunnelType::In(TunnelInInfo {
+                    conn,
                     tcp_server,
-                    ControlStream {
+                    udp_server,
+                    ctrl_stream: ControlStream {
                         quic_send,
                         quic_recv,
                     },
-                ));
-
-                guarded_tcp_server_ports.push(upstream_addr.port());
+                });
 
                 info!("sent response for InLogin request: {remote_addr}");
             }
@@ -284,15 +382,122 @@ impl Server {
         Ok(tunnel_type)
     }
 
-    async fn process_out_connection(
-        self: &Arc<Self>,
-        client_conn: quinn::Connection,
-        upstream_addr: SocketAddr,
-    ) -> Result<()> {
+    fn obtain_upstream_addr(
+        &self,
+        is_tunnel_in: bool,
+        upstream_type: UpstreamType,
+        upstream: &Upstream,
+        configured_upstreams: &[SocketAddr],
+    ) -> Result<Option<SocketAddr>> {
+        Ok(match upstream {
+            Upstream::PeerDefault => {
+                if is_tunnel_in {
+                    log_and_bail!("explicit port is required to start TunnelIn mode tunneling");
+                }
+
+                if configured_upstreams.is_empty() {
+                    log_and_bail!(
+                        r#"explicit {upstream_type} upstream address must be specified when logging in
+                             because there's no default upstream specified for the server"#
+                    );
+                }
+                if configured_upstreams.len() > 1 {
+                    log_and_bail!(
+                        r#"explicit {upstream_type} upstream address must be specified because there are
+                            more than one upstreams specified for the server"#
+                    );
+                }
+
+                Some(*configured_upstreams.first().unwrap())
+            }
+
+            Upstream::ClientSpecified(addr) => {
+                if is_tunnel_in && !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
+                    log_and_bail!(
+                        r#"only loopback or unspecified IP is allowed for TunnelIn mode
+                         tunelling: {addr:?}, or simply specify a port without the IP part"#
+                    );
+                }
+
+                Some(*addr)
+            }
+
+            Upstream::NotSpecified => None,
+        })
+    }
+
+    async fn process_udp_out(client_conn: quinn::Connection, upstream_addr: SocketAddr) {
+        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let remote_addr = &client_conn.remote_address();
+        info!("start udp streaming in TunnelOut mode, {remote_addr} ↔ {upstream_addr}");
+
+        let mtu = client_conn.max_datagram_size().unwrap_or(1500);
+        loop {
+            match client_conn.read_datagram().await {
+                Ok(datagram) => {
+                    let packet = match UdpPacket::try_from(datagram) {
+                        Ok(packet) => packet,
+                        Err(e) => {
+                            warn!("invalid packet, err: {e:?}");
+                            continue;
+                        }
+                    };
+
+                    let sock = match UdpSocket::bind(local_addr).await {
+                        Ok(sock) => sock,
+                        Err(e) => {
+                            warn!("failed to bind to localhost, err: {e:?}");
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = sock.connect(upstream_addr).await {
+                        warn!("failed to connect to upstream: {upstream_addr}, err: {e:?}");
+                        continue;
+                    };
+
+                    let conn = client_conn.clone();
+                    tokio::spawn(async move {
+                        let len = packet.payload.len();
+                        let addr = &packet.addr;
+                        debug!("send datagram({len}), {addr} → {upstream_addr}");
+                        sock.send(&packet.payload).await.ok();
+
+                        let mut buf = BytesMut::zeroed(mtu);
+                        match tokio::time::timeout(Duration::from_secs(3), sock.recv(&mut buf))
+                            .await
+                        {
+                            Ok(Ok(len)) => {
+                                let buf = buf.split_to(len);
+                                let addr = &packet.addr;
+                                debug!("read datagram({len}), {addr} ← {upstream_addr}");
+                                conn.send_datagram(UdpPacket::new(buf.into(), packet.addr).into())
+                                    .unwrap();
+                            }
+                            Ok(Err(e)) => {
+                                warn!("failed to read udp socket, err: {e:?}");
+                            }
+                            Err(_) => {
+                                debug!("timeout on reading udp packet");
+                            }
+                        }
+                    });
+                }
+
+                Err(e) => {
+                    error!("failed to read_datagram, err: {e:?}");
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn process_tcp_out(conn: quinn::Connection, upstream_addr: SocketAddr) -> Result<()> {
+        let remote_addr = &conn.remote_address();
+        info!("start tcp streaming in TunnelOut mode, {remote_addr} ↔ {upstream_addr}");
 
         loop {
-            match client_conn.accept_bi().await {
+            match conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut { .. }) => {
                     info!("connection timeout: {remote_addr}");
                     return Ok(());
@@ -314,24 +519,94 @@ impl Server {
         }
     }
 
-    async fn process_in_connection(
+    async fn process_udp_in(
         self: &Arc<Self>,
-        client_conn: quinn::Connection,
+        conn: quinn::Connection,
+        mut udp_server: UdpServer,
+        tcp_sender: Option<TcpSender>,
+    ) -> Result<()> {
+        info!(
+            "start udp streaming in TunnelIn mode, {} ↔ {}",
+            udp_server.addr(),
+            conn.remote_address(),
+        );
+
+        let mut udp_server_clone = udp_server.clone();
+        let udp_sender = udp_server.clone_udp_sender();
+        let conn_clone = conn.clone();
+        let addr = udp_server.addr();
+
+        tokio::spawn(async move {
+            udp_server.set_active(true);
+            let mut udp_receiver = udp_server.take_receiver().unwrap();
+            while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
+                let len = packet.payload.len();
+                let addr = &packet.addr;
+                debug!("send datagram({len}) from {addr}",);
+                if let Err(e) = conn.send_datagram(packet.into()) {
+                    warn!("sending packet failed: {e:?}");
+                }
+            }
+
+            // on receiving UdpMessage::Quit, quit and put the receiver back
+            udp_server.set_active(false);
+            udp_server.put_receiver(udp_receiver);
+            info!("udp server quit");
+        });
+
+        loop {
+            match conn_clone.read_datagram().await {
+                Ok(datagram) => {
+                    if let Ok(packet) = UdpPacket::try_from(datagram) {
+                        let len = packet.payload.len();
+                        let addr = &packet.addr;
+                        debug!("send datagram({len}) to {addr}",);
+                        udp_sender.send(UdpMessage::Packet(packet)).await.ok();
+                    }
+                }
+                Err(e) => {
+                    if conn_clone.close_reason().is_some() {
+                        udp_server_clone.pause().await;
+                        if let Some(tcp_sender) = tcp_sender {
+                            tcp_sender.send(TcpMessage::Quit).await.ok();
+                        }
+                        debug!("connection is closed, will quit");
+                        break;
+                    }
+                    warn!("read_datagram failed: {e}");
+                }
+            }
+        }
+
+        info!("udp server quit: {addr}");
+
+        Ok(())
+    }
+
+    async fn process_tcp_in(
+        self: &Arc<Self>,
+        conn: quinn::Connection,
         mut tcp_server: TcpServer,
         mut ctrl_stream: ControlStream,
     ) -> Result<()> {
+        info!(
+            "start tcp streaming in TunnelIn mode, {} ↔ {}",
+            tcp_server.addr(),
+            conn.remote_address(),
+        );
+
         let tcp_sender = tcp_server.clone_tcp_sender();
         tokio::spawn(async move {
             TunnelMessage::recv(&mut ctrl_stream.quic_recv).await.ok();
-            // send None to the previous session to signify exit, so the current
+            // send Quit to the previous session to signify exit, so the current
             // session can start immediately, see below
-            tcp_sender.send(None).await.ok();
+            tcp_sender.send(TcpMessage::Quit).await.ok();
             Ok::<(), anyhow::Error>(())
         });
 
         tcp_server.set_active(true);
-        while let Some(ChannelMessage::Request(tcp_stream)) = tcp_server.recv().await {
-            match client_conn.open_bi().await {
+        while let Some(TcpMessage::Request(tcp_stream)) = tcp_server.recv().await {
+            match conn.open_bi().await {
                 Ok(quic_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
                 _ => {
                     log_and_bail!("failed to open bi_streams to client, quit");
@@ -340,17 +615,9 @@ impl Server {
         }
 
         let addr = tcp_server.addr();
-        let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
-        if let Some(index) = guarded_tcp_server_ports
-            .iter()
-            .position(|x| *x == addr.port())
-        {
-            guarded_tcp_server_ports.remove(index);
-        }
-
         tcp_server.shutdown().await.ok();
 
-        info!("access server quit: {addr}");
+        info!("tcp server quit: {addr}");
 
         Ok(())
     }
@@ -368,7 +635,7 @@ impl Server {
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
             let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
             let cert = CertificateDer::from(cert.cert);
-            (vec![CertificateDer::from(cert)], PrivateKeyDer::Pkcs8(key))
+            (vec![cert], PrivateKeyDer::Pkcs8(key))
         } else {
             let certs = pem_util::load_certificates_from_pem(cert_path)
                 .context(format!("failed to read cert file: {cert_path}"))?;
