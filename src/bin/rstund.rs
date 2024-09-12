@@ -13,17 +13,17 @@ fn main() {
     let log_filter = format!("rstun={},rs_utilities={}", args.loglevel, args.loglevel);
     rs_utilities::LogHelper::init_logger("rstund", log_filter.as_str());
 
-    let worker_threads = if args.threads > 0 {
-        args.threads
+    let workers = if args.workers > 0 {
+        args.workers
     } else {
         num_cpus::get()
     };
 
-    info!("will use {} worker threads", worker_threads);
+    info!("will use {} workers", workers);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(worker_threads)
+        .worker_threads(workers)
         .build()
         .unwrap()
         .block_on(async {
@@ -45,34 +45,17 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         args.addr = format!("127.0.0.1:{}", args.addr);
     }
 
-    let mut upstreams = Vec::<SocketAddr>::new();
-
-    for mut u in &mut args.upstreams.split(',').map(|u| u.to_string()) {
-        if u.starts_with("0.0.0.0:") {
-            u = u.replace("0.0.0.0:", "127.0.0.1:");
-        }
-
-        if !u.contains(':') {
-            u = format!("127.0.0.1:{u}");
-        }
-
-        if let Ok(addr) = u.parse() {
-            if !upstreams.contains(&addr) {
-                info!("upstream: {addr}");
-                upstreams.push(addr);
-            }
-        } else {
-            log_and_bail!("invalid upstreams address: {u}");
-        }
-    }
-
-    let mut config = ServerConfig::default();
-    config.addr = args.addr;
-    config.password = args.password;
-    config.cert_path = args.cert;
-    config.key_path = args.key;
-    config.upstreams = upstreams;
-    config.max_idle_timeout_ms = args.max_idle_timeout_ms;
+    let config = ServerConfig {
+        addr: args.addr,
+        password: args.password,
+        cert_path: args.cert,
+        key_path: args.key,
+        default_tcp_upstream: parse_upstreams("tcp", &args.tcp_upstream)?,
+        default_udp_upstream: parse_upstreams("udp", &args.udp_upstream)?,
+        max_idle_timeout_ms: args.max_idle_timeout_ms,
+        dashboard_server: "".to_string(),
+        dashboard_server_credential: "".to_string(),
+    };
 
     let mut server = Server::new(config);
     server.bind()?;
@@ -80,19 +63,59 @@ async fn run(mut args: RstundArgs) -> Result<()> {
     Ok(())
 }
 
+fn parse_upstreams(upstream_type: &str, upstreams_str: &str) -> Result<Option<SocketAddr>> {
+    if upstreams_str.is_empty() {
+        return Ok(None);
+    }
+
+    let mut upstream = upstreams_str.to_string();
+    if upstream.starts_with("0.0.0.0:") {
+        upstream = upstream.replace("0.0.0.0:", "127.0.0.1:");
+    }
+
+    if !upstream.contains(':') {
+        upstream = format!("127.0.0.1:{upstreams_str}");
+    }
+
+    if let Ok(addr) = upstream.parse() {
+        Ok(Some(addr))
+    } else {
+        log_and_bail!("invalid {upstream_type} upstream address: {upstreams_str}");
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstundArgs {
-    /// Address ([ip:]port pair) to listen on, if empty, a random port will be chosen
-    /// and binding to all network interfaces (0.0.0.0)
-    #[arg(short = 'a', long, default_value_t = String::from(""), verbatim_doc_comment)]
+    /// Address ([ip:]port pair) to listen on
+    #[arg(
+        short = 'a',
+        long,
+        required = true,
+        default_value = "",
+        verbatim_doc_comment
+    )]
     addr: String,
 
-    /// Exposed upstreams (comma separated) as the receiving ends of the tunnel,
-    /// e.g. -u "[ip:]port,[ip:]port,[ip:]port",
-    /// The entire local network is exposed through the tunnel if empty
-    #[arg(short = 'u', long, required = false, verbatim_doc_comment)]
-    upstreams: String,
+    /// The default TCP upstream for TunnelOut connections, format: [ip:]port
+    #[arg(
+        short = 't',
+        long,
+        required = false,
+        default_value = "",
+        verbatim_doc_comment
+    )]
+    tcp_upstream: String,
+
+    /// The default UDP upstream for TunnelOut connections, format: [ip:]port
+    #[arg(
+        short = 'u',
+        long,
+        required = false,
+        default_value = "",
+        verbatim_doc_comment
+    )]
+    udp_upstream: String,
 
     /// Password of the tunnel server
     #[arg(short = 'p', long, required = true)]
@@ -100,19 +123,19 @@ struct RstundArgs {
 
     /// Path to the certificate file, if empty, a self-signed certificate
     /// with the domain "localhost" will be used
-    #[arg(short = 'c', long, default_value_t = String::from(""), verbatim_doc_comment)]
+    #[arg(short = 'c', long, default_value = "", verbatim_doc_comment)]
     cert: String,
 
     /// Path to the key file, can be empty if no cert is provided
-    #[arg(short = 'k', long, default_value_t = String::from(""))]
+    #[arg(short = 'k', long, default_value = "")]
     key: String,
 
     /// Threads to run async tasks
-    #[arg(short = 't', long, default_value_t = 0)]
-    threads: usize,
+    #[arg(short = 'w', long, default_value_t = 0)]
+    workers: usize,
 
     /// Max idle timeout milliseconds for the connection
-    #[arg(short = 'w', long, default_value_t = 40000)]
+    #[arg(short = 'i', long, default_value_t = 40000)]
     max_idle_timeout_ms: u64,
 
     #[arg(short = 'l', long, default_value_t = String::from("I"),

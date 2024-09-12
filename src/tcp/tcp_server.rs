@@ -7,29 +7,26 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::error::SendTimeoutError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-pub enum ChannelMessage {
+pub enum TcpMessage {
     Request(TcpStream),
-    Stop,
+    Quit,
 }
+
+pub type TcpSender = Sender<TcpMessage>;
+pub type TcpReceiver = Receiver<TcpMessage>;
 
 #[derive(Debug)]
 pub struct TcpServer {
     addr: SocketAddr,
-    tcp_sender: Sender<Option<ChannelMessage>>,
-    tcp_receiver: Option<Receiver<Option<ChannelMessage>>>,
+    tcp_sender: TcpSender,
+    tcp_receiver: Option<TcpReceiver>,
     active: Arc<Mutex<bool>>,
 }
 
 impl TcpServer {
     pub async fn bind_and_start(addr: SocketAddr) -> Result<Self> {
-        info!("starting tcp server, addr: {addr}");
-        let tcp_listener = TcpListener::bind(addr).await.map_err(|e| {
-            error!("failed to bind tunnel access server on address: {addr}, error: {e}");
-            e
-        })?;
-
+        let tcp_listener = TcpListener::bind(addr).await?;
         let addr = tcp_listener.local_addr().unwrap();
-        info!("bound tcp server on address: {addr}");
 
         let (tcp_sender, tcp_receiver) = channel(4);
         let tcp_sender_clone = tcp_sender.clone();
@@ -50,10 +47,7 @@ impl TcpServer {
                         }
 
                         match tcp_sender
-                            .send_timeout(
-                                Some(ChannelMessage::Request(socket)),
-                                Duration::from_millis(3000),
-                            )
+                            .send_timeout(TcpMessage::Request(socket), Duration::from_millis(3000))
                             .await
                         {
                             Ok(_) => {
@@ -63,17 +57,18 @@ impl TcpServer {
                                 debug!("timedout sending the request, drop the socket");
                             }
                             Err(e) => {
-                                info!("channel is closed, will quit access server, err:{e}");
+                                info!("channel is closed, will quit tcp server, err: {e}");
                                 break;
                             }
                         }
                     }
 
                     Err(e) => {
-                        error!("access server failed, err: {e}");
+                        error!("tcp server failed, err: {e}");
                     }
                 }
             }
+            info!("tcp server quit: {addr}");
         });
 
         Ok(Self {
@@ -102,11 +97,11 @@ impl TcpServer {
         self.addr
     }
 
-    pub async fn recv(&mut self) -> Option<ChannelMessage> {
-        self.tcp_receiver.as_mut().unwrap().recv().await?
+    pub async fn recv(&mut self) -> Option<TcpMessage> {
+        self.tcp_receiver.as_mut().unwrap().recv().await
     }
 
-    pub fn clone_tcp_sender(&self) -> Sender<Option<ChannelMessage>> {
+    pub fn clone_tcp_sender(&self) -> Sender<TcpMessage> {
         self.tcp_sender.clone()
     }
 

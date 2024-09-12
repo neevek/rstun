@@ -1,6 +1,7 @@
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
 use clap::Parser;
+use log::error;
 use rstun::*;
 
 fn main() {
@@ -14,14 +15,18 @@ fn main() {
         &args.password,
         &args.cert,
         &args.cipher,
-        &args.addr_mapping,
-        args.threads,
+        &args.tcp_mapping,
+        &args.udp_mapping,
+        args.workers,
         args.wait_before_retry_ms,
         args.max_idle_timeout_ms,
-    );
+    )
+    .map_err(|e| {
+        error!("{e}");
+    });
 
     if let Ok(config) = config {
-        let client = Client::new(config);
+        let mut client = Client::new(config);
 
         #[cfg(target_os = "android")]
         {
@@ -32,7 +37,7 @@ fn main() {
             });
         }
 
-        client.start_tunnelling();
+        client.start_tunneling();
     }
 }
 
@@ -44,23 +49,29 @@ struct RstuncArgs {
     mode: String,
 
     /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
-    #[arg(short = 'r', long, display_order = 2)]
+    #[arg(short = 'a', long)]
     server_addr: String,
 
     /// Password to connect with rstund
-    #[arg(short = 'p', long, required = true, display_order = 3)]
+    #[arg(short = 'p', long, required = true)]
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `ANY^8000` for not explicitly specifying a port for the local tcp server (the client)
-    /// `8000^ANY` for not explicitly specifying a port to bind on the server, the server
+    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
     ///            decides that port, so it depends on that the server is started with
-    ///            explicitly setting the `--upstreams` option.
-    #[arg(short = 'a', long, display_order = 4, verbatim_doc_comment)]
-    addr_mapping: String,
+    ///            explicitly setting the `--tcp-upstream` option.
+    #[arg(short = 't', long, verbatim_doc_comment, default_value = "")]
+    tcp_mapping: String,
+
+    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
+    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
+    ///            decides that port, so it depends on that the server is started with
+    ///            explicitly setting the `--udp-upstream` option.
+    #[arg(short = 'u', long, verbatim_doc_comment, default_value = "")]
+    udp_mapping: String,
 
     /// Path to the certificate file, only needed for self signed certificate
-    #[arg(short = 'c', long, default_value = "", display_order = 5)]
+    #[arg(short = 'c', long, default_value = "")]
     cert: String,
 
     /// Preferred cipher suite
@@ -68,12 +79,12 @@ struct RstuncArgs {
         value_parser = PossibleValuesParser::new(SUPPORTED_CIPHER_SUITE_STRS).map(|v| v.to_string()))]
     cipher: String,
 
-    /// Threads to run async tasks
-    #[arg(short = 't', long, default_value_t = 0)]
-    threads: usize,
+    /// Workers to run async tasks
+    #[arg(short = 'w', long, default_value_t = 0)]
+    workers: usize,
 
     /// Wait time in milliseconds before trying
-    #[arg(short = 'w', long, default_value_t = 5000)]
+    #[arg(short = 'r', long, default_value_t = 5000)]
     wait_before_retry_ms: u64,
 
     /// Max idle timeout in milliseconds for the connection

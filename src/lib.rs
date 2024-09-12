@@ -2,37 +2,42 @@ mod client;
 mod pem_util;
 mod server;
 mod tcp;
-mod tunnel;
 mod tunnel_info_bridge;
 mod tunnel_message;
+mod udp;
 
 use anyhow::{bail, Context, Result};
+use byte_pool::Block;
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
 use lazy_static::lazy_static;
 use log::error;
-use quinn::{RecvStream, SendStream};
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
+use serde::Deserialize;
+use serde::Serialize;
 pub use server::Server;
+use std::fmt::Display;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
-pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
+use udp::udp_server::UdpServer;
 
 extern crate bincode;
 extern crate pretty_env_logger;
 
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
+pub const UDP_PACKET_SIZE: usize = 1500;
 
 lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
+type PooledBuffer = Block<'static, Vec<u8>>;
 
 pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[
     "chacha20-poly1305",
@@ -97,33 +102,75 @@ impl Deref for SelectedCipherSuite {
     }
 }
 
-#[derive(Debug)]
-pub enum TunnelType {
-    Out((quinn::Connection, SocketAddr)),
-    In((quinn::Connection, TcpServer, ControlStream)),
+pub enum UpstreamType {
+    Tcp,
+    Udp,
+}
+
+impl Display for UpstreamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp => write!(f, "tcp"),
+            Self::Udp => write!(f, "udp"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum Upstream {
+    PeerDefault,
+    ClientSpecified(SocketAddr),
 }
 
 #[derive(Debug)]
-pub struct ControlStream {
-    pub quic_send: SendStream,
-    pub quic_recv: RecvStream,
+pub struct TcpTunnelOutInfo {
+    conn: quinn::Connection,
+    upstream_addr: SocketAddr,
+}
+
+#[derive(Debug)]
+pub struct TcpTunnelInInfo {
+    conn: quinn::Connection,
+    tcp_server: TcpServer,
+}
+
+#[derive(Debug)]
+pub struct UdpTunnelOutInfo {
+    conn: quinn::Connection,
+    upstream_addr: SocketAddr,
+}
+
+#[derive(Debug)]
+pub struct UdpTunnelInInfo {
+    conn: quinn::Connection,
+    udp_server: UdpServer,
+}
+
+#[derive(Debug)]
+pub enum TunnelType {
+    TcpOut(TcpTunnelOutInfo),
+    TcpIn(TcpTunnelInInfo),
+    UdpOut(UdpTunnelOutInfo),
+    UdpIn(UdpTunnelInInfo),
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ClientConfig {
     pub local_tcp_server_addr: Option<SocketAddr>,
+    pub local_udp_server_addr: Option<SocketAddr>,
     pub cert_path: String,
     pub cipher: String,
     pub server_addr: String,
-    pub connect_max_retry: usize,
+    pub password: String,
     pub wait_before_retry_ms: u64,
     pub max_idle_timeout_ms: u64,
-    pub login_msg: Option<TunnelMessage>,
+    pub tcp_upstream: Option<Upstream>,
+    pub udp_upstream: Option<Upstream>,
     pub threads: usize,
     pub mode: &'static str,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub addr: String,
     pub password: String,
@@ -131,10 +178,9 @@ pub struct ServerConfig {
     pub key_path: String,
     pub max_idle_timeout_ms: u64,
 
-    /// traffics to the rstun server will be relayed to servers
-    /// specified by upstreams, client must specify a target
-    /// upstream when it connects to the rstun server in OUT mode.
-    pub upstreams: Vec<SocketAddr>,
+    /// for TunnelOut only
+    pub default_tcp_upstream: Option<SocketAddr>,
+    pub default_udp_upstream: Option<SocketAddr>,
 
     /// 0.0.0.0:3515
     pub dashboard_server: String,
@@ -149,71 +195,107 @@ impl ClientConfig {
         password: &str,
         cert: &str,
         cipher: &str,
-        addr_mapping: &str,
-        threads: usize,
+        tcp_addr_mapping: &str,
+        udp_addr_mapping: &str,
+        workers: usize,
         wait_before_retry_ms: u64,
         max_idle_timeout_ms: u64,
     ) -> Result<ClientConfig> {
+        if tcp_addr_mapping.is_empty() && udp_addr_mapping.is_empty() {
+            log_and_bail!("must specify either --tcp-mapping or --udp-mapping, or both");
+        }
+
+        let tcp_sock_mapping = parse_addr_mapping(UpstreamType::Tcp, tcp_addr_mapping)?;
+        let udp_sock_mapping = parse_addr_mapping(UpstreamType::Udp, udp_addr_mapping)?;
+
         let mut config = ClientConfig::default();
-        let addr_mapping_str = addr_mapping;
-        let addr_mapping: Vec<&str> = addr_mapping_str.split('^').collect();
-        if addr_mapping.len() != 2 {
-            log_and_bail!("invalid address mapping: {addr_mapping_str}");
-        }
-
-        let mut addr_mapping: Vec<String> =
-            addr_mapping.iter().map(|addr| addr.to_string()).collect();
-        let mut sock_addr_mapping: Vec<Option<SocketAddr>> = Vec::with_capacity(addr_mapping.len());
-
-        for addr in &mut addr_mapping {
-            if addr == "ANY" {
-                sock_addr_mapping.push(None);
-            } else {
-                if !addr.contains(':') {
-                    *addr = format!("127.0.0.1:{addr}");
-                }
-                sock_addr_mapping
-                    .push(Some(addr.parse::<SocketAddr>().context(format!(
-                        "invalid address mapping:[{addr_mapping_str}]"
-                    ))?));
-            }
-        }
-
         config.cert_path = cert.to_string();
         config.cipher = cipher.to_string();
         config.server_addr = server_addr.to_string();
-        config.threads = if threads > 0 {
-            threads
+        config.password = password.to_string();
+        config.threads = if workers > 0 {
+            workers
         } else {
             num_cpus::get()
         };
         config.wait_before_retry_ms = wait_before_retry_ms;
         config.max_idle_timeout_ms = max_idle_timeout_ms;
+        config.tcp_upstream = parse_as_upstream(mode, &tcp_sock_mapping)?;
+        config.udp_upstream = parse_as_upstream(mode, &udp_sock_mapping)?;
         config.mode = if mode == TUNNEL_MODE_IN {
+            config.local_tcp_server_addr = *tcp_sock_mapping.get(1).unwrap_or(&None);
+            config.local_udp_server_addr = *udp_sock_mapping.get(1).unwrap_or(&None);
+
             TUNNEL_MODE_IN
         } else {
-            TUNNEL_MODE_OUT
-        };
+            config.local_tcp_server_addr = *tcp_sock_mapping.first().unwrap_or(&None);
+            config.local_udp_server_addr = *udp_sock_mapping.first().unwrap_or(&None);
 
-        config.login_msg = if mode == TUNNEL_MODE_IN {
-            config.local_tcp_server_addr = sock_addr_mapping[1];
-            Some(TunnelMessage::ReqInLogin(LoginInfo {
-                password: password.to_string(),
-                tcp_server_addr: sock_addr_mapping[0],
-            }))
-        } else {
-            if sock_addr_mapping[0].is_none() {
-                log_and_bail!("'ANY' is not allowed as local access server for OUT tunneling");
-            }
-            config.local_tcp_server_addr = sock_addr_mapping[0];
-            Some(TunnelMessage::ReqOutLogin(LoginInfo {
-                password: password.to_string(),
-                tcp_server_addr: sock_addr_mapping[1],
-            }))
+            TUNNEL_MODE_OUT
         };
 
         Ok(config)
     }
+}
+
+fn parse_as_upstream(mode: &str, sock_mapping: &[Option<SocketAddr>]) -> Result<Option<Upstream>> {
+    if sock_mapping.is_empty() {
+        Ok(None)
+    } else {
+        if sock_mapping[0].is_none() {
+            bail!("'ANY' is not allowed as local server");
+        }
+
+        let upstream_addr = if mode == TUNNEL_MODE_OUT {
+            sock_mapping[1]
+        } else {
+            if sock_mapping[1].is_none() {
+                bail!("'ANY' is not allowed as remote server for IN mode tunneling");
+            }
+            sock_mapping[0]
+        };
+
+        Ok(match upstream_addr {
+            None => Some(Upstream::PeerDefault),
+            Some(addr) => Some(Upstream::ClientSpecified(addr)),
+        })
+    }
+}
+
+fn parse_addr_mapping(
+    upstream_type: UpstreamType,
+    mapping: &str,
+) -> Result<Vec<Option<SocketAddr>>> {
+    if mapping.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let addr_mapping: Vec<&str> = mapping.split('^').collect();
+    if addr_mapping.len() != 2 {
+        log_and_bail!("invalid {upstream_type} address mapping: {mapping}");
+    }
+
+    let mut sock_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(addr_mapping.len());
+    for addr in &addr_mapping {
+        if *addr == "ANY" {
+            sock_addrs.push(None);
+        } else {
+            match addr.parse::<SocketAddr>() {
+                Ok(sock_addr) => {
+                    sock_addrs.push(Some(sock_addr));
+                }
+                Err(_) => {
+                    // assumes addr is a port
+                    let addr = format!("127.0.0.1:{addr}");
+                    sock_addrs.push(Some(
+                        addr.parse::<SocketAddr>()
+                            .context(format!("invalid address mapping: [{mapping}]"))?,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(sock_addrs)
 }
 
 pub fn socket_addr_with_unspecified_ip_port(ipv6: bool) -> SocketAddr {
@@ -237,7 +319,7 @@ pub mod android {
     use self::jni::{JNIEnv, JavaVM};
     use super::*;
     use std::os::raw::c_void;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     #[no_mangle]
@@ -286,7 +368,8 @@ pub mod android {
         _: JClass,
         jmode: JString,
         jserverAddr: JString,
-        jaddrMapping: JString,
+        jtcpMapping: JString,
+        judpMapping: JString,
         jpassword: JString,
         jcertFilePath: JString,
         jcipher: JString,
@@ -296,7 +379,8 @@ pub mod android {
     ) -> jlong {
         let mode = convert_jstring(&mut env, jmode);
         let server_addr = convert_jstring(&mut env, jserverAddr);
-        let addr_mapping = convert_jstring(&mut env, jaddrMapping);
+        let tcp_mapping = convert_jstring(&mut env, jtcpMapping);
+        let udp_mapping = convert_jstring(&mut env, judpMapping);
         let password = convert_jstring(&mut env, jpassword);
         let cert_file_path = convert_jstring(&mut env, jcertFilePath);
         let cipher = convert_jstring(&mut env, jcipher);
@@ -307,14 +391,17 @@ pub mod android {
             &password,
             &cert_file_path,
             &cipher,
-            &addr_mapping,
+            &tcp_mapping,
+            &udp_mapping,
             jthreads as usize,
             jwaitBeforeRetryMs as u64,
             jmaxIdleTimeoutMs as u64,
         );
 
         match config {
-            Ok(config) => Box::into_raw(Box::new(Arc::new(Client::new(config)))) as jlong,
+            Ok(config) => {
+                Box::into_raw(Box::new(Arc::new(Mutex::new(Client::new(config))))) as jlong
+            }
             Err(e) => {
                 error!("failed create ClientConfig: {}", e);
                 0
@@ -344,8 +431,10 @@ pub mod android {
         }
 
         thread::spawn(move || {
-            let client = &mut *(client_ptr as *mut Arc<Client>);
-            client.start_tunnelling();
+            let mut client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+                .lock()
+                .unwrap();
+            client.start_tunneling();
         });
     }
 
@@ -359,7 +448,9 @@ pub mod android {
             return env.new_string("").unwrap().into_inner();
         }
 
-        let client = &mut *(client_ptr as *mut Arc<Client>);
+        let client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+            .lock()
+            .unwrap();
         env.new_string(client.get_state().to_string())
             .unwrap()
             .into_inner()
@@ -376,7 +467,9 @@ pub mod android {
             return;
         }
 
-        let client = &mut *(client_ptr as *mut Arc<Client>);
+        let client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+            .lock()
+            .unwrap();
         let bool_enable = enable == 1;
         if bool_enable && !client.has_on_info_listener() {
             let jvm = env.get_java_vm().unwrap();

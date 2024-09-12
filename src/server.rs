@@ -1,45 +1,80 @@
-use crate::tcp::tcp_server::ChannelMessage;
+use crate::tcp::tcp_server::{TcpMessage, TcpSender};
+use crate::tcp::tcp_tunnel::TcpTunnel;
+use crate::udp::udp_server::{UdpMessage, UdpSender};
+use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
-    pem_util, ControlStream, ServerConfig, TcpServer, Tunnel, TunnelMessage, TunnelType,
-    SUPPORTED_CIPHER_SUITES,
+    pem_util, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, TunnelMessage,
+    TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, Upstream, UpstreamType, SUPPORTED_CIPHER_SUITES,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{congestion, Endpoint, TransportConfig};
+use quinn::{congestion, Connection, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
+
+#[derive(Debug, Clone)]
+struct ConnectedTcpInSession {
+    conn: Connection,
+    sender: TcpSender,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectedUdpInSession {
+    conn: Connection,
+    sender: UdpSender,
+}
+
+#[derive(Debug)]
+struct State {
+    config: ServerConfig,
+    endpoint: Option<Endpoint>,
+    tcp_sessions: Vec<ConnectedTcpInSession>,
+    udp_sessions: Vec<ConnectedUdpInSession>,
+}
+
+impl State {
+    pub fn new(config: ServerConfig) -> Self {
+        State {
+            config,
+            endpoint: None,
+            tcp_sessions: Vec::new(),
+            udp_sessions: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Server {
-    config: ServerConfig,
-    tcp_server_ports: Mutex<Vec<u16>>,
-    endpoint: Option<Endpoint>,
+    inner_state: Arc<Mutex<State>>,
+}
+
+macro_rules! inner_state {
+    ($self:ident, $field:ident) => {
+        (*$self.inner_state.lock().unwrap()).$field
+    };
 }
 
 impl Server {
-    pub fn new(config: ServerConfig) -> Arc<Self> {
-        Arc::new(Server {
-            config,
-            tcp_server_ports: Mutex::new(Vec::new()),
-            endpoint: None,
-        })
+    pub fn new(config: ServerConfig) -> Self {
+        Server {
+            inner_state: Arc::new(Mutex::new(State::new(config))),
+        }
     }
 
-    pub fn bind(self: &mut Arc<Self>) -> Result<SocketAddr> {
-        let config = &self.config;
+    pub fn bind(&mut self) -> Result<SocketAddr> {
+        let mut state = self.inner_state.lock().unwrap();
+        let config = state.config.clone();
         let addr: SocketAddr = config
             .addr
             .parse()
             .context(format!("invalid address: {}", config.addr))?;
 
-        let quinn_server_cfg = Self::load_quinn_server_config(&self.config)?;
+        let quinn_server_cfg = Self::load_quinn_server_config(&config)?;
         let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).map_err(|e| {
             error!("failed to bind tunnel server on address: {addr}, err: {e}");
             e
@@ -52,7 +87,6 @@ impl Server {
         );
 
         let ep = endpoint.clone();
-        let config = self.config.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(3600 * 24)).await;
@@ -68,8 +102,7 @@ impl Server {
             }
         });
 
-        Arc::get_mut(self).unwrap().endpoint = Some(endpoint);
-
+        state.endpoint = Some(endpoint);
         Ok(addr)
     }
 
@@ -111,41 +144,59 @@ impl Server {
         Ok(quinn_server_cfg)
     }
 
-    pub async fn serve(self: &Arc<Self>) -> Result<()> {
-        let endpoint = self
-            .endpoint
-            .as_ref()
-            .context("make sure bind() call succeeded!")?;
+    pub async fn serve(self) -> Result<()> {
+        let state = self.inner_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                Self::clear_expired_sessions(state.clone());
+            }
+        });
 
+        let endpoint = inner_state!(self, endpoint).take().context("failed")?;
         while let Some(client_conn) = endpoint.accept().await {
-            let mut this = self.clone();
+            let state = self.inner_state.clone();
+            let config = inner_state!(self, config).clone();
             tokio::spawn(async move {
                 let client_conn = client_conn.await?;
-                let tun_type = this.authenticate_connection(client_conn).await?;
+                let tun_type = Self::authenticate_connection(&config, client_conn).await?;
 
                 match tun_type {
-                    TunnelType::Out((client_conn, addr)) => {
-                        info!(
-                            "start tunnel streaming in TunnelOut mode, {} ↔ {addr}",
-                            client_conn.remote_address(),
-                        );
-
-                        this.process_out_connection(client_conn, addr)
-                            .await
-                            .map_err(|e| error!("process_out_connection failed: {e}"))
-                            .ok();
+                    TunnelType::TcpOut(info) => {
+                        TcpTunnel::process(info.conn, info.upstream_addr).await;
                     }
 
-                    TunnelType::In((client_conn, tcp_server, ctrl_stream)) => {
-                        info!(
-                            "start tunnel streaming in IN mode, {} ↔ {}",
-                            tcp_server.addr(),
-                            client_conn.remote_address(),
-                        );
+                    TunnelType::UdpOut(info) => {
+                        UdpTunnel::process(info.conn, info.upstream_addr).await
+                    }
 
-                        this.process_in_connection(client_conn, tcp_server, ctrl_stream)
+                    TunnelType::TcpIn(mut info) => {
+                        state
+                            .lock()
+                            .unwrap()
+                            .tcp_sessions
+                            .push(ConnectedTcpInSession {
+                                conn: info.conn.clone(),
+                                sender: info.tcp_server.clone_tcp_sender(),
+                            });
+
+                        TcpTunnel::start(false, &info.conn, &mut info.tcp_server, &mut None).await;
+                        info.tcp_server.shutdown().await.ok();
+                    }
+
+                    TunnelType::UdpIn(info) => {
+                        state
+                            .lock()
+                            .unwrap()
+                            .udp_sessions
+                            .push(ConnectedUdpInSession {
+                                conn: info.conn.clone(),
+                                sender: info.udp_server.clone_udp_sender(),
+                            });
+
+                        UdpTunnel::start(info.conn, info.udp_server, None, false)
                             .await
-                            .map_err(|e| error!("process_in_connection failed: {e}"))
                             .ok();
                     }
                 }
@@ -153,20 +204,19 @@ impl Server {
                 Ok::<(), anyhow::Error>(())
             });
         }
-
         info!("quit!");
 
         Ok(())
     }
 
     async fn authenticate_connection(
-        self: &mut Arc<Self>,
-        client_conn: quinn::Connection,
+        config: &ServerConfig,
+        conn: quinn::Connection,
     ) -> Result<TunnelType> {
-        let remote_addr = &client_conn.remote_address();
+        let remote_addr = &conn.remote_address();
 
-        info!("received connection, authenticating... addr:{remote_addr}");
-        let (mut quic_send, mut quic_recv) = client_conn
+        info!("authenticating connection, addr:{remote_addr}");
+        let (mut quic_send, mut quic_recv) = conn
             .accept_bi()
             .await
             .context(format!("login request not received in time: {remote_addr}"))?;
@@ -174,104 +224,104 @@ impl Server {
         info!("received bi_stream request: {remote_addr}");
         let tunnel_type;
         match TunnelMessage::recv(&mut quic_recv).await? {
-            TunnelMessage::ReqOutLogin(login_info) => {
-                info!("received OutLogin request: {remote_addr}");
+            TunnelMessage::ReqTcpOutLogin(login_info) => {
+                info!("received ReqTcpOutLogin request: {remote_addr}");
 
-                Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
+                Self::check_password(config.password.as_str(), login_info.password.as_str())?;
 
-                let upstreams = &self.config.upstreams;
-                let tcp_server_addr = match login_info.tcp_server_addr {
-                    Some(tcp_server_addr) => tcp_server_addr,
-                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                };
-
-                let is_local = match tcp_server_addr.ip() {
-                    IpAddr::V4(ipv4) => {
-                        ipv4.is_private() || ipv4.is_loopback() || ipv4.is_unspecified()
-                    }
-                    IpAddr::V6(ipv6) => {
-                        ipv6.is_loopback() || ipv6.is_loopback() || ipv6.is_unspecified()
-                    }
-                };
-                if !is_local {
-                    log_and_bail!("only local IPs are allowed for upstream: {tcp_server_addr}");
-                }
-
-                let upstream_addr = if tcp_server_addr.port() == 0 {
-                    if upstreams.is_empty() {
-                        log_and_bail!("explicit upstream address must be specified because there's no default set for the server");
-                    }
-                    let addr = upstreams.first().unwrap();
-                    info!(
-                        "will bind incoming TunnelIn request({}) to default address({addr})",
-                        client_conn.remote_address()
-                    );
-                    addr
-                } else {
-                    if !upstreams.is_empty() && !upstreams.contains(&tcp_server_addr) {
-                        log_and_bail!("upstream address not set: {tcp_server_addr}");
-                    }
-                    &tcp_server_addr
-                };
+                let upstream_addr = Self::obtain_upstream_addr(
+                    false,
+                    UpstreamType::Tcp,
+                    &login_info.upstream,
+                    &config.default_tcp_upstream,
+                )?;
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::Out((client_conn, *upstream_addr));
-                info!("sent response for OutLogin request: {remote_addr}");
+
+                tunnel_type = TunnelType::TcpOut(TcpTunnelOutInfo {
+                    conn,
+                    upstream_addr,
+                });
+                info!("sent response for ReqTcpOutLogin request: {remote_addr}");
             }
 
-            TunnelMessage::ReqInLogin(login_info) => {
-                info!("received InLogin request: {remote_addr}");
+            TunnelMessage::ReqUdpOutLogin(login_info) => {
+                info!("received ReqUdpOutLogin request: {remote_addr}");
 
-                Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let tcp_server_addr = match login_info.tcp_server_addr {
-                    Some(tcp_server_addr) => tcp_server_addr,
-                    None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-                };
-                if tcp_server_addr.port() == 0 {
-                    log_and_bail!(
-                        "explicit tcp_server_addr for TunnelIn mode tunelling is required: {tcp_server_addr:?}");
-                }
-                if !tcp_server_addr.ip().is_unspecified() && !tcp_server_addr.ip().is_loopback() {
-                    log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {tcp_server_addr:?}");
-                }
-                let upstream_addr = tcp_server_addr;
+                Self::check_password(config.password.as_str(), login_info.password.as_str())?;
 
-                let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
-                if guarded_tcp_server_ports.contains(&upstream_addr.port()) {
-                    TunnelMessage::send(
-                        &mut quic_send,
-                        &TunnelMessage::RespFailure("remote access port is in use".to_string()),
-                    )
-                    .await?;
-                    log_and_bail!("remote access port is in use: {}", upstream_addr.port());
-                }
+                let upstream_addr = Self::obtain_upstream_addr(
+                    false,
+                    UpstreamType::Udp,
+                    &login_info.upstream,
+                    &config.default_udp_upstream,
+                )?;
+
+                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
+
+                tunnel_type = TunnelType::UdpOut(UdpTunnelOutInfo {
+                    conn,
+                    upstream_addr,
+                });
+                info!("sent response for ReqUdpOutLogin request: {remote_addr}");
+            }
+
+            TunnelMessage::ReqTcpInLogin(login_info) => {
+                info!("received ReqTcpInLogin request: {remote_addr}");
+
+                Self::check_password(config.password.as_str(), login_info.password.as_str())?;
+
+                let upstream_addr = Self::obtain_upstream_addr(
+                    true,
+                    UpstreamType::Tcp,
+                    &login_info.upstream,
+                    &config.default_tcp_upstream,
+                )?;
 
                 let tcp_server = match TcpServer::bind_and_start(upstream_addr).await {
                     Ok(tcp_server) => tcp_server,
                     Err(e) => {
-                        TunnelMessage::send(
+                        TunnelMessage::send_failure(
                             &mut quic_send,
-                            &TunnelMessage::RespFailure("access server failed to bind".to_string()),
+                            format!("udp server failed to bind at: {upstream_addr}"),
                         )
                         .await?;
-                        log_and_bail!("access server failed to bind: {e}");
+                        log_and_bail!("login rejected: {e}");
                     }
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                tunnel_type = TunnelType::In((
-                    client_conn,
-                    tcp_server,
-                    ControlStream {
-                        quic_send,
-                        quic_recv,
-                    },
-                ));
+                tunnel_type = TunnelType::TcpIn(TcpTunnelInInfo { conn, tcp_server });
+                info!("sent response for ReqTcpInLogin request: {remote_addr}");
+            }
 
-                guarded_tcp_server_ports.push(upstream_addr.port());
+            TunnelMessage::ReqUdpInLogin(login_info) => {
+                info!("received ReqUdpInLogin request: {remote_addr}");
 
-                info!("sent response for InLogin request: {remote_addr}");
+                Self::check_password(config.password.as_str(), login_info.password.as_str())?;
+
+                let upstream_addr = Self::obtain_upstream_addr(
+                    true,
+                    UpstreamType::Udp,
+                    &login_info.upstream,
+                    &config.default_udp_upstream,
+                )?;
+
+                let udp_server = match UdpServer::bind_and_start(upstream_addr).await {
+                    Ok(udp_server) => udp_server,
+                    Err(e) => {
+                        TunnelMessage::send_failure(
+                            &mut quic_send,
+                            format!("udp server failed to bind at: {upstream_addr}"),
+                        )
+                        .await?;
+                        log_and_bail!("login rejected: {e}");
+                    }
+                };
+
+                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
+                tunnel_type = TunnelType::UdpIn(UdpTunnelInInfo { conn, udp_server });
+                info!("sent response for ReqUdpInLogin request: {remote_addr}");
             }
 
             _ => {
@@ -284,75 +334,66 @@ impl Server {
         Ok(tunnel_type)
     }
 
-    async fn process_out_connection(
-        self: &Arc<Self>,
-        client_conn: quinn::Connection,
-        upstream_addr: SocketAddr,
-    ) -> Result<()> {
-        let remote_addr = &client_conn.remote_address();
+    fn obtain_upstream_addr(
+        is_tunnel_in: bool,
+        upstream_type: UpstreamType,
+        upstream: &Upstream,
+        default_upstream: &Option<SocketAddr>,
+    ) -> Result<SocketAddr> {
+        Ok(match upstream {
+            Upstream::PeerDefault => {
+                if is_tunnel_in {
+                    log_and_bail!("explicit port is required to start TunnelIn mode tunneling");
+                }
 
-        loop {
-            match client_conn.accept_bi().await {
-                Err(quinn::ConnectionError::TimedOut { .. }) => {
-                    info!("connection timeout: {remote_addr}");
-                    return Ok(());
+                if default_upstream.is_none() {
+                    log_and_bail!(
+                        "explicit {upstream_type} upstream address must be specified when logging in because there's no default upstream specified for the server"
+                    );
                 }
-                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed: {remote_addr}");
-                    return Ok(());
+
+                default_upstream.unwrap()
+            }
+
+            Upstream::ClientSpecified(addr) => {
+                if is_tunnel_in && !addr.ip().is_unspecified() && !addr.ip().is_loopback() {
+                    log_and_bail!(
+                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {addr:?}, or simply specify a port without the IP part"
+                    );
                 }
-                Err(e) => {
-                    log_and_bail!("failed to open accpet_bi: {remote_addr}, err: {e}");
-                }
-                Ok(quic_stream) => tokio::spawn(async move {
-                    match TcpStream::connect(&upstream_addr).await {
-                        Ok(tcp_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
-                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
-                    }
-                }),
-            };
-        }
+
+                *addr
+            }
+        })
     }
 
-    async fn process_in_connection(
-        self: &Arc<Self>,
-        client_conn: quinn::Connection,
-        mut tcp_server: TcpServer,
-        mut ctrl_stream: ControlStream,
-    ) -> Result<()> {
-        let tcp_sender = tcp_server.clone_tcp_sender();
-        tokio::spawn(async move {
-            TunnelMessage::recv(&mut ctrl_stream.quic_recv).await.ok();
-            // send None to the previous session to signify exit, so the current
-            // session can start immediately, see below
-            tcp_sender.send(None).await.ok();
-            Ok::<(), anyhow::Error>(())
+    fn clear_expired_sessions(state: Arc<Mutex<State>>) {
+        let mut state = state.lock().unwrap();
+        state.udp_sessions.retain(|sess| {
+            if sess.conn.close_reason().is_some() {
+                let sess = sess.clone();
+                tokio::spawn(async move {
+                    sess.sender.send(UdpMessage::Quit).await.ok();
+                    debug!("dropped udp session: {}", sess.conn.remote_address());
+                });
+                false
+            } else {
+                true
+            }
         });
 
-        tcp_server.set_active(true);
-        while let Some(ChannelMessage::Request(tcp_stream)) = tcp_server.recv().await {
-            match client_conn.open_bi().await {
-                Ok(quic_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
-                _ => {
-                    log_and_bail!("failed to open bi_streams to client, quit");
-                }
+        state.tcp_sessions.retain(|sess| {
+            if sess.conn.close_reason().is_some() {
+                let sess = sess.clone();
+                tokio::spawn(async move {
+                    sess.sender.send(TcpMessage::Quit).await.ok();
+                    debug!("dropped tcp session: {}", sess.conn.remote_address());
+                });
+                false
+            } else {
+                true
             }
-        }
-
-        let addr = tcp_server.addr();
-        let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
-        if let Some(index) = guarded_tcp_server_ports
-            .iter()
-            .position(|x| *x == addr.port())
-        {
-            guarded_tcp_server_ports.remove(index);
-        }
-
-        tcp_server.shutdown().await.ok();
-
-        info!("access server quit: {addr}");
-
-        Ok(())
+        });
     }
 
     fn read_certs_and_key(
@@ -368,7 +409,7 @@ impl Server {
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
             let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
             let cert = CertificateDer::from(cert.cert);
-            (vec![CertificateDer::from(cert)], PrivateKeyDer::Pkcs8(key))
+            (vec![cert], PrivateKeyDer::Pkcs8(key))
         } else {
             let certs = pem_util::load_certificates_from_pem(cert_path)
                 .context(format!("failed to read cert file: {cert_path}"))?;
