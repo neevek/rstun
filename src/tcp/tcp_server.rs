@@ -1,6 +1,5 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use log::{debug, error, info};
-use rs_utilities::log_and_bail;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,65 +13,42 @@ pub enum ChannelMessage {
 }
 
 #[derive(Debug)]
-pub struct AccessServer {
+pub struct TcpServer {
     addr: SocketAddr,
-    tcp_listener: Option<Arc<TcpListener>>,
     tcp_sender: Sender<Option<ChannelMessage>>,
     tcp_receiver: Option<Receiver<Option<ChannelMessage>>>,
-    drop_conn: Arc<Mutex<bool>>,
+    active: Arc<Mutex<bool>>,
 }
 
-impl AccessServer {
-    pub fn new(addr: SocketAddr) -> Self {
-        let (sender, receiver) = channel(4);
-
-        AccessServer {
-            addr,
-            tcp_listener: None,
-            tcp_sender: sender,
-            tcp_receiver: Some(receiver),
-            // unless being explicitly requested, always drop the connections because we are not
-            // sure whether the receiver is ready to aceept connections
-            drop_conn: Arc::new(Mutex::new(true)),
-        }
-    }
-
-    pub async fn bind(&mut self) -> Result<SocketAddr> {
-        info!("starting access server, addr: {}", self.addr);
-        let tcp_listener = TcpListener::bind(self.addr).await.map_err(|e| {
-            error!(
-                "failed to bind tunnel access server on address: {}, error: {e}",
-                self.addr
-            );
+impl TcpServer {
+    pub async fn bind_and_start(addr: SocketAddr) -> Result<Self> {
+        info!("starting tcp server, addr: {addr}");
+        let tcp_listener = TcpListener::bind(addr).await.map_err(|e| {
+            error!("failed to bind tunnel access server on address: {addr}, error: {e}");
             e
         })?;
 
-        let bound_addr = tcp_listener.local_addr().unwrap();
-        self.tcp_listener = Some(Arc::new(tcp_listener));
-        info!("bound tunnel access server on address: {}", self.addr);
+        let addr = tcp_listener.local_addr().unwrap();
+        info!("bound tcp server on address: {addr}");
 
-        Ok(bound_addr)
-    }
+        let (tcp_sender, tcp_receiver) = channel(4);
+        let tcp_sender_clone = tcp_sender.clone();
 
-    pub async fn start(&mut self) -> Result<()> {
-        if self.tcp_listener.is_none() {
-            log_and_bail!("bind the server first");
-        }
+        // unless being explicitly requested, always drop the connections because we are not
+        // sure whether the receiver is ready to aceept connections, default is false
+        let active = Arc::new(Mutex::new(false));
+        let active_clone = active.clone();
 
-        let listener = self.tcp_listener.clone().unwrap();
-        let tcp_sender = self.tcp_sender.clone();
-        let drop_conn = self.drop_conn.clone();
         tokio::spawn(async move {
             loop {
-                match listener.accept().await {
+                match tcp_listener.accept().await {
                     Ok((socket, addr)) => {
-                        if *drop_conn.lock().unwrap() {
+                        if !*active.lock().unwrap() {
                             // silently drop the connection
                             debug!("drop connection: {addr}");
                             continue;
                         }
 
-                        debug!("received conn :       {addr}");
                         match tcp_sender
                             .send_timeout(
                                 Some(ChannelMessage::Request(socket)),
@@ -99,36 +75,42 @@ impl AccessServer {
                 }
             }
         });
-        Ok(())
+
+        Ok(Self {
+            addr,
+            tcp_sender: tcp_sender_clone,
+            tcp_receiver: Some(tcp_receiver),
+            active: active_clone,
+        })
     }
 
-    pub async fn shutdown(&self, tcp_receiver: Receiver<Option<ChannelMessage>>) -> Result<()> {
+    pub async fn shutdown(&mut self) -> Result<()> {
+        let tcp_receiver = self.tcp_receiver.take();
         // drop the Receiver
         drop(tcp_receiver);
 
         // initiate a new connection to wake up the accept() loop
-        self.set_drop_conn(false);
+        // and make it active so that the sender end of the channel
+        // will send a TcpStream to the closed receiver, which causes
+        // the entire above loop to quit
+        self.set_active(true);
         TcpStream::connect(self.addr).await?;
         Ok(())
     }
 
-    pub fn addr(&self) -> &SocketAddr {
-        &self.addr
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
     }
 
     pub async fn recv(&mut self) -> Option<ChannelMessage> {
         self.tcp_receiver.as_mut().unwrap().recv().await?
     }
 
-    pub fn take_tcp_receiver(&mut self) -> Receiver<Option<ChannelMessage>> {
-        self.tcp_receiver.take().unwrap()
-    }
-
     pub fn clone_tcp_sender(&self) -> Sender<Option<ChannelMessage>> {
         self.tcp_sender.clone()
     }
 
-    pub fn set_drop_conn(&self, flag: bool) {
-        *self.drop_conn.lock().unwrap() = flag;
+    pub fn set_active(&self, flag: bool) {
+        *self.active.lock().unwrap() = flag;
     }
 }

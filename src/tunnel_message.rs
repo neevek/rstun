@@ -21,7 +21,7 @@ pub enum TunnelMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
-    pub access_server_addr: Option<SocketAddr>,
+    pub tcp_server_addr: Option<SocketAddr>,
 }
 
 impl TunnelMessage {

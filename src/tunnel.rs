@@ -38,7 +38,7 @@ impl Tunnel {
             }
         };
 
-        debug!("[{tag}] START {index:<3} → {in_addr:<20}");
+        debug!("[{tag}] START {index:<3} →  {in_addr:<20}");
 
         const BUFFER_SIZE: usize = 8192;
 
@@ -60,7 +60,7 @@ impl Tunnel {
                 }
             }
 
-            debug!("[{tag}] END   {index:<3} → {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+            debug!("[{tag}] END   {index:<3} →  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
         });
 
         tokio::spawn(async move {
@@ -81,7 +81,7 @@ impl Tunnel {
                 }
             }
 
-            debug!("[{tag}] END   {index:<3} ← {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+            debug!("[{tag}] END   {index:<3} ←  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
         });
     }
 

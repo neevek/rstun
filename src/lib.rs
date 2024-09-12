@@ -1,12 +1,11 @@
-mod access_server;
 mod client;
 mod pem_util;
 mod server;
+mod tcp;
 mod tunnel;
 mod tunnel_info_bridge;
 mod tunnel_message;
 
-pub use access_server::AccessServer;
 use anyhow::{bail, Context, Result};
 use byte_pool::BytePool;
 pub use client::Client;
@@ -21,6 +20,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
+pub use tcp::tcp_server::TcpServer;
 pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 
@@ -100,7 +100,7 @@ impl Deref for SelectedCipherSuite {
 #[derive(Debug)]
 pub enum TunnelType {
     Out((quinn::Connection, SocketAddr)),
-    In((quinn::Connection, AccessServer, ControlStream)),
+    In((quinn::Connection, TcpServer, ControlStream)),
 }
 
 #[derive(Debug)]
@@ -111,7 +111,7 @@ pub struct ControlStream {
 
 #[derive(Debug, Default, Clone)]
 pub struct ClientConfig {
-    pub local_access_server_addr: Option<SocketAddr>,
+    pub local_tcp_server_addr: Option<SocketAddr>,
     pub cert_path: String,
     pub cipher: String,
     pub server_addr: String,
@@ -198,19 +198,19 @@ impl ClientConfig {
         };
 
         config.login_msg = if mode == TUNNEL_MODE_IN {
-            config.local_access_server_addr = sock_addr_mapping[1];
+            config.local_tcp_server_addr = sock_addr_mapping[1];
             Some(TunnelMessage::ReqInLogin(LoginInfo {
                 password: password.to_string(),
-                access_server_addr: sock_addr_mapping[0],
+                tcp_server_addr: sock_addr_mapping[0],
             }))
         } else {
             if sock_addr_mapping[0].is_none() {
                 log_and_bail!("'ANY' is not allowed as local access server for OUT tunneling");
             }
-            config.local_access_server_addr = sock_addr_mapping[0];
+            config.local_tcp_server_addr = sock_addr_mapping[0];
             Some(TunnelMessage::ReqOutLogin(LoginInfo {
                 password: password.to_string(),
-                access_server_addr: sock_addr_mapping[1],
+                tcp_server_addr: sock_addr_mapping[1],
             }))
         };
 

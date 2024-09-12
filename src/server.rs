@@ -1,6 +1,6 @@
-use crate::access_server::ChannelMessage;
+use crate::tcp::tcp_server::ChannelMessage;
 use crate::{
-    pem_util, AccessServer, ControlStream, ServerConfig, Tunnel, TunnelMessage, TunnelType,
+    pem_util, ControlStream, ServerConfig, TcpServer, Tunnel, TunnelMessage, TunnelType,
     SUPPORTED_CIPHER_SUITES,
 };
 use anyhow::{bail, Context, Result};
@@ -19,7 +19,7 @@ use tokio::time::Duration;
 #[derive(Debug)]
 pub struct Server {
     config: ServerConfig,
-    access_server_ports: Mutex<Vec<u16>>,
+    tcp_server_ports: Mutex<Vec<u16>>,
     endpoint: Option<Endpoint>,
 }
 
@@ -27,7 +27,7 @@ impl Server {
     pub fn new(config: ServerConfig) -> Arc<Self> {
         Arc::new(Server {
             config,
-            access_server_ports: Mutex::new(Vec::new()),
+            tcp_server_ports: Mutex::new(Vec::new()),
             endpoint: None,
         })
     }
@@ -125,7 +125,7 @@ impl Server {
                 match tun_type {
                     TunnelType::Out((client_conn, addr)) => {
                         info!(
-                            "start tunnel streaming in TunnelOut mode, {} ↔ {addr}",
+                            "start tunnel streaming in TunnelOut mode, {} ↔  {addr}",
                             client_conn.remote_address(),
                         );
 
@@ -135,14 +135,14 @@ impl Server {
                             .ok();
                     }
 
-                    TunnelType::In((client_conn, access_server, ctrl_stream)) => {
+                    TunnelType::In((client_conn, tcp_server, ctrl_stream)) => {
                         info!(
                             "start tunnel streaming in IN mode, {} -> {}",
-                            access_server.addr(),
+                            tcp_server.addr(),
                             client_conn.remote_address(),
                         );
 
-                        this.process_in_connection(client_conn, access_server, ctrl_stream)
+                        this.process_in_connection(client_conn, tcp_server, ctrl_stream)
                             .await
                             .map_err(|e| error!("process_in_connection failed: {e}"))
                             .ok();
@@ -179,12 +179,12 @@ impl Server {
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
 
                 let upstreams = &self.config.upstreams;
-                let access_server_addr = match login_info.access_server_addr {
-                    Some(access_server_addr) => access_server_addr,
+                let tcp_server_addr = match login_info.tcp_server_addr {
+                    Some(tcp_server_addr) => tcp_server_addr,
                     None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
 
-                let is_local = match access_server_addr.ip() {
+                let is_local = match tcp_server_addr.ip() {
                     IpAddr::V4(ipv4) => {
                         ipv4.is_private() || ipv4.is_loopback() || ipv4.is_unspecified()
                     }
@@ -193,10 +193,10 @@ impl Server {
                     }
                 };
                 if !is_local {
-                    log_and_bail!("only local IPs are allowed for upstream: {access_server_addr}");
+                    log_and_bail!("only local IPs are allowed for upstream: {tcp_server_addr}");
                 }
 
-                let upstream_addr = if access_server_addr.port() == 0 {
+                let upstream_addr = if tcp_server_addr.port() == 0 {
                     if upstreams.is_empty() {
                         log_and_bail!("explicit upstream address must be specified because there's no default set for the server");
                     }
@@ -207,10 +207,10 @@ impl Server {
                     );
                     addr
                 } else {
-                    if !upstreams.is_empty() && !upstreams.contains(&access_server_addr) {
-                        log_and_bail!("upstream address not set: {access_server_addr}");
+                    if !upstreams.is_empty() && !upstreams.contains(&tcp_server_addr) {
+                        log_and_bail!("upstream address not set: {tcp_server_addr}");
                     }
-                    &access_server_addr
+                    &tcp_server_addr
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
@@ -222,24 +222,22 @@ impl Server {
                 info!("received InLogin request: {remote_addr}");
 
                 Self::check_password(self.config.password.as_str(), login_info.password.as_str())?;
-                let access_server_addr = match login_info.access_server_addr {
-                    Some(access_server_addr) => access_server_addr,
+                let tcp_server_addr = match login_info.tcp_server_addr {
+                    Some(tcp_server_addr) => tcp_server_addr,
                     None => SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
                 };
-                if access_server_addr.port() == 0 {
+                if tcp_server_addr.port() == 0 {
                     log_and_bail!(
-                        "explicit access_server_addr for TunnelIn mode tunelling is required: {access_server_addr:?}");
+                        "explicit tcp_server_addr for TunnelIn mode tunelling is required: {tcp_server_addr:?}");
                 }
-                if !access_server_addr.ip().is_unspecified()
-                    && !access_server_addr.ip().is_loopback()
-                {
+                if !tcp_server_addr.ip().is_unspecified() && !tcp_server_addr.ip().is_loopback() {
                     log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {access_server_addr:?}");
+                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {tcp_server_addr:?}");
                 }
-                let upstream_addr = access_server_addr;
+                let upstream_addr = tcp_server_addr;
 
-                let mut guarded_access_server_ports = self.access_server_ports.lock().await;
-                if guarded_access_server_ports.contains(&upstream_addr.port()) {
+                let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
+                if guarded_tcp_server_ports.contains(&upstream_addr.port()) {
                     TunnelMessage::send(
                         &mut quic_send,
                         &TunnelMessage::RespFailure("remote access port is in use".to_string()),
@@ -248,36 +246,29 @@ impl Server {
                     log_and_bail!("remote access port is in use: {}", upstream_addr.port());
                 }
 
-                let mut access_server = AccessServer::new(upstream_addr);
-                if access_server.bind().await.is_err() {
-                    TunnelMessage::send(
-                        &mut quic_send,
-                        &TunnelMessage::RespFailure("access server failed to bind".to_string()),
-                    )
-                    .await?;
-                    log_and_bail!("access server failed to bind");
-                }
-
-                if access_server.start().await.is_err() {
-                    TunnelMessage::send(
-                        &mut quic_send,
-                        &TunnelMessage::RespFailure("access server failed to start".to_string()),
-                    )
-                    .await?;
-                    log_and_bail!("access server failed to start");
-                }
+                let tcp_server = match TcpServer::bind_and_start(upstream_addr).await {
+                    Ok(tcp_server) => tcp_server,
+                    Err(e) => {
+                        TunnelMessage::send(
+                            &mut quic_send,
+                            &TunnelMessage::RespFailure("access server failed to bind".to_string()),
+                        )
+                        .await?;
+                        log_and_bail!("access server failed to bind: {e}");
+                    }
+                };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 tunnel_type = TunnelType::In((
                     client_conn,
-                    access_server,
+                    tcp_server,
                     ControlStream {
                         quic_send,
                         quic_recv,
                     },
                 ));
 
-                guarded_access_server_ports.push(upstream_addr.port());
+                guarded_tcp_server_ports.push(upstream_addr.port());
 
                 info!("sent response for InLogin request: {remote_addr}");
             }
@@ -325,20 +316,20 @@ impl Server {
     async fn process_in_connection(
         self: &Arc<Self>,
         client_conn: quinn::Connection,
-        mut access_server: AccessServer,
+        mut tcp_server: TcpServer,
         mut ctrl_stream: ControlStream,
     ) -> Result<()> {
-        let tcp_sender = access_server.clone_tcp_sender();
+        let tcp_sender = tcp_server.clone_tcp_sender();
         tokio::spawn(async move {
             TunnelMessage::recv(&mut ctrl_stream.quic_recv).await.ok();
-            // send None to signify exit
+            // send None to the previous session to signify exit, so the current
+            // session can start immediately, see below
             tcp_sender.send(None).await.ok();
             Ok::<(), anyhow::Error>(())
         });
 
-        access_server.set_drop_conn(false);
-        let mut tcp_receiver = access_server.take_tcp_receiver();
-        while let Some(Some(ChannelMessage::Request(tcp_stream))) = tcp_receiver.recv().await {
+        tcp_server.set_active(true);
+        while let Some(ChannelMessage::Request(tcp_stream)) = tcp_server.recv().await {
             match client_conn.open_bi().await {
                 Ok(quic_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
                 _ => {
@@ -347,16 +338,16 @@ impl Server {
             }
         }
 
-        let addr = access_server.addr();
-        let mut guarded_access_server_ports = self.access_server_ports.lock().await;
-        if let Some(index) = guarded_access_server_ports
+        let addr = tcp_server.addr();
+        let mut guarded_tcp_server_ports = self.tcp_server_ports.lock().await;
+        if let Some(index) = guarded_tcp_server_ports
             .iter()
             .position(|x| *x == addr.port())
         {
-            guarded_access_server_ports.remove(index);
+            guarded_tcp_server_ports.remove(index);
         }
 
-        access_server.shutdown(tcp_receiver).await.ok();
+        tcp_server.shutdown().await.ok();
 
         info!("access server quit: {addr}");
 
