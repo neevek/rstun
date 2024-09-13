@@ -139,7 +139,7 @@ impl Client {
             info!("[TunnelOut] tcp server bound to: {addr}");
             info!("==========================================================");
 
-            self.post_tunnel_log(format!("tcp server for [TunnelOut] bound to: {addr}").as_str());
+            self.post_tunnel_log(format!("[TunnelOut] tcp server bound to: {addr}").as_str());
 
             inner_state!(self, channel_message_sender) = Some(tcp_server.clone_tcp_sender());
             inner_state!(self, tcp_server) = Some(tcp_server);
@@ -183,13 +183,14 @@ impl Client {
         let connect_max_retry = self.config.connect_max_retry;
         let wait_before_retry_ms = self.config.wait_before_retry_ms;
 
+        let mut pending_conn = None;
         loop {
             match self.connect().await {
                 Ok(_) => {
                     connect_retry_count = 0;
 
                     if self.config.mode == TUNNEL_MODE_OUT {
-                        self.serve_outgoing().await.ok();
+                        self.serve_outgoing(&mut pending_conn).await.ok();
                     } else {
                         self.serve_incoming().await.ok();
                     }
@@ -226,9 +227,9 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Connecting);
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024 * 1));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
-        transport_cfg.send_window(1024 * 1024 * 8);
+        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
+        transport_cfg.send_window(1024 * 1024 * 2);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
@@ -236,11 +237,8 @@ impl Client {
             let timeout =
                 IdleTimeout::from(VarInt::from_u32(self.config.max_idle_timeout_ms as u32));
             transport_cfg.max_idle_timeout(Some(timeout));
-        }
-
-        if self.config.keep_alive_interval_ms > 0 {
             transport_cfg.keep_alive_interval(Some(Duration::from_millis(
-                self.config.keep_alive_interval_ms,
+                self.config.max_idle_timeout_ms * 2 / 3,
             )));
         }
 
@@ -291,7 +289,7 @@ impl Client {
         Ok(())
     }
 
-    async fn serve_outgoing(self: &Arc<Self>) -> Result<()> {
+    async fn serve_outgoing(self: &Arc<Self>, pending_conn: &mut Option<TcpStream>) -> Result<()> {
         self.post_tunnel_log("start serving in [TunnelOut] mode...");
         self.report_traffic_data_in_background().await;
         if inner_state!(self, tcp_server).is_none() {
@@ -302,15 +300,23 @@ impl Client {
         let remote_conn = remote_conn.read().await;
         tcp_server.set_active(true);
 
-        // accept local connections and build a tunnel to remote
-        while let Some(ChannelMessage::Request(tcp_stream)) = tcp_server.recv().await {
+        loop {
+            let tcp_stream = match pending_conn.take() {
+                Some(tcp_stream) => tcp_stream,
+                None => match tcp_server.recv().await {
+                    Some(ChannelMessage::Request(tcp_stream)) => tcp_stream,
+                    _ => break,
+                },
+            };
+
             match remote_conn.open_bi().await {
                 Ok(quic_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
                 Err(e) => {
-                    error!("failed to open_bi on remote connection: {e}");
+                    error!("failed to open_bi on remote connection, will retry: {e}");
                     self.post_tunnel_log(
                         format!("connection failed, will reconnect: {e}").as_str(),
                     );
+                    *pending_conn = Some(tcp_stream);
                     break;
                 }
             }

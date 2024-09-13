@@ -118,7 +118,6 @@ pub struct ClientConfig {
     pub connect_max_retry: usize,
     pub wait_before_retry_ms: u64,
     pub max_idle_timeout_ms: u64,
-    pub keep_alive_interval_ms: u64,
     pub login_msg: Option<TunnelMessage>,
     pub threads: usize,
     pub mode: &'static str,
@@ -190,7 +189,6 @@ impl ClientConfig {
         };
         config.wait_before_retry_ms = wait_before_retry_ms;
         config.max_idle_timeout_ms = max_idle_timeout_ms;
-        config.keep_alive_interval_ms = config.max_idle_timeout_ms / 2;
         config.mode = if mode == TUNNEL_MODE_IN {
             TUNNEL_MODE_IN
         } else {

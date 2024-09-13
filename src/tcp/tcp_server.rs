@@ -52,7 +52,7 @@ impl TcpServer {
                         match tcp_sender
                             .send_timeout(
                                 Some(ChannelMessage::Request(socket)),
-                                Duration::from_millis(100),
+                                Duration::from_millis(3000),
                             )
                             .await
                         {

@@ -93,14 +93,15 @@ impl Server {
 
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 8));
-        transport_cfg.send_window(1024 * 1024 * 8);
+        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
+        transport_cfg.send_window(1024 * 1024 * 2);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         if config.max_idle_timeout_ms > 0 {
             let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
             transport_cfg.max_idle_timeout(Some(timeout));
-            transport_cfg
-                .keep_alive_interval(Some(Duration::from_millis(config.max_idle_timeout_ms / 2)));
+            transport_cfg.keep_alive_interval(Some(Duration::from_millis(
+                config.max_idle_timeout_ms * 2 / 3,
+            )));
         }
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
@@ -125,7 +126,7 @@ impl Server {
                 match tun_type {
                     TunnelType::Out((client_conn, addr)) => {
                         info!(
-                            "start tunnel streaming in TunnelOut mode, {} ↔  {addr}",
+                            "start tunnel streaming in TunnelOut mode, {} ↔ {addr}",
                             client_conn.remote_address(),
                         );
 
@@ -137,7 +138,7 @@ impl Server {
 
                     TunnelType::In((client_conn, tcp_server, ctrl_stream)) => {
                         info!(
-                            "start tunnel streaming in IN mode, {} -> {}",
+                            "start tunnel streaming in IN mode, {} ↔ {}",
                             tcp_server.addr(),
                             client_conn.remote_address(),
                         );
