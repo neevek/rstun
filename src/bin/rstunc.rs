@@ -52,12 +52,11 @@ struct RstuncArgs {
     password: String,
 
     /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `ANY^8000` for not explicitly specifying a port for the local access server (the client)
-    /// `8000^ANY` for not explicitly specifying a port to bind with the remote server,
-    ///            the server decides that port, so it depends on that the server is started
-    ///            with explicitly setting the `--upstreams` option.
-    /// `ANY^ANY` both the cases of the settings above.
-    #[arg(short = 'a', long, display_order = 4)]
+    /// `ANY^8000` for not explicitly specifying a port for the local tcp server (the client)
+    /// `8000^ANY` for not explicitly specifying a port to bind on the server, the server
+    ///            decides that port, so it depends on that the server is started with
+    ///            explicitly setting the `--upstreams` option.
+    #[arg(short = 'a', long, display_order = 4, verbatim_doc_comment)]
     addr_mapping: String,
 
     /// Path to the certificate file, only needed for self signed certificate
@@ -73,11 +72,11 @@ struct RstuncArgs {
     #[arg(short = 't', long, default_value_t = 0)]
     threads: usize,
 
-    /// Wait time before trying
+    /// Wait time in milliseconds before trying
     #[arg(short = 'w', long, default_value_t = 5000)]
     wait_before_retry_ms: u64,
 
-    /// Max idle timeout for the connection
+    /// Max idle timeout in milliseconds for the connection
     #[arg(short = 'i', long, default_value_t = 30000)]
     max_idle_timeout_ms: u64,
 

@@ -83,15 +83,15 @@ async fn run(mut args: RstundArgs) -> Result<()> {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstundArgs {
-    /// Address ([ip:]port pair) to listen on, a random port will be chosen
-    /// and binding to all network interfaces (0.0.0.0) if empty
-    #[arg(short = 'a', long, default_value_t = String::from(""))]
+    /// Address ([ip:]port pair) to listen on, if empty, a random port will be chosen
+    /// and binding to all network interfaces (0.0.0.0)
+    #[arg(short = 'a', long, default_value_t = String::from(""), verbatim_doc_comment)]
     addr: String,
 
-    /// Exposed upstreams (comma separated) as the receiving end of the tunnel,
+    /// Exposed upstreams (comma separated) as the receiving ends of the tunnel,
     /// e.g. -u "[ip:]port,[ip:]port,[ip:]port",
     /// The entire local network is exposed through the tunnel if empty
-    #[arg(short = 'u', long, required = false)]
+    #[arg(short = 'u', long, required = false, verbatim_doc_comment)]
     upstreams: String,
 
     /// Password of the tunnel server
@@ -100,7 +100,7 @@ struct RstundArgs {
 
     /// Path to the certificate file, if empty, a self-signed certificate
     /// with the domain "localhost" will be used
-    #[arg(short = 'c', long, default_value_t = String::from(""))]
+    #[arg(short = 'c', long, default_value_t = String::from(""), verbatim_doc_comment)]
     cert: String,
 
     /// Path to the key file, can be empty if no cert is provided
@@ -111,7 +111,7 @@ struct RstundArgs {
     #[arg(short = 't', long, default_value_t = 0)]
     threads: usize,
 
-    /// Max idle timeout for the connection
+    /// Max idle timeout milliseconds for the connection
     #[arg(short = 'w', long, default_value_t = 40000)]
     max_idle_timeout_ms: u64,
 
