@@ -7,8 +7,10 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
-use quinn::{congestion, crypto::rustls::QuicClientConfig, TransportConfig};
-use quinn::{RecvStream, SendStream};
+use quinn::{
+    congestion, crypto::rustls::QuicClientConfig, Connection, RecvStream, SendStream,
+    TransportConfig,
+};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::{
     dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
@@ -64,7 +66,7 @@ impl Display for ClientState {
 }
 
 struct ThreadSafeState {
-    remote_conn: Option<Arc<tokio::sync::RwLock<quinn::Connection>>>,
+    remote_conn: Option<Connection>,
     ctrl_stream: Option<ControlStream>,
     tcp_server: Option<TcpServer>,
     client_state: ClientState,
@@ -280,7 +282,7 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Tunnelling);
         self.post_tunnel_log("logged in!");
 
-        inner_state!(self, remote_conn) = Some(Arc::new(tokio::sync::RwLock::new(connection)));
+        inner_state!(self, remote_conn) = Some(connection);
         inner_state!(self, ctrl_stream) = Some(ControlStream {
             quic_send,
             quic_recv,
@@ -297,7 +299,6 @@ impl Client {
         }
         let mut tcp_server = inner_state!(self, tcp_server).take().unwrap();
         let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
-        let remote_conn = remote_conn.read().await;
         tcp_server.set_active(true);
 
         loop {
@@ -345,7 +346,6 @@ impl Client {
         })?;
 
         let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
-        let remote_conn = remote_conn.read().await;
         while let Ok(quic_stream) = remote_conn.accept_bi().await {
             match TcpStream::connect(self.config.local_tcp_server_addr.unwrap()).await {
                 Ok(tcp_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
@@ -362,7 +362,6 @@ impl Client {
 
     async fn report_traffic_data_in_background(self: &Arc<Self>) {
         let remote_conn = inner_state!(self, remote_conn).clone().unwrap();
-        let remote_conn = Arc::downgrade(&remote_conn);
 
         let this = self.clone();
         tokio::spawn(async move {
@@ -373,28 +372,21 @@ impl Client {
             loop {
                 interval.tick().await;
 
-                match remote_conn.upgrade() {
-                    Some(remote_conn) => {
-                        let stats = remote_conn.read().await.stats();
-                        let data = {
-                            // have to be very careful to avoid deadlock, don't hold the lock for too long
-                            let total_traffic_data = &inner_state!(this, total_traffic_data);
-                            TunnelTraffic {
-                                rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
-                                tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
-                                rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
-                                tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
-                            }
-                        };
-                        this.post_tunnel_info(TunnelInfo::new(
-                            TunnelInfoType::TunnelTraffic,
-                            Box::new(data),
-                        ));
+                let stats = remote_conn.stats();
+                let data = {
+                    // have to be very careful to avoid deadlock, don't hold the lock for too long
+                    let total_traffic_data = &inner_state!(this, total_traffic_data);
+                    TunnelTraffic {
+                        rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
+                        tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
+                        rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
+                        tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
                     }
-                    _ => {
-                        break;
-                    }
-                }
+                };
+                this.post_tunnel_info(TunnelInfo::new(
+                    TunnelInfoType::TunnelTraffic,
+                    Box::new(data),
+                ));
             }
         });
     }
