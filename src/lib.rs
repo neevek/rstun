@@ -8,6 +8,7 @@ mod tunnel_message;
 mod udp;
 
 use anyhow::{bail, Context, Result};
+use byte_pool::Block;
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
@@ -34,10 +35,12 @@ extern crate pretty_env_logger;
 
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
+pub const UDP_PACKET_SIZE: usize = 1500;
 
 lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
+type PooledBuffer = Block<'static, Vec<u8>>;
 
 pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[
     "chacha20-poly1305",
@@ -120,28 +123,39 @@ impl Display for UpstreamType {
 pub enum Upstream {
     PeerDefault,
     ClientSpecified(SocketAddr),
-    NotSpecified,
 }
 
 #[derive(Debug)]
-pub struct TunnelOutInfo {
+pub struct TcpTunnelOutInfo {
     conn: quinn::Connection,
-    tcp_upstream_addr: Option<SocketAddr>,
-    udp_upstream_addr: Option<SocketAddr>,
+    upstream_addr: SocketAddr,
 }
 
 #[derive(Debug)]
-pub struct TunnelInInfo {
+pub struct TcpTunnelInInfo {
     conn: quinn::Connection,
-    tcp_server: Option<TcpServer>,
-    udp_server: Option<UdpServer>,
+    tcp_server: TcpServer,
     ctrl_stream: ControlStream,
 }
 
 #[derive(Debug)]
+pub struct UdpTunnelOutInfo {
+    conn: quinn::Connection,
+    upstream_addr: SocketAddr,
+}
+
+#[derive(Debug)]
+pub struct UdpTunnelInInfo {
+    conn: quinn::Connection,
+    udp_server: UdpServer,
+}
+
+#[derive(Debug)]
 pub enum TunnelType {
-    Out(TunnelOutInfo),
-    In(TunnelInInfo),
+    TcpOut(TcpTunnelOutInfo),
+    TcpIn(TcpTunnelInInfo),
+    UdpOut(UdpTunnelOutInfo),
+    UdpIn(UdpTunnelInInfo),
 }
 
 #[derive(Debug)]
@@ -157,10 +171,12 @@ pub struct ClientConfig {
     pub cert_path: String,
     pub cipher: String,
     pub server_addr: String,
+    pub password: String,
     pub connect_max_retry: usize,
     pub wait_before_retry_ms: u64,
     pub max_idle_timeout_ms: u64,
-    pub login_msg: Option<TunnelMessage>,
+    pub tcp_upstream: Option<Upstream>,
+    pub udp_upstream: Option<Upstream>,
     pub threads: usize,
     pub mode: &'static str,
 }
@@ -208,6 +224,7 @@ impl ClientConfig {
         config.cert_path = cert.to_string();
         config.cipher = cipher.to_string();
         config.server_addr = server_addr.to_string();
+        config.password = password.to_string();
         config.threads = if threads > 0 {
             threads
         } else {
@@ -215,24 +232,17 @@ impl ClientConfig {
         };
         config.wait_before_retry_ms = wait_before_retry_ms;
         config.max_idle_timeout_ms = max_idle_timeout_ms;
+        config.tcp_upstream = parse_as_upstream(mode, &tcp_sock_mapping)?;
+        config.udp_upstream = parse_as_upstream(mode, &udp_sock_mapping)?;
         config.mode = if mode == TUNNEL_MODE_IN {
             config.local_tcp_server_addr = *tcp_sock_mapping.get(1).unwrap_or(&None);
             config.local_udp_server_addr = *udp_sock_mapping.get(1).unwrap_or(&None);
-            config.login_msg = Some(TunnelMessage::ReqInLogin(LoginInfo {
-                password: password.to_string(),
-                tcp_upstream: parse_as_upstream(mode, &tcp_sock_mapping)?,
-                udp_upstream: parse_as_upstream(mode, &udp_sock_mapping)?,
-            }));
 
             TUNNEL_MODE_IN
         } else {
             config.local_tcp_server_addr = *tcp_sock_mapping.first().unwrap_or(&None);
             config.local_udp_server_addr = *udp_sock_mapping.first().unwrap_or(&None);
-            config.login_msg = Some(TunnelMessage::ReqOutLogin(LoginInfo {
-                password: password.to_string(),
-                tcp_upstream: parse_as_upstream(mode, &tcp_sock_mapping)?,
-                udp_upstream: parse_as_upstream(mode, &udp_sock_mapping)?,
-            }));
+
             TUNNEL_MODE_OUT
         };
 
@@ -240,9 +250,9 @@ impl ClientConfig {
     }
 }
 
-fn parse_as_upstream(mode: &str, sock_mapping: &[Option<SocketAddr>]) -> Result<Upstream> {
+fn parse_as_upstream(mode: &str, sock_mapping: &[Option<SocketAddr>]) -> Result<Option<Upstream>> {
     if sock_mapping.is_empty() {
-        Ok(Upstream::NotSpecified)
+        Ok(None)
     } else {
         let sock_addr = if mode == TUNNEL_MODE_OUT {
             if sock_mapping[0].is_none() {
@@ -257,8 +267,8 @@ fn parse_as_upstream(mode: &str, sock_mapping: &[Option<SocketAddr>]) -> Result<
         };
 
         Ok(match sock_addr {
-            None => Upstream::PeerDefault,
-            Some(addr) => Upstream::ClientSpecified(addr),
+            None => Some(Upstream::PeerDefault),
+            Some(addr) => Some(Upstream::ClientSpecified(addr)),
         })
     }
 }

@@ -34,6 +34,7 @@ lazy_static = "1.5"
 rustls-pemfile = "2.1"
 bytes = "1"
 backon = "1.2"
+dashmap = "6"
 
 [dev-dependencies]
 jni = "0.19"

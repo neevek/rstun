@@ -1,21 +1,18 @@
-use anyhow::bail;
-use anyhow::Result;
-use bytes::BufMut;
-use bytes::Bytes;
-use bytes::BytesMut;
+use crate::{PooledBuffer, BUFFER_POOL, UDP_PACKET_SIZE};
+use anyhow::{bail, Result};
+use byte_pool::Block;
+use bytes::{BufMut, Bytes, BytesMut};
 use log::error;
 use rs_utilities::log_and_bail;
-use std::net::SocketAddr;
-use std::net::SocketAddrV4;
-use std::net::SocketAddrV6;
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 
 pub struct UdpPacket {
-    pub payload: Bytes,
+    pub payload: Block<'static, Vec<u8>>,
     pub addr: SocketAddr,
 }
 
 impl UdpPacket {
-    pub fn new(payload: Bytes, addr: SocketAddr) -> Self {
+    pub fn new(payload: PooledBuffer, addr: SocketAddr) -> Self {
         Self { payload, addr }
     }
 
@@ -77,7 +74,8 @@ impl UdpPacket {
             );
         }
 
-        let payload = Bytes::copy_from_slice(&data[offset..offset + payload_len]);
+        let mut payload = BUFFER_POOL.alloc(UDP_PACKET_SIZE);
+        payload.extend_from_slice(&data[offset..offset + payload_len]);
         Ok(UdpPacket { payload, addr })
     }
 }
@@ -93,5 +91,13 @@ impl TryFrom<Bytes> for UdpPacket {
 
     fn try_from(data: Bytes) -> std::result::Result<Self, Self::Error> {
         UdpPacket::deserialize(&data)
+    }
+}
+
+impl TryFrom<&[u8]> for UdpPacket {
+    type Error = anyhow::Error;
+
+    fn try_from(data: &[u8]) -> std::result::Result<Self, Self::Error> {
+        UdpPacket::deserialize(data)
     }
 }

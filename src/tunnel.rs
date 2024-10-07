@@ -87,7 +87,7 @@ impl Tunnel {
 
     async fn tcp_to_quic(
         tcp_read: &mut OwnedReadHalf,
-        quic_send: &mut SendStream, //local_read: &mut OwnedReadHalf,
+        quic_send: &mut SendStream,
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {

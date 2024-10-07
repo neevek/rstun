@@ -1,6 +1,8 @@
+use crate::BUFFER_POOL;
+use crate::UDP_PACKET_SIZE;
+
 use super::udp_packet::UdpPacket;
 use anyhow::Result;
-use bytes::BytesMut;
 use log::debug;
 use log::error;
 use log::info;
@@ -52,7 +54,7 @@ impl UdpServer {
 
         tokio::spawn(async move {
             loop {
-                let mut buf = BytesMut::zeroed(1500);
+                let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
                 tokio::select! {
                     result = udp_socket.recv_from(&mut buf) => {
                         match result {
@@ -62,8 +64,8 @@ impl UdpServer {
                                     continue;
                                 }
 
-                                let payload = buf.split_to(size);
-                                let msg = UdpMessage::Packet(UdpPacket::new(payload.freeze(), addr));
+                                unsafe { buf.set_len(size); }
+                                let msg = UdpMessage::Packet(UdpPacket::new(buf, addr));
                                 match tokio::time::timeout(
                                         Duration::from_millis(300),
                                         out_udp_sender_clone.send(msg)).await {
