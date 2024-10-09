@@ -1,19 +1,14 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::tcp_server::{TcpMessage, TcpSender},
+    tcp::tcp_server::TcpMessage,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
-    tunnel_message::UdpLocalAddr,
-    udp::{
-        udp_packet::UdpPacket,
-        udp_server::{UdpMessage, UdpServer},
-    },
+    udp::{udp_packet::UdpPacket, udp_server::UdpServer, udp_tunnel::UdpTunnel},
     ClientConfig, ControlStream, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelMessage,
     BUFFER_POOL, TUNNEL_MODE_IN, TUNNEL_MODE_OUT, UDP_PACKET_SIZE,
 };
 use anyhow::{bail, Context, Result};
 use backon::ExponentialBuilder;
 use backon::Retryable;
-use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use quinn::{
     congestion, crypto::rustls::QuicClientConfig, Connection, Endpoint, RecvStream, SendStream,
@@ -45,17 +40,12 @@ use tokio::{
     sync::mpsc::Sender,
     task::JoinHandle,
 };
-use x509_parser::{
-    nom::AsBytes,
-    prelude::{FromDer, X509Certificate},
-};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
 static INIT: Once = Once::new();
-
-type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
 #[derive(Clone, Serialize)]
 pub enum ClientState {
@@ -85,7 +75,6 @@ impl Display for ClientState {
 struct ThreadSafeState {
     tcp_conn: Option<Connection>,
     udp_conn: Option<Connection>,
-    ctrl_stream: Option<ControlStream>,
     tcp_server: Option<TcpServer>,
     udp_server: Option<UdpServer>,
     client_state: ClientState,
@@ -99,7 +88,6 @@ struct ThreadSafeState {
 impl ThreadSafeState {
     fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
-            ctrl_stream: None,
             tcp_server: None,
             udp_server: None,
             tcp_conn: None,
@@ -306,10 +294,6 @@ impl Client {
                 .login(&endpoint, &remote_addr, domain.as_str(), login_msg)
                 .await?;
             inner_state!(self, tcp_conn) = Some(conn);
-            inner_state!(self, ctrl_stream) = Some(ControlStream {
-                quic_send,
-                quic_recv,
-            });
         }
 
         if let Some(udp_upstream) = &self.config.udp_upstream {
@@ -378,24 +362,29 @@ impl Client {
         self.post_tunnel_log("start serving in [TunnelOut] mode...");
         self.set_and_post_tunnel_state(ClientState::Preparing);
 
-        if self.config.local_udp_server_addr.is_some() && inner_state!(self, udp_server).is_none() {
-            self.start_udp_server().await?;
-            let conn = inner_state!(self, udp_conn).clone().unwrap();
-            self.report_traffic_data_in_background(conn).await;
-        }
-
         if self.config.local_tcp_server_addr.is_some() && inner_state!(self, tcp_server).is_none() {
             self.start_tcp_server().await?;
             let conn = inner_state!(self, tcp_conn).clone().unwrap();
             self.report_traffic_data_in_background(conn).await;
         }
 
-        let tcp_sender = inner_state!(self, tcp_server)
-            .as_ref()
-            .map(|tcp_server| tcp_server.clone_tcp_sender());
+        if self.config.local_udp_server_addr.is_some() && inner_state!(self, udp_server).is_none() {
+            self.start_udp_server().await?;
+            let conn = inner_state!(self, udp_conn).clone().unwrap();
+            self.report_traffic_data_in_background(conn.clone()).await;
 
-        let udp_only = self.config.local_tcp_server_addr.is_none();
-        self.serve_udp_out(tcp_sender, !udp_only).await.ok();
+            let tcp_sender = inner_state!(self, tcp_server)
+                .as_ref()
+                .map(|tcp_server| tcp_server.clone_tcp_sender());
+
+            let udp_only = self.config.local_tcp_server_addr.is_none();
+            let udp_server = inner_state!(self, udp_server).clone().unwrap();
+
+            UdpTunnel::start(conn, udp_server, tcp_sender, udp_only)
+                .await
+                .ok();
+        }
+
         self.serve_tcp_out(pending_conn).await.ok();
 
         let mut inner_state = self.inner_state.lock().unwrap();
@@ -406,153 +395,6 @@ impl Client {
             data.tx_bytes += stats.udp_tx.bytes;
             data.rx_dgrams += stats.udp_rx.datagrams;
             data.tx_dgrams += stats.udp_tx.datagrams;
-        }
-        Ok(())
-    }
-
-    async fn open_bi_for_udp_out(
-        conn: Connection,
-        udp_server: UdpServer,
-        peer_addr: SocketAddr,
-        stream_map: Arc<DashMap<SocketAddr, TSafe<SendStream>>>,
-    ) -> Result<TSafe<SendStream>> {
-        if let Some(s) = stream_map.get(&peer_addr) {
-            return Ok((*s).clone());
-        }
-
-        let (mut quic_send, mut quic_recv) =
-            conn.open_bi().await.context("open_bi failed for udp out")?;
-
-        TunnelMessage::send(
-            &mut quic_send,
-            &TunnelMessage::ReqUdpStart(UdpLocalAddr(peer_addr)),
-        )
-        .await?;
-
-        debug!(
-            "new udp session: {peer_addr}, stream_map: {}",
-            stream_map.len()
-        );
-
-        let quic_send = Arc::new(tokio::sync::Mutex::new(quic_send));
-        stream_map.insert(peer_addr, quic_send.clone());
-        let udp_sender = udp_server.clone_udp_sender();
-
-        const TIMEOUT_SECS: u64 = 5;
-        let stream_map = stream_map.clone();
-        tokio::spawn(async move {
-            debug!(
-                "start udp stream({peer_addr}), streams: {}",
-                stream_map.len()
-            );
-            loop {
-                let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-                match tokio::time::timeout(
-                    Duration::from_secs(TIMEOUT_SECS),
-                    TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
-                )
-                .await
-                {
-                    Ok(Ok(len)) => {
-                        unsafe {
-                            buf.set_len(len as usize);
-                        }
-                        let packet = UdpPacket {
-                            payload: buf,
-                            addr: peer_addr,
-                        };
-                        udp_sender.send(UdpMessage::Packet(packet)).await.ok();
-                    }
-                    e => {
-                        match e {
-                            Ok(Err(e)) => {
-                                warn!("failed to read for udp, err: {}", e.to_string());
-                            }
-                            Err(_) => {
-                                debug!("timeout on reading udp packet");
-                            }
-                            _ => unreachable!(""),
-                        }
-                        break;
-                    }
-                }
-            }
-
-            stream_map.remove(&peer_addr);
-            debug!(
-                "drop udp stream({peer_addr}), streams: {}",
-                stream_map.len()
-            );
-        });
-
-        Ok(quic_send)
-    }
-
-    async fn serve_udp_out(
-        self: &Arc<Self>,
-        tcp_sender: Option<TcpSender>,
-        use_async: bool,
-    ) -> Result<()> {
-        if inner_state!(self, udp_server).is_none() {
-            return Ok(());
-        }
-
-        let conn = inner_state!(self, udp_conn).clone().unwrap();
-        let mut udp_server = inner_state!(self, udp_server).clone().unwrap();
-        let task = || async move {
-            let stream_map = Arc::new(DashMap::new());
-            udp_server.set_active(true);
-            let mut udp_receiver = udp_server.take_receiver().unwrap();
-
-            debug!("will start transfering udp packets...");
-            while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
-                let quic_send = match Self::open_bi_for_udp_out(
-                    conn.clone(),
-                    udp_server.clone(),
-                    packet.addr,
-                    stream_map.clone(),
-                )
-                .await
-                {
-                    Ok(quic_send) => quic_send,
-                    Err(e) => {
-                        error!("{e}");
-                        if conn.close_reason().is_some() {
-                            if let Some(tcp_sender) = tcp_sender {
-                                tcp_sender.send(TcpMessage::Quit).await.ok();
-                            }
-                            debug!("connection is closed, will quit");
-                            break;
-                        }
-                        continue;
-                    }
-                };
-
-                // send the packet using an async task
-                tokio::spawn(async move {
-                    let mut quic_send = quic_send.lock().await;
-                    let payload = packet.payload.as_bytes();
-                    let payload_len = payload.len();
-                    TunnelMessage::send_raw(&mut quic_send, payload)
-                        .await
-                        .map_err(|e| {
-                            warn!("failed to send datagram({payload_len}) through the tunnel, err: {e:?}");
-                            e
-                        })
-                        .ok();
-                });
-            }
-
-            // put the receiver back
-            udp_server.set_active(false);
-            udp_server.put_receiver(udp_receiver);
-            info!("local udp server paused");
-        };
-
-        if use_async {
-            tokio::spawn(task());
-        } else {
-            task().await;
         }
         Ok(())
     }
@@ -601,6 +443,7 @@ impl Client {
         udp_server_addr: SocketAddr,
     ) -> Result<()> {
         let conn = inner_state!(self, udp_conn).clone().unwrap();
+        debug!("new udp session: {:?}", conn.remote_address());
 
         let task = || async move {
             let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -672,9 +515,9 @@ impl Client {
         Ok(())
     }
 
-    async fn serve_tcp_in(self: &Arc<Self>) -> Result<()> {
-        let remote_conn = inner_state!(self, tcp_conn).clone().unwrap();
-        while let Ok(quic_stream) = remote_conn.accept_bi().await {
+    async fn serve_tcp_in(self: &Arc<Self>, tcp_server_addr: SocketAddr) -> Result<()> {
+        let conn = inner_state!(self, tcp_conn).clone().unwrap();
+        while let Ok(quic_stream) = conn.accept_bi().await {
             match TcpStream::connect(self.config.local_tcp_server_addr.unwrap()).await {
                 Ok(tcp_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
                 Err(e) => {
@@ -696,12 +539,21 @@ impl Client {
             e
         })?;
 
-        let udp_only = self.config.local_tcp_server_addr.is_none();
         if let Some(udp_server_addr) = self.config.local_udp_server_addr {
-            self.serve_udp_in(!udp_only, udp_server_addr).await.ok();
+            let conn = inner_state!(self, udp_conn).clone().unwrap();
+            let udp_only = self.config.local_tcp_server_addr.is_none();
+            if udp_only {
+                UdpTunnel::process(conn, udp_server_addr).await;
+            } else {
+                tokio::spawn(async move {
+                    UdpTunnel::process(conn, udp_server_addr).await;
+                });
+            }
         }
-        self.serve_tcp_in().await.ok();
 
+        if let Some(addr) = self.config.local_tcp_server_addr {
+            self.serve_tcp_in(addr).await.ok();
+        }
         Ok(())
     }
 
@@ -738,7 +590,6 @@ impl Client {
         #[cfg(not(target_os = "windows"))]
         {
             let this = self.clone();
-            let mut quic_send = inner_state!(self, ctrl_stream).take().unwrap().quic_send;
             tokio::spawn(async move {
                 let mut ctrlc = signal(SignalKind::interrupt()).unwrap();
                 let mut terminate = signal(SignalKind::terminate()).unwrap();
@@ -747,10 +598,6 @@ impl Client {
                     _ = terminate.recv() => debug!("received SIGTERM"),
                 }
                 inner_state!(this, is_terminated) = true;
-
-                TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqTerminate)
-                    .await
-                    .ok();
 
                 tokio::time::sleep(Duration::from_millis(1000)).await;
                 std::process::exit(0);

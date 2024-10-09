@@ -104,6 +104,7 @@ impl UdpServer {
                             }
                             None => {
                                 // all senders quit
+                                info!("udp server quit");
                                 break;
                             }
                         }
@@ -137,8 +138,14 @@ impl UdpServer {
         self.0.lock().unwrap().udp_receiver = Some(udp_receiver);
     }
 
+    pub async fn shutdown(&mut self) {
+        debug!("shutting down local udp server...");
+        // let sender = self.0.lock().unwrap().in_udp_sender;
+        // drop(sender);
+    }
+
     pub async fn pause(&mut self) {
-        debug!("pausing the local udp server...");
+        debug!("pausing local udp server...");
         let out_udp_sender = self.0.lock().unwrap().out_udp_sender.clone();
         out_udp_sender.send(UdpMessage::Quit).await.ok();
     }

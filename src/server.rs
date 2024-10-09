@@ -1,6 +1,7 @@
 use crate::tcp::tcp_server::{TcpMessage, TcpSender};
 use crate::udp::udp_packet::UdpPacket;
 use crate::udp::udp_server::{UdpMessage, UdpServer};
+use crate::udp::udp_tunnel::UdpTunnel;
 use crate::{
     pem_util, ControlStream, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, Tunnel,
     TunnelMessage, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, Upstream, UpstreamType,
@@ -130,30 +131,33 @@ impl Server {
                     }
 
                     TunnelType::UdpOut(info) => {
-                        Self::process_udp_out(info.conn, info.upstream_addr).await
+                        UdpTunnel::process(info.conn, info.upstream_addr).await
                     }
 
                     TunnelType::TcpIn(info) => {
                         let addr = info.tcp_server.addr();
-                        this.tcp_server_ports.lock().await.push(addr.port());
                         let mut v = this.tcp_server_ports.lock().await;
                         if let Some(index) = v.iter().position(|x| *x == addr.port()) {
                             v.remove(index);
                         }
 
+                        this.tcp_server_ports.lock().await.push(addr.port());
                         this.process_tcp_in(info.conn, info.tcp_server, info.ctrl_stream)
                             .await;
                     }
 
                     TunnelType::UdpIn(info) => {
                         let addr = info.udp_server.addr();
-                        this.udp_server_ports.lock().await.push(addr.port());
-                        let mut v = this.udp_server_ports.lock().await;
-                        if let Some(index) = v.iter().position(|x| *x == addr.port()) {
-                            v.remove(index);
-                        }
+                        // let mut v = this.udp_server_ports.lock().await;
+                        // if let Some(index) = v.iter().position(|x| *x == addr.port()) {
+                        //     warn!(">>>>>>>>>>>> haha remove addr:{addr}");
+                        //     v.remove(index);
+                        // }
 
-                        this.process_udp_in(info.conn, info.udp_server, None).await;
+                        this.udp_server_ports.lock().await.push(addr.port());
+                        UdpTunnel::start(info.conn, info.udp_server, None, false)
+                            .await
+                            .ok();
                     }
                 }
 
@@ -306,9 +310,7 @@ impl Server {
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-
                 tunnel_type = TunnelType::UdpIn(UdpTunnelInInfo { conn, udp_server });
-
                 info!("sent response for ReqUdpInLogin request: {remote_addr}");
             }
 
@@ -364,127 +366,6 @@ impl Server {
         })
     }
 
-    async fn process_udp_out(conn: quinn::Connection, upstream_addr: SocketAddr) {
-        let remote_addr = &conn.remote_address();
-        info!("start udp streaming in TunnelOut mode, {remote_addr} ↔ {upstream_addr}");
-
-        loop {
-            match conn.accept_bi().await {
-                Err(quinn::ConnectionError::TimedOut { .. }) => {
-                    info!("connection timeout: {remote_addr}");
-                    break;
-                }
-                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed: {remote_addr}");
-                    break;
-                }
-                Err(e) => {
-                    error!("failed to accpet_bi: {remote_addr}, err: {e}");
-                    break;
-                }
-                Ok((quic_send, quic_recv)) => tokio::spawn(async move {
-                    Self::process_udp_out_internal(quic_send, quic_recv, upstream_addr).await
-                }),
-            };
-        }
-
-        info!("connection for udp out is dropped");
-    }
-
-    async fn process_udp_out_internal(
-        mut quic_send: SendStream,
-        mut quic_recv: RecvStream,
-        upstream_addr: SocketAddr,
-    ) -> Result<()> {
-        let peer_addr = match TunnelMessage::recv(&mut quic_recv).await {
-            Ok(TunnelMessage::ReqUdpStart(peer_addr)) => peer_addr.0,
-            _ => {
-                log_and_bail!("unexpected first udp message");
-            }
-        };
-        debug!("new udp session: {peer_addr}");
-
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-        let udp_socket = match UdpSocket::bind(local_addr).await {
-            Ok(udp_socket) => Arc::new(udp_socket),
-            Err(e) => {
-                log_and_bail!("failed to bind to localhost, err: {e:?}");
-            }
-        };
-
-        if let Err(e) = udp_socket.connect(upstream_addr).await {
-            log_and_bail!("failed to connect to upstream: {upstream_addr}, err: {e:?}");
-        };
-
-        const TIMEOUT_SECS: u64 = 5;
-        let udp_socket_clone = udp_socket.clone();
-        tokio::spawn(async move {
-            debug!("start udp stream: {peer_addr} ← {upstream_addr}");
-            let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-            loop {
-                match tokio::time::timeout(
-                    Duration::from_secs(TIMEOUT_SECS),
-                    udp_socket_clone.recv(&mut buf),
-                )
-                .await
-                {
-                    Ok(Ok(len)) => {
-                        TunnelMessage::send_raw(&mut quic_send, &buf[..len])
-                            .await
-                            .ok();
-                    }
-                    e => {
-                        match e {
-                            Ok(Err(e)) => {
-                                warn!("failed to receive datagrams from upstream: {upstream_addr}, err: {e:?}");
-                            }
-                            Err(_) => {
-                                debug!(
-                                    "timeout on receiving datagrams from upstream: {upstream_addr}"
-                                );
-                            }
-                            _ => unreachable!(""),
-                        }
-                        break;
-                    }
-                }
-            }
-            debug!("drop udp stream: {peer_addr} ← {upstream_addr}");
-        });
-
-        debug!("start sending datagrams to upstream, {peer_addr} → {upstream_addr}");
-        let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-        loop {
-            match tokio::time::timeout(
-                Duration::from_secs(TIMEOUT_SECS),
-                TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
-            )
-            .await
-            {
-                Ok(Ok(len)) => {
-                    udp_socket
-                        .send(&buf[..len as usize])
-                        .await
-                        .context("failed to send datagram through udp_socket")?;
-                }
-                e => {
-                    match e {
-                        Ok(Err(e)) => {
-                            warn!("failed to read from udp packet from tunnel, err: {e:?}");
-                        }
-                        Err(_) => {
-                            debug!("timeout on reading udp packet from tunnel");
-                        }
-                        _ => unreachable!(""),
-                    }
-                    break;
-                }
-            }
-        }
-
-        Ok::<(), anyhow::Error>(())
-    }
-
     async fn process_tcp_out(conn: quinn::Connection, upstream_addr: SocketAddr) {
         let remote_addr = &conn.remote_address();
         info!("start tcp streaming in TunnelOut mode, {remote_addr} ↔ {upstream_addr}");
@@ -513,67 +394,68 @@ impl Server {
         }
     }
 
-    async fn process_udp_in(
-        self: &Arc<Self>,
-        conn: quinn::Connection,
-        mut udp_server: UdpServer,
-        tcp_sender: Option<TcpSender>,
-    ) {
-        info!(
-            "start udp streaming in TunnelIn mode, {} ↔ {}",
-            udp_server.addr(),
-            conn.remote_address(),
-        );
-
-        let mut udp_server_clone = udp_server.clone();
-        let udp_sender = udp_server.clone_udp_sender();
-        let conn_clone = conn.clone();
-        let addr = udp_server.addr();
-
-        tokio::spawn(async move {
-            udp_server.set_active(true);
-            let mut udp_receiver = udp_server.take_receiver().unwrap();
-            while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
-                let len = packet.payload.len();
-                let addr = &packet.addr;
-                debug!("send datagram({len}) from {addr}",);
-                if let Err(e) = conn.send_datagram(packet.into()) {
-                    warn!("sending packet failed: {e:?}");
-                }
-            }
-
-            // on receiving UdpMessage::Quit, quit and put the receiver back
-            udp_server.set_active(false);
-            udp_server.put_receiver(udp_receiver);
-            info!("udp server quit");
-        });
-
-        loop {
-            match conn_clone.read_datagram().await {
-                Ok(datagram) => {
-                    if let Ok(packet) = UdpPacket::try_from(datagram) {
-                        let len = packet.payload.len();
-                        let addr = &packet.addr;
-                        debug!("send datagram({len}) to {addr}",);
-                        udp_sender.send(UdpMessage::Packet(packet)).await.ok();
-                    }
-                }
-                Err(e) => {
-                    if conn_clone.close_reason().is_some() {
-                        udp_server_clone.pause().await;
-                        if let Some(tcp_sender) = tcp_sender {
-                            tcp_sender.send(TcpMessage::Quit).await.ok();
-                        }
-                        debug!("connection is closed, will quit");
-                        break;
-                    }
-                    warn!("read_datagram failed: {e}");
-                }
-            }
-        }
-
-        info!("udp server quit: {addr}");
-    }
+    // async fn process_udp_in(
+    //     self: &Arc<Self>,
+    //     conn: quinn::Connection,
+    //     mut udp_server: UdpServer,
+    //     tcp_sender: Option<TcpSender>,
+    // ) {
+    //     info!(
+    //         "start udp streaming in TunnelIn mode, {} ↔ {}",
+    //         udp_server.addr(),
+    //         conn.remote_address(),
+    //     );
+    //
+    //     let mut udp_server_clone = udp_server.clone();
+    //     let udp_sender = udp_server.clone_udp_sender();
+    //     let conn_clone = conn.clone();
+    //     let addr = udp_server.addr();
+    //
+    //     tokio::spawn(async move {
+    //         info!("udp server starts serving...");
+    //         udp_server.set_active(true);
+    //         let mut udp_receiver = udp_server.take_receiver().unwrap();
+    //         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
+    //             let len = packet.payload.len();
+    //             let addr = &packet.addr;
+    //             debug!("send datagram({len}) from {addr}",);
+    //             if let Err(e) = conn.send_datagram(packet.into()) {
+    //                 warn!("sending packet failed: {e:?}");
+    //             }
+    //         }
+    //
+    //         // on receiving UdpMessage::Quit, quit and put the receiver back
+    //         udp_server.set_active(false);
+    //         udp_server.put_receiver(udp_receiver);
+    //         info!("udp server quit");
+    //     });
+    //
+    //     loop {
+    //         match conn_clone.read_datagram().await {
+    //             Ok(datagram) => {
+    //                 if let Ok(packet) = UdpPacket::try_from(datagram) {
+    //                     let len = packet.payload.len();
+    //                     let addr = &packet.addr;
+    //                     debug!("send datagram({len}) to {addr}",);
+    //                     udp_sender.send(UdpMessage::Packet(packet)).await.ok();
+    //                 }
+    //             }
+    //             Err(e) => {
+    //                 if conn_clone.close_reason().is_some() {
+    //                     udp_server_clone.pause().await;
+    //                     if let Some(tcp_sender) = tcp_sender {
+    //                         tcp_sender.send(TcpMessage::Quit).await.ok();
+    //                     }
+    //                     debug!("connection is closed, will quit");
+    //                     break;
+    //                 }
+    //                 warn!("read_datagram failed: {e}");
+    //             }
+    //         }
+    //     }
+    //
+    //     info!("udp server quit: {addr}");
+    // }
 
     async fn process_tcp_in(
         self: &Arc<Self>,
