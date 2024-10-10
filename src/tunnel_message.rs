@@ -17,7 +17,6 @@ pub enum TunnelMessage {
     ReqUdpInLogin(LoginInfo),
     ReqUdpOutLogin(LoginInfo),
     ReqUdpStart(UdpLocalAddr),
-    ReqTerminate,
     RespFailure(String),
     RespSuccess,
 }

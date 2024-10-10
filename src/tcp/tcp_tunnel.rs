@@ -1,22 +1,24 @@
+use std::net::SocketAddr;
+
 use crate::BUFFER_POOL;
 use anyhow::Result;
-use log::debug;
+use log::{debug, error, info};
 use quinn::{RecvStream, SendStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 
-pub struct Tunnel {}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransferError {
     InternalError,
 }
 
-impl Tunnel {
+pub struct TcpTunnel;
+
+impl TcpTunnel {
     pub fn new() -> Self {
-        Tunnel {}
+        TcpTunnel {}
     }
 
     pub fn start(
@@ -135,9 +137,37 @@ impl Tunnel {
             Ok(0)
         }
     }
+
+    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr) {
+        let remote_addr = &conn.remote_address();
+        info!("start tcp streaming, {remote_addr} ↔ {upstream_addr}");
+
+        loop {
+            match conn.accept_bi().await {
+                Err(quinn::ConnectionError::TimedOut { .. }) => {
+                    info!("connection timeout: {remote_addr}");
+                    break;
+                }
+                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
+                    debug!("connection closed: {remote_addr}");
+                    break;
+                }
+                Err(e) => {
+                    error!("failed to open accpet_bi: {remote_addr}, err: {e}");
+                    break;
+                }
+                Ok(quic_stream) => tokio::spawn(async move {
+                    match TcpStream::connect(&upstream_addr).await {
+                        Ok(tcp_stream) => TcpTunnel::new().start(true, tcp_stream, quic_stream),
+                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
+                    }
+                }),
+            };
+        }
+    }
 }
 
-impl Default for Tunnel {
+impl Default for TcpTunnel {
     fn default() -> Self {
         Self::new()
     }

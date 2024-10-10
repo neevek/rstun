@@ -2,7 +2,6 @@ mod client;
 mod pem_util;
 mod server;
 mod tcp;
-mod tunnel;
 mod tunnel_info_bridge;
 mod tunnel_message;
 mod udp;
@@ -26,7 +25,6 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
-pub use tunnel::Tunnel;
 pub use tunnel_message::{LoginInfo, TunnelMessage};
 use udp::udp_server::UdpServer;
 

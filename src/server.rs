@@ -1,22 +1,21 @@
-use crate::tcp::tcp_server::{TcpMessage, TcpSender};
-use crate::udp::udp_packet::UdpPacket;
-use crate::udp::udp_server::{UdpMessage, UdpServer};
-use crate::udp::udp_tunnel::UdpTunnel;
+use crate::tcp::tcp_server::TcpMessage;
+use crate::tcp::tcp_tunnel::TcpTunnel;
+use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
-    pem_util, ControlStream, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, Tunnel,
+    pem_util, ControlStream, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo,
     TunnelMessage, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, Upstream, UpstreamType,
-    BUFFER_POOL, SUPPORTED_CIPHER_SUITES, UDP_PACKET_SIZE,
+    SUPPORTED_CIPHER_SUITES,
 };
 use anyhow::{bail, Context, Result};
 use log::{debug, error, info, warn};
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{congestion, Endpoint, RecvStream, SendStream, TransportConfig};
+use quinn::{congestion, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -127,7 +126,7 @@ impl Server {
 
                 match tun_type {
                     TunnelType::TcpOut(info) => {
-                        Self::process_tcp_out(info.conn, info.upstream_addr).await
+                        TcpTunnel::process(info.conn, info.upstream_addr).await;
                     }
 
                     TunnelType::UdpOut(info) => {
@@ -366,97 +365,6 @@ impl Server {
         })
     }
 
-    async fn process_tcp_out(conn: quinn::Connection, upstream_addr: SocketAddr) {
-        let remote_addr = &conn.remote_address();
-        info!("start tcp streaming in TunnelOut mode, {remote_addr} ↔ {upstream_addr}");
-
-        loop {
-            match conn.accept_bi().await {
-                Err(quinn::ConnectionError::TimedOut { .. }) => {
-                    info!("connection timeout: {remote_addr}");
-                    break;
-                }
-                Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed: {remote_addr}");
-                    break;
-                }
-                Err(e) => {
-                    error!("failed to open accpet_bi: {remote_addr}, err: {e}");
-                    break;
-                }
-                Ok(quic_stream) => tokio::spawn(async move {
-                    match TcpStream::connect(&upstream_addr).await {
-                        Ok(tcp_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
-                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
-                    }
-                }),
-            };
-        }
-    }
-
-    // async fn process_udp_in(
-    //     self: &Arc<Self>,
-    //     conn: quinn::Connection,
-    //     mut udp_server: UdpServer,
-    //     tcp_sender: Option<TcpSender>,
-    // ) {
-    //     info!(
-    //         "start udp streaming in TunnelIn mode, {} ↔ {}",
-    //         udp_server.addr(),
-    //         conn.remote_address(),
-    //     );
-    //
-    //     let mut udp_server_clone = udp_server.clone();
-    //     let udp_sender = udp_server.clone_udp_sender();
-    //     let conn_clone = conn.clone();
-    //     let addr = udp_server.addr();
-    //
-    //     tokio::spawn(async move {
-    //         info!("udp server starts serving...");
-    //         udp_server.set_active(true);
-    //         let mut udp_receiver = udp_server.take_receiver().unwrap();
-    //         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
-    //             let len = packet.payload.len();
-    //             let addr = &packet.addr;
-    //             debug!("send datagram({len}) from {addr}",);
-    //             if let Err(e) = conn.send_datagram(packet.into()) {
-    //                 warn!("sending packet failed: {e:?}");
-    //             }
-    //         }
-    //
-    //         // on receiving UdpMessage::Quit, quit and put the receiver back
-    //         udp_server.set_active(false);
-    //         udp_server.put_receiver(udp_receiver);
-    //         info!("udp server quit");
-    //     });
-    //
-    //     loop {
-    //         match conn_clone.read_datagram().await {
-    //             Ok(datagram) => {
-    //                 if let Ok(packet) = UdpPacket::try_from(datagram) {
-    //                     let len = packet.payload.len();
-    //                     let addr = &packet.addr;
-    //                     debug!("send datagram({len}) to {addr}",);
-    //                     udp_sender.send(UdpMessage::Packet(packet)).await.ok();
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 if conn_clone.close_reason().is_some() {
-    //                     udp_server_clone.pause().await;
-    //                     if let Some(tcp_sender) = tcp_sender {
-    //                         tcp_sender.send(TcpMessage::Quit).await.ok();
-    //                     }
-    //                     debug!("connection is closed, will quit");
-    //                     break;
-    //                 }
-    //                 warn!("read_datagram failed: {e}");
-    //             }
-    //         }
-    //     }
-    //
-    //     info!("udp server quit: {addr}");
-    // }
-
     async fn process_tcp_in(
         self: &Arc<Self>,
         conn: quinn::Connection,
@@ -481,7 +389,7 @@ impl Server {
         tcp_server.set_active(true);
         while let Some(TcpMessage::Request(tcp_stream)) = tcp_server.recv().await {
             match conn.open_bi().await {
-                Ok(quic_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
+                Ok(quic_stream) => TcpTunnel::new().start(false, tcp_stream, quic_stream),
                 _ => {
                     error!("failed to open bi_streams to client, quit");
                     break;

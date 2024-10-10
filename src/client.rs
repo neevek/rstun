@@ -1,10 +1,10 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::tcp_server::TcpMessage,
+    tcp::{tcp_server::TcpMessage, tcp_tunnel::TcpTunnel},
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     udp::{udp_packet::UdpPacket, udp_server::UdpServer, udp_tunnel::UdpTunnel},
-    ClientConfig, ControlStream, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelMessage,
-    BUFFER_POOL, TUNNEL_MODE_IN, TUNNEL_MODE_OUT, UDP_PACKET_SIZE,
+    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelMessage, BUFFER_POOL,
+    TUNNEL_MODE_IN, TUNNEL_MODE_OUT, UDP_PACKET_SIZE,
 };
 use anyhow::{bail, Context, Result};
 use backon::ExponentialBuilder;
@@ -418,7 +418,7 @@ impl Client {
             };
 
             match conn.open_bi().await {
-                Ok(quic_stream) => Tunnel::new().start(true, tcp_stream, quic_stream),
+                Ok(quic_stream) => TcpTunnel::new().start(true, tcp_stream, quic_stream),
                 Err(e) => {
                     error!("failed to open_bi, will retry: {e}");
                     self.post_tunnel_log(
@@ -434,100 +434,6 @@ impl Client {
         tcp_server.set_active(false);
         inner_state!(self, tcp_server) = Some(tcp_server);
 
-        Ok(())
-    }
-
-    async fn serve_udp_in(
-        self: &Arc<Self>,
-        use_async: bool,
-        udp_server_addr: SocketAddr,
-    ) -> Result<()> {
-        let conn = inner_state!(self, udp_conn).clone().unwrap();
-        debug!("new udp session: {:?}", conn.remote_address());
-
-        let task = || async move {
-            let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-            loop {
-                match conn.read_datagram().await {
-                    Ok(datagram) => {
-                        if let Ok(packet) = UdpPacket::try_from(datagram) {
-                            let len = packet.payload.len();
-                            debug!("send datagram({len}) to {udp_server_addr}",);
-                            let sock = match UdpSocket::bind(local_addr).await {
-                                Ok(sock) => sock,
-                                Err(e) => {
-                                    warn!("failed to bind to localhost, err: {e:?}");
-                                    continue;
-                                }
-                            };
-
-                            if let Err(e) = sock.connect(udp_server_addr).await {
-                                warn!("failed to connect to upstream: {}, err: {e:?}", packet.addr);
-                                continue;
-                            };
-
-                            let conn = conn.clone();
-                            tokio::spawn(async move {
-                                sock.send(&packet.payload).await.ok();
-
-                                let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-                                match tokio::time::timeout(
-                                    Duration::from_secs(3),
-                                    sock.recv(&mut buf),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(len)) => {
-                                        unsafe {
-                                            buf.set_len(len);
-                                        }
-                                        debug!("read datagram({len}) from {udp_server_addr}",);
-                                        conn.send_datagram(UdpPacket::new(buf, packet.addr).into())
-                                            .unwrap();
-                                    }
-                                    Ok(Err(e)) => {
-                                        warn!("failed to read udp socket, err: {e:?}");
-                                    }
-                                    Err(_) => {
-                                        debug!("timeout on reading udp packet");
-                                    }
-                                }
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        if conn.close_reason().is_some() {
-                            debug!("connection is closed, will quit");
-                            break;
-                        }
-                        warn!("read_datagram failed: {e}");
-                    }
-                }
-            }
-        };
-
-        if use_async {
-            tokio::spawn(task());
-        } else {
-            task().await;
-        }
-
-        Ok(())
-    }
-
-    async fn serve_tcp_in(self: &Arc<Self>, tcp_server_addr: SocketAddr) -> Result<()> {
-        let conn = inner_state!(self, tcp_conn).clone().unwrap();
-        while let Ok(quic_stream) = conn.accept_bi().await {
-            match TcpStream::connect(self.config.local_tcp_server_addr.unwrap()).await {
-                Ok(tcp_stream) => Tunnel::new().start(false, tcp_stream, quic_stream),
-                Err(e) => {
-                    error!(
-                        "failed to connect to tcp server: {e}, {}",
-                        self.config.local_tcp_server_addr.unwrap(),
-                    );
-                }
-            }
-        }
         Ok(())
     }
 
@@ -552,7 +458,8 @@ impl Client {
         }
 
         if let Some(addr) = self.config.local_tcp_server_addr {
-            self.serve_tcp_in(addr).await.ok();
+            let conn = inner_state!(self, tcp_conn).clone().unwrap();
+            TcpTunnel::process(conn, addr).await;
         }
         Ok(())
     }
