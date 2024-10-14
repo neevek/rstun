@@ -166,6 +166,8 @@ pub struct ClientConfig {
     pub max_idle_timeout_ms: u64,
     pub tcp_upstream: Option<Upstream>,
     pub udp_upstream: Option<Upstream>,
+    pub dot_servers: Vec<String>,
+    pub dns_servers: Vec<String>,
     pub threads: usize,
     pub mode: &'static str,
 }
@@ -197,6 +199,8 @@ impl ClientConfig {
         cipher: &str,
         tcp_addr_mapping: &str,
         udp_addr_mapping: &str,
+        dot: &str,
+        dns: &str,
         workers: usize,
         wait_before_retry_ms: u64,
         max_idle_timeout_ms: u64,
@@ -222,6 +226,8 @@ impl ClientConfig {
         config.max_idle_timeout_ms = max_idle_timeout_ms;
         config.tcp_upstream = parse_as_upstream(mode, &tcp_sock_mapping)?;
         config.udp_upstream = parse_as_upstream(mode, &udp_sock_mapping)?;
+        config.dot_servers = dot.split(',').map(|s| s.to_string()).collect();
+        config.dns_servers = dns.split(',').map(|s| s.to_string()).collect();
         config.mode = if mode == TUNNEL_MODE_IN {
             config.local_tcp_server_addr = *tcp_sock_mapping.get(1).unwrap_or(&None);
             config.local_udp_server_addr = *udp_sock_mapping.get(1).unwrap_or(&None);

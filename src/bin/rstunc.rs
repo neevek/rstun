@@ -17,6 +17,8 @@ fn main() {
         &args.cipher,
         &args.tcp_mapping,
         &args.udp_mapping,
+        &args.dot,
+        &args.dns,
         args.workers,
         args.wait_before_retry_ms,
         args.max_idle_timeout_ms,
@@ -90,6 +92,18 @@ struct RstuncArgs {
     /// Max idle timeout in milliseconds for the connection
     #[arg(short = 'i', long, default_value_t = 30000)]
     max_idle_timeout_ms: u64,
+
+    /// Comma separated DoT servers (domains) used to resolve the server address (domain)
+    /// e.g. "dns.google,one.one.one.one"
+    /// Note that DoT servers will be resolved using any available system DNS
+    #[arg(long, verbatim_doc_comment, default_value = "")]
+    dot: String,
+
+    /// Comma separated DNS' (IPs) used to resolve the server address (domain)
+    /// Note that the --dot option if not empty takes precedence over this option
+    /// e.g. "1.1.1.1,8.8.8.8"
+    #[arg(long, verbatim_doc_comment, default_value = "")]
+    dns: String,
 
     /// Log level
     #[arg(short = 'l', long, default_value_t = String::from("I"),

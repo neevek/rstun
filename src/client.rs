@@ -267,7 +267,7 @@ impl Client {
         let mut quinn_client_cfg = quinn::ClientConfig::new(quic_client_cfg);
         quinn_client_cfg.transport_config(Arc::new(transport_cfg));
 
-        let remote_addr = Self::parse_server_addr(&self.config.server_addr).await?;
+        let remote_addr = self.parse_server_addr().await?;
         let local_addr: SocketAddr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
 
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
@@ -571,7 +571,8 @@ impl Client {
         addr.parse::<SocketAddr>().is_ok()
     }
 
-    async fn parse_server_addr(addr: &str) -> Result<SocketAddr> {
+    async fn parse_server_addr(&self) -> Result<SocketAddr> {
+        let addr = self.config.server_addr.as_str();
         let sock_addr: Result<SocketAddr> = addr.parse().context("error will be ignored");
 
         if sock_addr.is_ok() {
@@ -588,26 +589,13 @@ impl Client {
             domain = &addr[..pos];
         }
 
-        if let Ok(ip) = Self::lookup_server_ip(domain, "dns.alidns.com", vec![]).await {
-            return Ok(SocketAddr::new(ip, port));
+        for dot in &self.config.dot_servers {
+            if let Ok(ip) = Self::lookup_server_ip(domain, dot, vec![]).await {
+                return Ok(SocketAddr::new(ip, port));
+            }
         }
 
-        if let Ok(ip) = Self::lookup_server_ip(domain, "dot.pub", vec![]).await {
-            return Ok(SocketAddr::new(ip, port));
-        }
-
-        if let Ok(ip) = Self::lookup_server_ip(
-            domain,
-            "",
-            vec![
-                "1.12.12.12".to_string(),
-                "120.53.53.53".to_string(),
-                "223.5.5.5".to_string(),
-                "223.6.6.6".to_string(),
-            ],
-        )
-        .await
-        {
+        if let Ok(ip) = Self::lookup_server_ip(domain, "", self.config.dns_servers.clone()).await {
             return Ok(SocketAddr::new(ip, port));
         }
 

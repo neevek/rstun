@@ -144,6 +144,14 @@ Options:
           Wait time in milliseconds before trying [default: 5000]
   -i, --max-idle-timeout-ms <MAX_IDLE_TIMEOUT_MS>
           Max idle timeout in milliseconds for the connection [default: 30000]
+      --dot <DOT>
+          Comma separated DoT servers (domains) used to resolve the server address (domain)
+          e.g. "dns.google,one.one.one.one"
+          Note that DoT servers will be resolved using any available system DNS [default: ]
+      --dns <DNS>
+          Comma separated DNS' (IPs) used to resolve the server address (domain)
+          Note that the --dot option if not empty takes precedence over this option
+          e.g. "1.1.1.1,8.8.8.8" [default: ]
   -l, --loglevel <LOGLEVEL>
           Log level [default: I] [possible values: T, D, I, W, E]
   -h, --help
