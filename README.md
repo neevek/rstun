@@ -3,40 +3,34 @@ rstun
 
 A TCP/UDP tunnel over QUIC written in Rust.
 
-rstun is a high-performance TCP/UDP tunneling solution. It leverages the [Quinn](https://github.com/quinn-rs/quinn) library for [QUIC](https://quicwg.org/) transport, ensuring efficient, low-latency communication, secured by QUIC’s integrated TLS layer.
+rstun is a high-performance TCP/UDP tunneling solution. It leverages the [Quinn](https://github.com/quinn-rs/quinn) library for [QUIC](https://quicwg.org/) transport, ensuring efficient, low-latency bidirectional communication, secured by QUIC’s integrated TLS layer.
 
 Key Features
 ------------
 
-* TCP and UDP tunneling over a single QUIC connection.
-* Encryption provided by QUIC’s inherent TLS integration.
-* Bidirectional traffic support over a single tunnel, with two operating modes:
-  * `IN` mode: Exposes local ports through the server, allowing external access via the tunnel.
-  * `OUT` mode: Secures outgoing traffic from a local network to the internet via the server.
+* TCP and UDP tunneling over a single QUIC tunnel.
+* Encryption provided by QUIC’s inherent TLS layer.
+* Bidirectional communication support over a single QUIC tunnel
+
+Operating Modes
+-----
+
+* Inbound Tunneling (IN Mode)
+
+  In `IN` mode, rstunc allows you to expose a local service (e.g., a web server or application) to the public internet securely through the QUIC tunnel. This mode is useful for scenarios where a service is running locally behind a NAT or firewall but needs to be accessible from outside.
+
+* Outbound Tunneling (OUT Mode)
+
+  In `OUT` mode, rstunc securely tunnels local outbound traffic through rstund, which then forwards it to the specified destination. This mode is commonly used to encrypt and route traffic from a local network to external servers, leveraging QUIC for enhanced performance and security.
 
 
 Components
 ----------
 
-rstun consists of two main binaries:
+rstun consists of two binaries:
 
 * rstunc (client): Establishes and manages tunnels to the server.
-* rstund (server): Accepts incoming connections and forwards traffic according to the configured routing rules.
-
-Once the QUIC handshake completes, bidirectional streams are available, facilitating high-throughput data exchange.
-
-
-Usage
------
-
-* Inbound Tunneling (IN Mode)
-
-  In IN mode, rstunc allows you to expose a local service (e.g., a web server or application) to the public internet securely through the QUIC tunnel. This mode is useful for scenarios where a service is running locally behind a NAT or firewall but needs to be accessible from outside.
-
-* Outbound Tunneling (OUT Mode)
-
-  In OUT mode, rstunc securely tunnels local outbound traffic through rstund, which forwards it to the destination. This is typically used to secure traffic between a local network and the internet, similar to a traditional VPN but using QUIC for improved performance and security.
-
+* rstund (server): Accepts incoming connections and forwards TCP and UDP traffic according to the configured routing rules.
 
 Example
 =======
@@ -87,7 +81,7 @@ rstund -a 9000 -p 1234
 rstunc -m OUT -a 127.0.0.1:9000 -p 1234 -t 0.0.0.0:9900^8800 -u 0.0.0.0:9900^8800
 ```
 
-Options for `rstund` and `rstunc`
+Complete Options for `rstund` and `rstunc`
 ---
 
 ```
