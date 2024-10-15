@@ -106,7 +106,7 @@ impl UdpTunnel {
         .await?;
 
         debug!(
-            "new udp session: {peer_addr}, stream_map: {}",
+            " new udp session: {peer_addr}, streams: {}",
             stream_map.len()
         );
 
@@ -118,7 +118,7 @@ impl UdpTunnel {
         let stream_map = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream({peer_addr}), streams: {}",
+                "start udp stream: {peer_addr}, streams: {}",
                 stream_map.len()
             );
             loop {
