@@ -129,7 +129,7 @@ impl Client {
     pub fn start_tunneling(&mut self) {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(self.config.threads)
+            .worker_threads(self.config.workers)
             .build()
             .unwrap()
             .block_on(async { self.connect_and_serve().await });
@@ -208,7 +208,7 @@ impl Client {
     async fn connect_and_serve(&mut self) {
         info!(
             "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
-            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.threads
+            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.workers
         );
 
         let mut pending_conn = None;

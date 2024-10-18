@@ -168,7 +168,7 @@ pub struct ClientConfig {
     pub udp_upstream: Option<Upstream>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
-    pub threads: usize,
+    pub workers: usize,
     pub mode: &'static str,
 }
 
@@ -215,9 +215,13 @@ impl ClientConfig {
         let mut config = ClientConfig::default();
         config.cert_path = cert.to_string();
         config.cipher = cipher.to_string();
-        config.server_addr = server_addr.to_string();
+        config.server_addr = if !server_addr.contains(':') {
+            format!("127.0.0.1:{server_addr}")
+        } else {
+            server_addr.to_string()
+        };
         config.password = password.to_string();
-        config.threads = if workers > 0 {
+        config.workers = if workers > 0 {
             workers
         } else {
             num_cpus::get()
