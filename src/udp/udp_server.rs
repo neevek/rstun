@@ -104,6 +104,8 @@ impl UdpServer {
                     }
                 }
             }
+
+            info!("udp server quit: {addr}");
         });
 
         Ok(Self(Arc::new(Mutex::new(State {
@@ -116,6 +118,12 @@ impl UdpServer {
 
     pub fn addr(&self) -> SocketAddr {
         self.0.lock().unwrap().addr
+    }
+
+    pub async fn shutdown(&mut self) -> Result<()> {
+        let udp_sender = self.0.lock().unwrap().in_udp_sender.clone();
+        udp_sender.send(UdpMessage::Quit).await?;
+        Ok(())
     }
 
     pub fn set_active(&mut self, active: bool) {

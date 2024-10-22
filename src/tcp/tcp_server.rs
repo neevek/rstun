@@ -15,12 +15,18 @@ pub enum TcpMessage {
 pub type TcpSender = Sender<TcpMessage>;
 pub type TcpReceiver = Receiver<TcpMessage>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TcpServer {
+    state: Arc<Mutex<State>>,
+}
+
+#[derive(Debug)]
+struct State {
     addr: SocketAddr,
     tcp_sender: TcpSender,
     tcp_receiver: Option<TcpReceiver>,
-    active: Arc<Mutex<bool>>,
+    active: bool,
+    terminated: bool,
 }
 
 impl TcpServer {
@@ -29,21 +35,36 @@ impl TcpServer {
         let addr = tcp_listener.local_addr().unwrap();
 
         let (tcp_sender, tcp_receiver) = channel(4);
-        let tcp_sender_clone = tcp_sender.clone();
-
-        // unless being explicitly requested, always drop the connections because we are not
-        // sure whether the receiver is ready to aceept connections, default is false
-        let active = Arc::new(Mutex::new(false));
-        let active_clone = active.clone();
+        let state = Arc::new(Mutex::new(State {
+            addr,
+            tcp_sender: tcp_sender.clone(),
+            tcp_receiver: Some(tcp_receiver),
+            active: false,
+            terminated: false,
+        }));
+        let state_clone = state.clone();
 
         tokio::spawn(async move {
             loop {
                 match tcp_listener.accept().await {
                     Ok((socket, addr)) => {
-                        if !*active.lock().unwrap() {
-                            // silently drop the connection
-                            debug!("drop connection: {addr}");
-                            continue;
+                        {
+                            let (terminated, active) = {
+                                let state = state.lock().unwrap();
+                                (state.terminated, state.active)
+                            };
+
+                            if terminated {
+                                tcp_sender.send(TcpMessage::Quit).await.ok();
+                                break;
+                            }
+
+                            if !active {
+                                // unless being explicitly requested, always drop the connections because we are not
+                                // sure whether the receiver is ready to aceept connections
+                                debug!("drop connection: {addr}");
+                                continue;
+                            }
                         }
 
                         match tcp_sender
@@ -71,41 +92,37 @@ impl TcpServer {
             info!("tcp server quit: {addr}");
         });
 
-        Ok(Self {
-            addr,
-            tcp_sender: tcp_sender_clone,
-            tcp_receiver: Some(tcp_receiver),
-            active: active_clone,
-        })
+        Ok(Self { state: state_clone })
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        let tcp_receiver = self.tcp_receiver.take();
-        // drop the Receiver
-        drop(tcp_receiver);
-
+        let addr = {
+            let mut state = self.state.lock().unwrap();
+            state.terminated = true;
+            state.addr
+        };
         // initiate a new connection to wake up the accept() loop
-        // and make it active so that the sender end of the channel
-        // will send a TcpStream to the closed receiver, which causes
-        // the entire above loop to quit
-        self.set_active(true);
-        TcpStream::connect(self.addr).await?;
+        TcpStream::connect(addr).await?;
         Ok(())
     }
 
     pub fn addr(&self) -> SocketAddr {
-        self.addr
+        self.state.lock().unwrap().addr
     }
 
-    pub async fn recv(&mut self) -> Option<TcpMessage> {
-        self.tcp_receiver.as_mut().unwrap().recv().await
+    pub fn take_tcp_receiver(&mut self) -> Option<TcpReceiver> {
+        self.state.lock().unwrap().tcp_receiver.take()
+    }
+
+    pub fn put_tcp_receiver(&mut self, tcp_receiver: TcpReceiver) {
+        self.state.lock().unwrap().tcp_receiver = Some(tcp_receiver)
     }
 
     pub fn clone_tcp_sender(&self) -> Sender<TcpMessage> {
-        self.tcp_sender.clone()
+        self.state.lock().unwrap().tcp_sender.clone()
     }
 
     pub fn set_active(&self, flag: bool) {
-        *self.active.lock().unwrap() = flag;
+        self.state.lock().unwrap().active = flag
     }
 }

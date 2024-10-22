@@ -3,6 +3,7 @@ use crate::{TcpServer, BUFFER_POOL};
 use anyhow::Result;
 use log::{debug, error, info};
 use quinn::{Connection, RecvStream, SendStream};
+use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
@@ -24,10 +25,11 @@ impl TcpTunnel {
         pending_stream: &mut Option<TcpStream>,
     ) {
         tcp_server.set_active(true);
+        let mut tcp_receiver = tcp_server.take_tcp_receiver().unwrap();
         loop {
             let tcp_stream = match pending_stream.take() {
                 Some(tcp_stream) => tcp_stream,
-                None => match tcp_server.recv().await {
+                None => match tcp_receiver.borrow_mut().recv().await {
                     Some(TcpMessage::Request(tcp_stream)) => tcp_stream,
                     _ => break,
                 },

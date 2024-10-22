@@ -1,6 +1,6 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::{tcp_server::TcpMessage, tcp_tunnel::TcpTunnel},
+    tcp::tcp_tunnel::TcpTunnel,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelMessage, TUNNEL_MODE_IN,
@@ -30,7 +30,7 @@ use std::{
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
-use tokio::{net::TcpStream, sync::mpsc::Sender, task::JoinHandle};
+use tokio::{net::TcpStream, task::JoinHandle};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
@@ -38,7 +38,7 @@ const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
 static INIT: Once = Once::new();
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, PartialEq)]
 pub enum ClientState {
     Idle = 0,
     Preparing,
@@ -46,6 +46,7 @@ pub enum ClientState {
     Connected,
     LoggingIn,
     Tunneling,
+    Stopping,
     Terminated,
 }
 
@@ -58,6 +59,7 @@ impl Display for ClientState {
             ClientState::Connected => write!(f, "Connected"),
             ClientState::LoggingIn => write!(f, "LoggingIn"),
             ClientState::Tunneling => write!(f, "Tunneling"),
+            ClientState::Stopping => write!(f, "Stopping"),
             ClientState::Terminated => write!(f, "Terminated"),
         }
     }
@@ -69,7 +71,6 @@ struct State {
     tcp_server: Option<TcpServer>,
     udp_server: Option<UdpServer>,
     client_state: ClientState,
-    channel_message_sender: Option<Sender<TcpMessage>>,
     total_traffic_data: TunnelTraffic,
     tunnel_info_bridge: TunnelInfoBridge,
     on_info_report_enabled: bool,
@@ -83,7 +84,6 @@ impl State {
             tcp_conn: None,
             udp_conn: None,
             client_state: ClientState::Idle,
-            channel_message_sender: None,
             total_traffic_data: TunnelTraffic::default(),
             tunnel_info_bridge: TunnelInfoBridge::new(),
             on_info_report_enabled: false,
@@ -160,7 +160,6 @@ impl Client {
         self.post_tunnel_log(format!("[TunnelOut] tcp server bound to: {addr}").as_str());
 
         let mut state = self.inner_state.lock().unwrap();
-        state.channel_message_sender = Some(tcp_server.clone_tcp_sender());
         state.tcp_server = Some(tcp_server);
         Ok(Some(addr))
     }
@@ -197,8 +196,29 @@ impl Client {
         self.config.clone()
     }
 
-    pub fn stop(&self) -> Result<()> {
-        Ok(())
+    pub fn stop(&self) {
+        self.set_and_post_tunnel_state(ClientState::Stopping);
+
+        if let Ok(mut state) = self.inner_state.lock() {
+            if let Some(mut tcp_server) = state.tcp_server.take() {
+                tokio::spawn(async move {
+                    tcp_server.shutdown().await.ok();
+                });
+            }
+
+            if let Some(mut udp_server) = state.udp_server.take() {
+                tokio::spawn(async move {
+                    udp_server.shutdown().await.ok();
+                });
+            }
+
+            if let Some(conn) = &state.tcp_conn {
+                conn.close(VarInt::from_u32(1), b"");
+            }
+            if let Some(conn) = &state.udp_conn {
+                conn.close(VarInt::from_u32(1), b"");
+            }
+        }
     }
 
     pub fn connect_and_serve_async(mut self) -> JoinHandle<()> {
@@ -220,6 +240,7 @@ impl Client {
                         .with_max_delay(Duration::from_secs(10))
                         .with_max_times(usize::MAX),
                 )
+                .when(|_| self.get_state() != ClientState::Stopping)
                 .sleep(tokio::time::sleep)
                 .notify(|err: &anyhow::Error, dur: Duration| {
                     warn!("will retry after {dur:?}, err: {err:?}");
@@ -240,6 +261,10 @@ impl Client {
                     break;
                 }
             };
+
+            if self.get_state() == ClientState::Stopping {
+                break;
+            }
         }
         self.post_tunnel_log("quit");
         self.set_and_post_tunnel_state(ClientState::Terminated);
@@ -368,10 +393,16 @@ impl Client {
             self.report_traffic_data_in_background(conn.clone()).await;
         }
 
-        let tcp_server = self.inner_state.lock().unwrap().tcp_server.take();
-        let tcp_sender = tcp_server
-            .as_ref()
-            .map(|tcp_server| tcp_server.clone_tcp_sender());
+        let (tcp_server, tcp_sender) = {
+            if let Some(tcp_server) = &self.inner_state.lock().unwrap().tcp_server {
+                (
+                    Some(tcp_server.clone()),
+                    Some(tcp_server.clone_tcp_sender()),
+                )
+            } else {
+                (None, None)
+            }
+        };
 
         let udp_server = inner_state!(self, udp_server).clone();
         if let Some(udp_server) = udp_server {
@@ -402,7 +433,6 @@ impl Client {
 
             let mut state = self.inner_state.lock().unwrap();
             state.tcp_conn = Some(conn);
-            state.tcp_server = Some(tcp_server);
         }
 
         let mut inner_state = self.inner_state.lock().unwrap();
