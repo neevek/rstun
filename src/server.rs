@@ -144,7 +144,7 @@ impl Server {
         Ok(quinn_server_cfg)
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(&self) -> Result<()> {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
