@@ -28,7 +28,7 @@ pub struct UdpServer(Arc<Mutex<State>>);
 #[derive(Debug)]
 struct State {
     addr: SocketAddr,
-    active: Arc<Mutex<bool>>,
+    active: bool,
     in_udp_sender: UdpSender,
     udp_receiver: Option<UdpReceiver>,
 }
@@ -41,8 +41,13 @@ impl UdpServer {
         let (in_udp_sender, mut in_udp_receiver) = channel::<UdpMessage>(4);
         let (out_udp_sender, out_udp_receiver) = channel::<UdpMessage>(4);
 
-        let active = Arc::new(Mutex::new(false));
-        let active_clone = active.clone();
+        let state = Arc::new(Mutex::new(State {
+            addr,
+            active: false,
+            in_udp_sender,
+            udp_receiver: Some(out_udp_receiver),
+        }));
+        let state_clone = state.clone();
 
         tokio::spawn(async move {
             loop {
@@ -51,7 +56,10 @@ impl UdpServer {
                     result = udp_socket.recv_from(&mut buf) => {
                         match result {
                             Ok((size, addr)) => {
-                                if !*active.lock().unwrap() {
+                                let active = {
+                                    state.clone().lock().unwrap().active
+                                };
+                                if !active {
                                     debug!("drop the packet ({size}) from addr: {addr}");
                                     continue;
                                 }
@@ -108,12 +116,7 @@ impl UdpServer {
             info!("udp server quit: {addr}");
         });
 
-        Ok(Self(Arc::new(Mutex::new(State {
-            addr,
-            active: active_clone,
-            in_udp_sender,
-            udp_receiver: Some(out_udp_receiver),
-        }))))
+        Ok(Self(state_clone))
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -127,7 +130,7 @@ impl UdpServer {
     }
 
     pub fn set_active(&mut self, active: bool) {
-        *self.0.lock().unwrap().active.lock().unwrap() = active
+        self.0.lock().unwrap().active = active
     }
 
     pub fn take_receiver(&mut self) -> Option<UdpReceiver> {

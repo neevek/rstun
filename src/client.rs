@@ -135,7 +135,7 @@ impl Client {
             .block_on(async { self.connect_and_serve().await });
     }
 
-    pub async fn start_tcp_server(&mut self) -> Result<Option<SocketAddr>> {
+    pub async fn start_tcp_server(&self) -> Result<Option<SocketAddr>> {
         if self.config.mode != TUNNEL_MODE_OUT {
             bail!("call start_tcp_server() for TunnelOut mode only");
         }
@@ -164,7 +164,7 @@ impl Client {
         Ok(Some(addr))
     }
 
-    pub async fn start_udp_server(&mut self) -> Result<Option<SocketAddr>> {
+    pub async fn start_udp_server(&self) -> Result<Option<SocketAddr>> {
         if self.config.mode != TUNNEL_MODE_OUT {
             bail!("call start_udp_server() for TunnelOut mode only");
         }
@@ -221,8 +221,9 @@ impl Client {
         }
     }
 
-    pub fn connect_and_serve_async(mut self) -> JoinHandle<()> {
-        tokio::spawn(async move { self.connect_and_serve().await })
+    pub fn connect_and_serve_async(&self) -> JoinHandle<()> {
+        let mut this = self.clone();
+        tokio::spawn(async move { this.connect_and_serve().await })
     }
 
     async fn connect_and_serve(&mut self) {
