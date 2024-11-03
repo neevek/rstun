@@ -380,10 +380,12 @@ pub mod android {
         jserverAddr: JString,
         jtcpMapping: JString,
         judpMapping: JString,
+        jdotServer: JString,
+        jdnsServer: JString,
         jpassword: JString,
         jcertFilePath: JString,
         jcipher: JString,
-        jthreads: jint,
+        jworkers: jint,
         jwaitBeforeRetryMs: jint,
         jmaxIdleTimeoutMs: jint,
     ) -> jlong {
@@ -391,6 +393,8 @@ pub mod android {
         let server_addr = convert_jstring(&mut env, jserverAddr);
         let tcp_mapping = convert_jstring(&mut env, jtcpMapping);
         let udp_mapping = convert_jstring(&mut env, judpMapping);
+        let dot_server = convert_jstring(&mut env, jdotServer);
+        let dns_server = convert_jstring(&mut env, jdnsServer);
         let password = convert_jstring(&mut env, jpassword);
         let cert_file_path = convert_jstring(&mut env, jcertFilePath);
         let cipher = convert_jstring(&mut env, jcipher);
@@ -403,7 +407,9 @@ pub mod android {
             &cipher,
             &tcp_mapping,
             &udp_mapping,
-            jthreads as usize,
+            &dot_server,
+            &dns_server,
+            jworkers as usize,
             jwaitBeforeRetryMs as u64,
             jmaxIdleTimeoutMs as u64,
         );
