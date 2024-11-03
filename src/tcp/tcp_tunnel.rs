@@ -39,14 +39,12 @@ impl TcpTunnel {
                 Ok(quic_stream) => TcpTunnel::run(tunnel_out, tcp_stream, quic_stream),
                 Err(e) => {
                     error!("failed to open_bi, will retry: {e}");
-                    // self.post_tunnel_log(
-                    //     format!("connection failed, will reconnect: {e}").as_str(),
-                    // );
                     *pending_stream = Some(tcp_stream);
                     break;
                 }
             }
         }
+        tcp_server.put_tcp_receiver(tcp_receiver);
         // the tcp server will be reused when tunnel reconnects
         tcp_server.set_active(false);
     }
