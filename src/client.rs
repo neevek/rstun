@@ -405,6 +405,8 @@ impl Client {
             }
         };
 
+        self.set_and_post_tunnel_state(ClientState::Tunneling);
+
         let udp_server = inner_state!(self, udp_server).clone();
         if let Some(udp_server) = udp_server {
             let conn = inner_state!(self, udp_conn).clone().unwrap();
