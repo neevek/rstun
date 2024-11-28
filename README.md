@@ -57,10 +57,11 @@ rstund \
 ```
 rstunc
   --mode OUT \
-  --server-addr 1.2.3.4:6060 \
+  --addr 1.2.3.4:6060 \
   --password 123456 \
   --cert path/to/cert.der \
-  --addr-mapping 0.0.0.0:9900^8800
+  --tcp-mapping 0.0.0.0:9900^8800 \
+  --loglevel D
 ```
   - `--mode`, `OUT` for securing data from local to the server through the tunnel.
   - `--server-addr`, domain name or IP address of the server.
