@@ -5,14 +5,17 @@ use log::{debug, error, info};
 use quinn::{Connection, RecvStream, SendStream};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
+use tokio::time::error::Elapsed;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransferError {
     InternalError,
+    TimeoutError,
 }
 
 pub struct TcpTunnel;
@@ -101,8 +104,17 @@ impl TcpTunnel {
                     &mut transfer_bytes,
                 )
                 .await;
-                if let Ok(0) | Err(_) = result {
-                    break;
+                match result {
+                    Err(TransferError::TimeoutError) => {
+                        log::warn!("tcp stream timeout");
+                        break;
+                    }
+                    Ok(0) | Err(_) => {
+                        break;
+                    }
+                    _ => {
+                        // ok
+                    }
                 }
             }
 
@@ -116,9 +128,9 @@ impl TcpTunnel {
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
-        let len_read = tcp_read
-            .read(buffer)
+        let len_read = tokio::time::timeout(Duration::from_secs(35), tcp_read.read(buffer))
             .await
+            .map_err(|_: Elapsed| TransferError::TimeoutError)?
             .map_err(|_| TransferError::InternalError)?;
         if len_read > 0 {
             *transfer_bytes += len_read as u64;
