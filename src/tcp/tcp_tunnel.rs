@@ -5,6 +5,8 @@ use log::{debug, error, info};
 use quinn::{Connection, RecvStream, SendStream};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
@@ -68,14 +70,15 @@ impl TcpTunnel {
 
         debug!("[{tag}] START {index:<3} →  {in_addr:<20}");
 
+        let loop_count = Arc::new(AtomicI32::new(0));
+        let loop_count_clone = loop_count.clone();
         const BUFFER_SIZE: usize = 8192;
 
         tokio::spawn(async move {
             let mut transfer_bytes = 0u64;
-            let mut loop_count = 0u32;
             let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
             loop {
-                loop_count += 1;
+                let c_start = loop_count.load(Ordering::Relaxed);
                 let result = Self::quic_to_tcp(
                     &mut quic_recv,
                     &mut tcp_write,
@@ -83,31 +86,14 @@ impl TcpTunnel {
                     &mut transfer_bytes,
                 )
                 .await;
-                if let Ok(0) | Err(_) = result {
-                    break;
-                }
-            }
+                let c_end = loop_count.fetch_add(1, Ordering::Relaxed);
 
-            debug!("[{tag}] END   {index:<3} →  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
-        });
-
-        tokio::spawn(async move {
-            let mut transfer_bytes = 0u64;
-            let mut loop_count = 0u32;
-            let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
-            loop {
-                loop_count += 1;
-                let result = Self::tcp_to_quic(
-                    &mut tcp_read,
-                    &mut quic_send,
-                    &mut buffer,
-                    &mut transfer_bytes,
-                )
-                .await;
                 match result {
                     Err(TransferError::TimeoutError) => {
-                        log::warn!("tcp stream timeout");
-                        break;
+                        if c_start == c_end {
+                            log::warn!("quic to tcp timeout");
+                            break;
+                        }
                     }
                     Ok(0) | Err(_) => {
                         break;
@@ -118,7 +104,40 @@ impl TcpTunnel {
                 }
             }
 
-            debug!("[{tag}] END  {index:<3} ←  {in_addr:<20} | ⟳ {loop_count:<8} | {transfer_bytes:<10}");
+            debug!("[{tag}] END  {index:<3} →  {in_addr}, {transfer_bytes} bytes");
+        });
+
+        tokio::spawn(async move {
+            let mut transfer_bytes = 0u64;
+            let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
+            loop {
+                let c_start = loop_count_clone.load(Ordering::Relaxed);
+                let result = Self::tcp_to_quic(
+                    &mut tcp_read,
+                    &mut quic_send,
+                    &mut buffer,
+                    &mut transfer_bytes,
+                )
+                .await;
+                let c_end = loop_count_clone.fetch_add(1, Ordering::Relaxed);
+
+                match result {
+                    Err(TransferError::TimeoutError) => {
+                        if c_start == c_end {
+                            log::warn!("tcp to quic timeout");
+                            break;
+                        }
+                    }
+                    Ok(0) | Err(_) => {
+                        break;
+                    }
+                    _ => {
+                        // ok
+                    }
+                }
+            }
+
+            debug!("[{tag}] END  {index:<3} ←  {in_addr}, {transfer_bytes} bytes");
         });
     }
 
@@ -128,7 +147,7 @@ impl TcpTunnel {
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
-        let len_read = tokio::time::timeout(Duration::from_secs(35), tcp_read.read(buffer))
+        let len_read = tokio::time::timeout(Duration::from_secs(30), tcp_read.read(buffer))
             .await
             .map_err(|_: Elapsed| TransferError::TimeoutError)?
             .map_err(|_| TransferError::InternalError)?;
@@ -153,9 +172,9 @@ impl TcpTunnel {
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
     ) -> Result<usize, TransferError> {
-        let result = quic_recv
-            .read(buffer)
+        let result = tokio::time::timeout(Duration::from_secs(30), quic_recv.read(buffer))
             .await
+            .map_err(|_: Elapsed| TransferError::TimeoutError)?
             .map_err(|_| TransferError::InternalError)?;
         if let Some(len_read) = result {
             *transfer_bytes += len_read as u64;
