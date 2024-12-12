@@ -57,7 +57,7 @@ rstund \
 ```
 rstunc
   --mode OUT \
-  --addr 1.2.3.4:6060 \
+  --server-addr 1.2.3.4:6060 \
   --password 123456 \
   --cert path/to/cert.der \
   --tcp-mapping 0.0.0.0:9900^8800 \
