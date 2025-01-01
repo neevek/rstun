@@ -28,6 +28,7 @@ impl UdpTunnel {
         mut udp_server: UdpServer,
         tcp_sender: Option<TcpSender>,
         use_sync: bool,
+        udp_timeout_ms: u64,
     ) -> Result<()> {
         let task = || async move {
             let stream_map = Arc::new(DashMap::new());
@@ -41,6 +42,7 @@ impl UdpTunnel {
                     udp_server.clone(),
                     packet.addr,
                     stream_map.clone(),
+                    udp_timeout_ms,
                 )
                 .await
                 {
@@ -91,6 +93,7 @@ impl UdpTunnel {
         udp_server: UdpServer,
         peer_addr: SocketAddr,
         stream_map: Arc<DashMap<SocketAddr, TSafe<SendStream>>>,
+        udp_timeout_ms: u64,
     ) -> Result<TSafe<SendStream>> {
         if let Some(s) = stream_map.get(&peer_addr) {
             return Ok((*s).clone());
@@ -114,7 +117,6 @@ impl UdpTunnel {
         stream_map.insert(peer_addr, quic_send.clone());
         let udp_sender = udp_server.clone_udp_sender();
 
-        const TIMEOUT_SECS: u64 = 5;
         let stream_map = stream_map.clone();
         tokio::spawn(async move {
             debug!(
@@ -124,7 +126,7 @@ impl UdpTunnel {
             loop {
                 let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
                 match tokio::time::timeout(
-                    Duration::from_secs(TIMEOUT_SECS),
+                    Duration::from_millis(udp_timeout_ms),
                     TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
                 )
                 .await
@@ -165,7 +167,7 @@ impl UdpTunnel {
         Ok(quic_send)
     }
 
-    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr) {
+    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr, udp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
         info!("start udp streaming, {remote_addr} ↔ {upstream_addr}");
 
@@ -184,7 +186,8 @@ impl UdpTunnel {
                     break;
                 }
                 Ok((quic_send, quic_recv)) => tokio::spawn(async move {
-                    Self::process_internal(quic_send, quic_recv, upstream_addr).await
+                    Self::process_internal(quic_send, quic_recv, upstream_addr, udp_timeout_ms)
+                        .await
                 }),
             };
         }
@@ -196,6 +199,7 @@ impl UdpTunnel {
         mut quic_send: SendStream,
         mut quic_recv: RecvStream,
         upstream_addr: SocketAddr,
+        udp_timeout_ms: u64,
     ) -> Result<()> {
         let peer_addr = match TunnelMessage::recv(&mut quic_recv).await {
             Ok(TunnelMessage::ReqUdpStart(peer_addr)) => peer_addr.0,
@@ -217,14 +221,13 @@ impl UdpTunnel {
             log_and_bail!("failed to connect to upstream: {upstream_addr}, err: {e:?}");
         };
 
-        const TIMEOUT_SECS: u64 = 5;
         let udp_socket_clone = udp_socket.clone();
         tokio::spawn(async move {
             debug!("start udp stream: {peer_addr} ← {upstream_addr}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 match tokio::time::timeout(
-                    Duration::from_secs(TIMEOUT_SECS),
+                    Duration::from_millis(udp_timeout_ms),
                     udp_socket_clone.recv(&mut buf),
                 )
                 .await
@@ -257,7 +260,7 @@ impl UdpTunnel {
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
             match tokio::time::timeout(
-                Duration::from_secs(TIMEOUT_SECS),
+                Duration::from_millis(udp_timeout_ms),
                 TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
             )
             .await

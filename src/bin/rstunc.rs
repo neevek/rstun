@@ -21,7 +21,9 @@ fn main() {
         &args.dns,
         args.workers,
         args.wait_before_retry_ms,
-        args.max_idle_timeout_ms,
+        args.quic_timeout_ms,
+        args.tcp_timeout_ms,
+        args.udp_timeout_ms,
     )
     .map_err(|e| {
         error!("{e}");
@@ -89,9 +91,17 @@ struct RstuncArgs {
     #[arg(short = 'r', long, default_value_t = 5000)]
     wait_before_retry_ms: u64,
 
-    /// Max idle timeout in milliseconds for the connection
-    #[arg(short = 'i', long, default_value_t = 30000)]
-    max_idle_timeout_ms: u64,
+    /// Quic idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 30000)]
+    quic_timeout_ms: u64,
+
+    /// Tcp idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 30000)]
+    tcp_timeout_ms: u64,
+
+    /// Udp idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 5000)]
+    udp_timeout_ms: u64,
 
     /// Comma separated DoT servers (domains) used to resolve the server address (domain)
     /// e.g. "dns.google,one.one.one.one"

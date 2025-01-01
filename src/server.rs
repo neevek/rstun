@@ -83,7 +83,7 @@ impl Server {
         info!(
             "tunnel server is bound on address: {}, idle_timeout: {}",
             endpoint.local_addr()?,
-            config.max_idle_timeout_ms
+            config.quic_timeout_ms
         );
 
         let ep = endpoint.clone();
@@ -129,12 +129,11 @@ impl Server {
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
         transport_cfg.send_window(1024 * 1024 * 2);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        if config.max_idle_timeout_ms > 0 {
-            let timeout = IdleTimeout::from(VarInt::from_u32(config.max_idle_timeout_ms as u32));
+        if config.quic_timeout_ms > 0 {
+            let timeout = IdleTimeout::from(VarInt::from_u32(config.quic_timeout_ms as u32));
             transport_cfg.max_idle_timeout(Some(timeout));
-            transport_cfg.keep_alive_interval(Some(Duration::from_millis(
-                config.max_idle_timeout_ms * 2 / 3,
-            )));
+            transport_cfg
+                .keep_alive_interval(Some(Duration::from_millis(config.quic_timeout_ms * 2 / 3)));
         }
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
@@ -164,11 +163,13 @@ impl Server {
 
                 match tun_type {
                     TunnelType::TcpOut(info) => {
-                        TcpTunnel::process(info.conn, info.upstream_addr).await;
+                        TcpTunnel::process(info.conn, info.upstream_addr, config.tcp_timeout_ms)
+                            .await;
                     }
 
                     TunnelType::UdpOut(info) => {
-                        UdpTunnel::process(info.conn, info.upstream_addr).await
+                        UdpTunnel::process(info.conn, info.upstream_addr, config.udp_timeout_ms)
+                            .await
                     }
 
                     TunnelType::TcpIn(mut info) => {
@@ -181,7 +182,14 @@ impl Server {
                                 sender: info.tcp_server.clone_tcp_sender(),
                             });
 
-                        TcpTunnel::start(false, &info.conn, &mut info.tcp_server, &mut None).await;
+                        TcpTunnel::start(
+                            false,
+                            &info.conn,
+                            &mut info.tcp_server,
+                            &mut None,
+                            config.tcp_timeout_ms,
+                        )
+                        .await;
                         info.tcp_server.shutdown().await.ok();
                     }
 
@@ -195,9 +203,15 @@ impl Server {
                                 sender: info.udp_server.clone_udp_sender(),
                             });
 
-                        UdpTunnel::start(info.conn, info.udp_server, None, false)
-                            .await
-                            .ok();
+                        UdpTunnel::start(
+                            info.conn,
+                            info.udp_server,
+                            None,
+                            false,
+                            config.udp_timeout_ms,
+                        )
+                        .await
+                        .ok();
                     }
                 }
 

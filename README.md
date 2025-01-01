@@ -8,9 +8,8 @@ rstun is a high-performance TCP/UDP tunneling solution. It leverages the [Quinn]
 Key Features
 ------------
 
-* TCP and UDP tunneling over a single QUIC tunnel.
+* Bidirectional TCP and UDP communication over a single QUIC tunnel.
 * Encryption provided by QUIC’s inherent TLS layer.
-* Bidirectional communication support over a single QUIC tunnel
 
 Operating Modes
 -----
@@ -22,7 +21,6 @@ Operating Modes
 * Outbound Tunneling (OUT Mode)
 
   In `OUT` mode, rstunc securely tunnels local outbound traffic through rstund, which then forwards it to the specified destination. This mode is commonly used to encrypt and route traffic from a local network to external servers, leveraging QUIC for enhanced performance and security.
-
 
 Components
 ----------
@@ -46,11 +44,11 @@ rstund \
   --cert path/to/cert.der \
   --key path/to/key.der
 ```
-  - `--addr` specifies the ip:port that the server is listening on.
-  - `--tcp-upstream` is the default TCP upstream for `OUT` mode tunneling if the client doesn't specify one. Traffic from the client through the tunnel will be forwarded to this upstream.
-  - `--udp-upstream` is the default UDP upstream for `OUT` mode tunneling if the client doesn't specify one. Traffic from the client through the tunnel will be forwarded to this upstream.
+  - `--addr` specifies the ip:port pair that the server will be listening on.
+  - `--tcp-upstream` is the default TCP upstream for `OUT` mode tunneling if the client doesn't specify one. Tcp traffic from the client through the tunnel will be forwarded to this upstream.
+  - `--udp-upstream` is the default UDP upstream for `OUT` mode tunneling if the client doesn't specify one. Udp traffic from the client through the tunnel will be forwarded to this upstream.
   - `--password`, password of the server, the client `rstunc` is required to send this password to successfully build a tunnel with the server.
-  - `cert` and `key` are certificate and private key for the domain of the server, self-signed certificate is allowed, but you will have to connect to the server using IP address and the certificate will also be required by `rstunc` for verification in this case (see below). Anyway, getting a certificate for your domain from a trusted CA and connecting to the server using domain name is always recommended. Note `cert` and `key` are optional, if they are not specified, the domain `localhost` is assumed and a self-signed certificate is generated on the fly, but this is for TEST only, Man-In-The-Middle attack can occur with such setting, so make sure **it is only used for TEST**!
+  - `cert` and `key` are certificate and private key for the domain of the server, self-signed certificate is allowed, but you will have to connect to the server using IP address and the certificate will also be required by `rstunc` for verification in this case (see below). Anyway, getting a certificate for your domain from a trusted CA and connecting to the server using domain name is always recommended. Note `cert` and `key` are optional, if they are not specified, the domain `localhost` is assumed and a self-signed certificate is generated on the fly, but this is for test only, Man-In-The-Middle attack can occur with such setting, so make sure **it is only used for testing**!
 
 * Start the client
 
@@ -64,7 +62,7 @@ rstunc
   --loglevel D
 ```
   - `--mode`, `OUT` for securing data from local to the server through the tunnel.
-  - `--server-addr`, domain name or IP address of the server.
+  - `--server-addr`, domain name or IP address of the server, port is always required.
   - `--password`, same as that for the server.
   - `--cert`, see explanation above for `rstund`. Note this is also optional if connecting to the server with a domain name, or the server `rstund` runs with an auto-generated self-signed certificate (see the TEST example below).
   - `--addr-mapping` is an address mapping between two `ip:port` pairs separated by the `^` character, the format is `[ip:]port^[ip:]port`, in the example above, a local port `9900` is mapped to the remote port `8800` of the `1.2.3.4` server that runs `rstund`. i.e. all traffic from the local port `9900` will be forwarded to the remote port `8800` through the tunnel. `--addr-mapping` also supports using `ANY` as the second part of the mapping for `OUT` mode tunneling, in which case, the server default will be used. For example `9900^ANY`.
@@ -104,8 +102,12 @@ Options:
           Path to the key file, can be empty if no cert is provided [default: ]
   -w, --workers <WORKERS>
           Threads to run async tasks [default: 0]
-  -i, --max-idle-timeout-ms <MAX_IDLE_TIMEOUT_MS>
-          Max idle timeout milliseconds for the connection [default: 40000]
+      --quic-timeout-ms <QUIC_TIMEOUT_MS>
+          Quic idle timeout in milliseconds for the connection [default: 40000]
+      --tcp-timeout-ms <TCP_TIMEOUT_MS>
+          Tcp idle timeout in milliseconds for the connection [default: 30000]
+      --udp-timeout-ms <UDP_TIMEOUT_MS>
+          Udp idle timeout in milliseconds for the connection [default: 30000]
   -l, --loglevel <LOGLEVEL>
           [default: I] [possible values: T, D, I, W, E]
   -h, --help
@@ -143,8 +145,12 @@ Options:
           Workers to run async tasks [default: 0]
   -r, --wait-before-retry-ms <WAIT_BEFORE_RETRY_MS>
           Wait time in milliseconds before trying [default: 5000]
-  -i, --max-idle-timeout-ms <MAX_IDLE_TIMEOUT_MS>
-          Max idle timeout in milliseconds for the connection [default: 30000]
+      --quic-timeout-ms <QUIC_TIMEOUT_MS>
+          Quic idle timeout in milliseconds for the connection [default: 30000]
+      --tcp-timeout-ms <TCP_TIMEOUT_MS>
+          Tcp idle timeout in milliseconds for the connection [default: 30000]
+      --udp-timeout-ms <UDP_TIMEOUT_MS>
+          Udp idle timeout in milliseconds for the connection [default: 5000]
       --dot <DOT>
           Comma separated DoT servers (domains) used to resolve the server address (domain)
           e.g. "dns.google,one.one.one.one"

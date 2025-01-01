@@ -52,7 +52,9 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         key_path: args.key,
         default_tcp_upstream: parse_upstreams("tcp", &args.tcp_upstream)?,
         default_udp_upstream: parse_upstreams("udp", &args.udp_upstream)?,
-        max_idle_timeout_ms: args.max_idle_timeout_ms,
+        quic_timeout_ms: args.quic_timeout_ms,
+        tcp_timeout_ms: args.tcp_timeout_ms,
+        udp_timeout_ms: args.udp_timeout_ms,
         dashboard_server: "".to_string(),
         dashboard_server_credential: "".to_string(),
     };
@@ -134,9 +136,17 @@ struct RstundArgs {
     #[arg(short = 'w', long, default_value_t = 0)]
     workers: usize,
 
-    /// Max idle timeout milliseconds for the connection
-    #[arg(short = 'i', long, default_value_t = 40000)]
-    max_idle_timeout_ms: u64,
+    /// Quic idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 40000)]
+    quic_timeout_ms: u64,
+
+    /// Tcp idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 30000)]
+    tcp_timeout_ms: u64,
+
+    /// Udp idle timeout in milliseconds for the connection
+    #[arg(long, default_value_t = 5000)]
+    udp_timeout_ms: u64,
 
     #[arg(short = 'l', long, default_value_t = String::from("I"),
         value_parser = PossibleValuesParser::new(["T", "D", "I", "W", "E"]).map(|v| match v.as_str() {

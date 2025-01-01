@@ -229,7 +229,7 @@ impl Client {
     async fn connect_and_serve(&mut self) {
         info!(
             "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
-            self.config.max_idle_timeout_ms, self.config.wait_before_retry_ms, self.config.workers
+            self.config.quic_timeout_ms, self.config.wait_before_retry_ms, self.config.workers
         );
 
         let mut pending_conn = None;
@@ -279,12 +279,11 @@ impl Client {
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
 
-        if self.config.max_idle_timeout_ms > 0 {
-            let timeout =
-                IdleTimeout::from(VarInt::from_u32(self.config.max_idle_timeout_ms as u32));
+        if self.config.quic_timeout_ms > 0 {
+            let timeout = IdleTimeout::from(VarInt::from_u32(self.config.quic_timeout_ms as u32));
             transport_cfg.max_idle_timeout(Some(timeout));
             transport_cfg.keep_alive_interval(Some(Duration::from_millis(
-                self.config.max_idle_timeout_ms * 2 / 3,
+                self.config.quic_timeout_ms * 2 / 3,
             )));
         }
 
@@ -411,6 +410,7 @@ impl Client {
         if let Some(udp_server) = udp_server {
             let conn = inner_state!(self, udp_conn).clone().unwrap();
             let udp_only = self.config.local_tcp_server_addr.is_none();
+            let udp_timeout_ms = self.config.udp_timeout_ms;
             self.post_tunnel_log(
                 format!(
                     "[TunnelOut] start serving udp via: {}",
@@ -418,7 +418,7 @@ impl Client {
                 )
                 .as_str(),
             );
-            UdpTunnel::start(conn, udp_server, tcp_sender, udp_only)
+            UdpTunnel::start(conn, udp_server, tcp_sender, udp_only, udp_timeout_ms)
                 .await
                 .ok();
         }
@@ -432,7 +432,14 @@ impl Client {
                 )
                 .as_str(),
             );
-            TcpTunnel::start(true, &conn, &mut tcp_server, pending_tcp_stream).await;
+            TcpTunnel::start(
+                true,
+                &conn,
+                &mut tcp_server,
+                pending_tcp_stream,
+                self.config.tcp_timeout_ms,
+            )
+            .await;
 
             let mut state = self.inner_state.lock().unwrap();
             state.tcp_conn = Some(conn);
@@ -456,18 +463,20 @@ impl Client {
         if let Some(udp_server_addr) = self.config.local_udp_server_addr {
             let conn = inner_state!(self, udp_conn).clone().unwrap();
             let udp_only = self.config.local_tcp_server_addr.is_none();
+            let udp_timeout_ms = self.config.udp_timeout_ms;
             if udp_only {
-                UdpTunnel::process(conn, udp_server_addr).await;
+                UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
             } else {
                 tokio::spawn(async move {
-                    UdpTunnel::process(conn, udp_server_addr).await;
+                    UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
                 });
             }
         }
 
         if let Some(addr) = self.config.local_tcp_server_addr {
             let conn = inner_state!(self, tcp_conn).clone().unwrap();
-            TcpTunnel::process(conn, addr).await;
+            let tcp_timeout_ms = self.config.tcp_timeout_ms;
+            TcpTunnel::process(conn, addr, tcp_timeout_ms).await;
         }
         Ok(())
     }

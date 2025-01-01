@@ -28,6 +28,7 @@ impl TcpTunnel {
         conn: &Connection,
         tcp_server: &mut TcpServer,
         pending_stream: &mut Option<TcpStream>,
+        tcp_timeout_ms: u64,
     ) {
         tcp_server.set_active(true);
         let mut tcp_receiver = tcp_server.take_tcp_receiver().unwrap();
@@ -41,7 +42,9 @@ impl TcpTunnel {
             };
 
             match conn.open_bi().await {
-                Ok(quic_stream) => TcpTunnel::run(tunnel_out, tcp_stream, quic_stream),
+                Ok(quic_stream) => {
+                    TcpTunnel::run(tunnel_out, tcp_stream, quic_stream, tcp_timeout_ms)
+                }
                 Err(e) => {
                     error!("failed to open_bi, will retry: {e}");
                     *pending_stream = Some(tcp_stream);
@@ -54,7 +57,12 @@ impl TcpTunnel {
         tcp_server.set_active(false);
     }
 
-    fn run(tunnel_out: bool, tcp_stream: TcpStream, quic_stream: (SendStream, RecvStream)) {
+    fn run(
+        tunnel_out: bool,
+        tcp_stream: TcpStream,
+        quic_stream: (SendStream, RecvStream),
+        tcp_timeout_ms: u64,
+    ) {
         let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
         let (mut quic_send, mut quic_recv) = quic_stream;
 
@@ -84,6 +92,7 @@ impl TcpTunnel {
                     &mut tcp_write,
                     &mut buffer,
                     &mut transfer_bytes,
+                    tcp_timeout_ms,
                 )
                 .await;
                 let c_end = loop_count.fetch_add(1, Ordering::Relaxed);
@@ -117,6 +126,7 @@ impl TcpTunnel {
                     &mut quic_send,
                     &mut buffer,
                     &mut transfer_bytes,
+                    tcp_timeout_ms,
                 )
                 .await;
                 let c_end = loop_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -146,11 +156,13 @@ impl TcpTunnel {
         quic_send: &mut SendStream,
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
+        tcp_timeout_ms: u64,
     ) -> Result<usize, TransferError> {
-        let len_read = tokio::time::timeout(Duration::from_secs(30), tcp_read.read(buffer))
-            .await
-            .map_err(|_: Elapsed| TransferError::TimeoutError)?
-            .map_err(|_| TransferError::InternalError)?;
+        let len_read =
+            tokio::time::timeout(Duration::from_millis(tcp_timeout_ms), tcp_read.read(buffer))
+                .await
+                .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                .map_err(|_| TransferError::InternalError)?;
         if len_read > 0 {
             *transfer_bytes += len_read as u64;
             quic_send
@@ -171,11 +183,15 @@ impl TcpTunnel {
         tcp_write: &mut OwnedWriteHalf,
         buffer: &mut [u8],
         transfer_bytes: &mut u64,
+        tcp_timeout_ms: u64,
     ) -> Result<usize, TransferError> {
-        let result = tokio::time::timeout(Duration::from_secs(30), quic_recv.read(buffer))
-            .await
-            .map_err(|_: Elapsed| TransferError::TimeoutError)?
-            .map_err(|_| TransferError::InternalError)?;
+        let result = tokio::time::timeout(
+            Duration::from_millis(tcp_timeout_ms),
+            quic_recv.read(buffer),
+        )
+        .await
+        .map_err(|_: Elapsed| TransferError::TimeoutError)?
+        .map_err(|_| TransferError::InternalError)?;
         if let Some(len_read) = result {
             *transfer_bytes += len_read as u64;
             tcp_write
@@ -192,7 +208,7 @@ impl TcpTunnel {
         }
     }
 
-    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr) {
+    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr, tcp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
         info!("start tcp streaming, {remote_addr} ↔ {upstream_addr}");
 
@@ -212,7 +228,7 @@ impl TcpTunnel {
                 }
                 Ok(quic_stream) => tokio::spawn(async move {
                     match TcpStream::connect(&upstream_addr).await {
-                        Ok(tcp_stream) => Self::run(true, tcp_stream, quic_stream),
+                        Ok(tcp_stream) => Self::run(true, tcp_stream, quic_stream, tcp_timeout_ms),
                         Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
                     }
                 }),

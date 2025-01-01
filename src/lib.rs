@@ -163,7 +163,9 @@ pub struct ClientConfig {
     pub server_addr: String,
     pub password: String,
     pub wait_before_retry_ms: u64,
-    pub max_idle_timeout_ms: u64,
+    pub quic_timeout_ms: u64,
+    pub tcp_timeout_ms: u64,
+    pub udp_timeout_ms: u64,
     pub tcp_upstream: Option<Upstream>,
     pub udp_upstream: Option<Upstream>,
     pub dot_servers: Vec<String>,
@@ -178,7 +180,9 @@ pub struct ServerConfig {
     pub password: String,
     pub cert_path: String,
     pub key_path: String,
-    pub max_idle_timeout_ms: u64,
+    pub quic_timeout_ms: u64,
+    pub tcp_timeout_ms: u64,
+    pub udp_timeout_ms: u64,
 
     /// for TunnelOut only
     pub default_tcp_upstream: Option<SocketAddr>,
@@ -203,7 +207,9 @@ impl ClientConfig {
         dns: &str,
         workers: usize,
         wait_before_retry_ms: u64,
-        max_idle_timeout_ms: u64,
+        quic_timeout_ms: u64,
+        tcp_timeout_ms: u64,
+        udp_timeout_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mapping.is_empty() && udp_addr_mapping.is_empty() {
             log_and_bail!("must specify either --tcp-mapping or --udp-mapping, or both");
@@ -227,7 +233,9 @@ impl ClientConfig {
             num_cpus::get()
         };
         config.wait_before_retry_ms = wait_before_retry_ms;
-        config.max_idle_timeout_ms = max_idle_timeout_ms;
+        config.quic_timeout_ms = quic_timeout_ms;
+        config.tcp_timeout_ms = tcp_timeout_ms;
+        config.udp_timeout_ms = udp_timeout_ms;
         config.tcp_upstream = parse_as_upstream(mode, &tcp_sock_mapping)?;
         config.udp_upstream = parse_as_upstream(mode, &udp_sock_mapping)?;
         config.dot_servers = dot.split(',').map(|s| s.to_string()).collect();
