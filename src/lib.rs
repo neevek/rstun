@@ -207,9 +207,9 @@ impl ClientConfig {
         dns: &str,
         workers: usize,
         wait_before_retry_ms: u64,
-        quic_timeout_ms: u64,
-        tcp_timeout_ms: u64,
-        udp_timeout_ms: u64,
+        mut quic_timeout_ms: u64,
+        mut tcp_timeout_ms: u64,
+        mut udp_timeout_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mapping.is_empty() && udp_addr_mapping.is_empty() {
             log_and_bail!("must specify either --tcp-mapping or --udp-mapping, or both");
@@ -217,6 +217,15 @@ impl ClientConfig {
 
         let tcp_sock_mapping = parse_addr_mapping(UpstreamType::Tcp, tcp_addr_mapping)?;
         let udp_sock_mapping = parse_addr_mapping(UpstreamType::Udp, udp_addr_mapping)?;
+        if quic_timeout_ms == 0 {
+            quic_timeout_ms = 30000;
+        }
+        if tcp_timeout_ms == 0 {
+            tcp_timeout_ms = 30000;
+        }
+        if udp_timeout_ms == 0 {
+            udp_timeout_ms = 5000;
+        }
 
         let mut config = ClientConfig::default();
         config.cert_path = cert.to_string();
@@ -395,7 +404,7 @@ pub mod android {
         jcipher: JString,
         jworkers: jint,
         jwaitBeforeRetryMs: jint,
-        jmaxIdleTimeoutMs: jint,
+        jquicTimeoutMs: jint,
     ) -> jlong {
         let mode = convert_jstring(&mut env, jmode);
         let server_addr = convert_jstring(&mut env, jserverAddr);
@@ -419,7 +428,9 @@ pub mod android {
             &dns_server,
             jworkers as usize,
             jwaitBeforeRetryMs as u64,
-            jmaxIdleTimeoutMs as u64,
+            jquicTimeoutMs as u64,
+            0u64,
+            0u64,
         );
 
         match config {
