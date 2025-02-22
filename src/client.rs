@@ -570,38 +570,32 @@ impl Client {
             return Ok((client_config, "localhost".to_string()));
         }
 
+        // when client config provides a certificate
         let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
             .context("failed to read from cert file")?;
-        let cert = certs
-            .first()
-            .context("certificate is not in PEM format")?
-            .clone();
-
+        if certs.is_empty() {
+            log_and_bail("No certificates found in provided file: {}", self.config.cert_path);
+        }
         let mut roots = RootCertStore::empty();
-        roots.add(cert).context(format!(
-            "failed to add certificate: {}",
-            self.config.cert_path
-        ))?;
-
-        let (_rem, cert) = X509Certificate::from_der(certs.first().unwrap().as_ref()).context(
-            format!("not a valid X509Certificate: {}", self.config.cert_path),
-        )?;
-
-        let common_name = cert
-            .subject()
-            .iter_common_name()
-            .next()
-            .and_then(|cn| cn.as_str().ok())
-            .context(format!(
-                "failed to read CN (Common Name) from specified certificate: {}",
+        // save all certificates in the certificate chain to the trust list
+        for cert in &certs {
+            roots.add(cert.clone()).context(format!(
+                "failed to add certificate from file: {}",
                 self.config.cert_path
             ))?;
+        }
+
+        // for self-signed certificates, generating IP-based TLS certificates is not difficult
+        let domain_or_ip = match self.config.server_addr.rfind(':') {
+            Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
+            None => self.config.server_addr.to_string(),
+        };
 
         Ok((
             self.create_client_config_builder(&cipher)?
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
-            common_name.to_string(),
+            domain_or_ip,
         ))
     }
 
