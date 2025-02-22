@@ -176,4 +176,31 @@ jobs:
             rstun-linux-aarch64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+  linux-musl-aarch64:
+    name: Linux musl Aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: aarch64-unknown-linux-musl
+          override: true
+      - run: sudo apt-get -y install musl-tools && rustup target add aarch64-unknown-linux-musl
+      - run: cargo install cross --git https://github.com/cross-rs/cross
+      - run: cross build --all-features --release --target aarch64-unknown-linux-musl
+      - run: mkdir -p rstun-linux-musl-aarch64
+      - run: mv target/aarch64-unknown-linux-musl/release/rstunc ./rstun-linux-musl-aarch64/
+      - run: mv target/aarch64-unknown-linux-musl/release/rstund ./rstun-linux-musl-aarch64/
+      - run: tar zcf rstun-linux-musl-aarch64.tar.gz ./rstun-linux-musl-aarch64/*
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            rstun-linux-musl-aarch64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 
