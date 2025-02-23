@@ -12,6 +12,7 @@ use backon::Retryable;
 use log::{error, info, warn};
 use quinn::{congestion, crypto::rustls::QuicClientConfig, Connection, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
+use rs_utilities::log_and_bail;
 use rs_utilities::{
     dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
     unwrap_or_return,
@@ -31,7 +32,6 @@ use std::{
     time::Duration,
 };
 use tokio::{net::TcpStream, task::JoinHandle};
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
@@ -574,7 +574,10 @@ impl Client {
         let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
             .context("failed to read from cert file")?;
         if certs.is_empty() {
-            log_and_bail("No certificates found in provided file: {}", self.config.cert_path);
+            log_and_bail!(
+                "No certificates found in provided file: {}",
+                self.config.cert_path
+            );
         }
         let mut roots = RootCertStore::empty();
         // save all certificates in the certificate chain to the trust list
