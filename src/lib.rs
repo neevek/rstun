@@ -154,10 +154,22 @@ pub enum TunnelType {
     UdpIn(UdpTunnelInInfo),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ServerType {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TunnelConfig {
+    pub server_type: ServerType,
+    pub local_server_addr: Option<SocketAddr>,
+    pub upstream: Option<Upstream>,
+    pub mode: String,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ClientConfig {
-    pub local_tcp_server_addr: Option<SocketAddr>,
-    pub local_udp_server_addr: Option<SocketAddr>,
     pub cert_path: String,
     pub cipher: String,
     pub server_addr: String,
@@ -166,8 +178,7 @@ pub struct ClientConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
-    pub tcp_upstream: Option<Upstream>,
-    pub udp_upstream: Option<Upstream>,
+    pub tunnels: Vec<TunnelConfig>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
     pub workers: usize,
@@ -214,9 +225,12 @@ impl ClientConfig {
         if tcp_addr_mapping.is_empty() && udp_addr_mapping.is_empty() {
             log_and_bail!("must specify either --tcp-mapping or --udp-mapping, or both");
         }
+        if mode != "IN" && mode != "OUT" {
+            log_and_bail!("invalid mode: {} , mode can only be IN or OUT",mode);
+        }
+        let tcp_sock_mappings = parse_addr_mappings(UpstreamType::Tcp, tcp_addr_mapping, mode)?;
+        let udp_sock_mappings = parse_addr_mappings(UpstreamType::Udp, udp_addr_mapping, mode)?;
 
-        let tcp_sock_mapping = parse_addr_mapping(UpstreamType::Tcp, tcp_addr_mapping)?;
-        let udp_sock_mapping = parse_addr_mapping(UpstreamType::Udp, udp_addr_mapping)?;
         if quic_timeout_ms == 0 {
             quic_timeout_ms = 30000;
         }
@@ -245,84 +259,80 @@ impl ClientConfig {
         config.quic_timeout_ms = quic_timeout_ms;
         config.tcp_timeout_ms = tcp_timeout_ms;
         config.udp_timeout_ms = udp_timeout_ms;
-        config.tcp_upstream = parse_as_upstream(mode, &tcp_sock_mapping)?;
-        config.udp_upstream = parse_as_upstream(mode, &udp_sock_mapping)?;
         config.dot_servers = dot.split(',').map(|s| s.to_string()).collect();
         config.dns_servers = dns.split(',').map(|s| s.to_string()).collect();
         config.mode = if mode == TUNNEL_MODE_IN {
-            config.local_tcp_server_addr = *tcp_sock_mapping.get(1).unwrap_or(&None);
-            config.local_udp_server_addr = *udp_sock_mapping.get(1).unwrap_or(&None);
-
             TUNNEL_MODE_IN
         } else {
-            config.local_tcp_server_addr = *tcp_sock_mapping.first().unwrap_or(&None);
-            config.local_udp_server_addr = *udp_sock_mapping.first().unwrap_or(&None);
-
             TUNNEL_MODE_OUT
         };
+        for (local_addr, upstream, mode) in tcp_sock_mappings {
+            config.tunnels.push(TunnelConfig {
+                server_type: ServerType::Tcp,
+                local_server_addr: local_addr,
+                upstream,
+                mode,
+            });
+        }
+
+        for (local_addr, upstream, mode) in udp_sock_mappings {
+            config.tunnels.push(TunnelConfig {
+                server_type: ServerType::Udp,
+                local_server_addr: local_addr,
+                upstream,
+                mode,
+            });
+        }
 
         Ok(config)
     }
 }
 
-fn parse_as_upstream(mode: &str, sock_mapping: &[Option<SocketAddr>]) -> Result<Option<Upstream>> {
-    if sock_mapping.is_empty() {
-        Ok(None)
-    } else {
-        if sock_mapping[0].is_none() {
-            bail!("'ANY' is not allowed as local server");
-        }
-
-        let upstream_addr = if mode == TUNNEL_MODE_OUT {
-            sock_mapping[1]
-        } else {
-            if sock_mapping[1].is_none() {
-                bail!("'ANY' is not allowed as remote server for IN mode tunneling");
-            }
-            sock_mapping[0]
-        };
-
-        Ok(match upstream_addr {
-            None => Some(Upstream::PeerDefault),
-            Some(addr) => Some(Upstream::ClientSpecified(addr)),
-        })
-    }
-}
-
-fn parse_addr_mapping(
+fn parse_addr_mappings(
     upstream_type: UpstreamType,
     mapping: &str,
-) -> Result<Vec<Option<SocketAddr>>> {
+    default_mode: &str,
+) -> Result<Vec<(Option<SocketAddr>, Option<Upstream>, String)>> {
     if mapping.is_empty() {
         return Ok(vec![]);
     }
 
-    let addr_mapping: Vec<&str> = mapping.split('^').collect();
-    if addr_mapping.len() != 2 {
-        log_and_bail!("invalid {upstream_type} address mapping: {mapping}");
-    }
-
-    let mut sock_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(addr_mapping.len());
-    for addr in &addr_mapping {
-        if *addr == "ANY" {
-            sock_addrs.push(None);
-        } else {
-            match addr.parse::<SocketAddr>() {
-                Ok(sock_addr) => {
-                    sock_addrs.push(Some(sock_addr));
+    let mut result = Vec::new();
+    for mapping in mapping.split(',') {
+        let parts: Vec<&str> = mapping.split('^').collect();
+        let (mode, local_addr, upstream_addr) = match parts.len() {
+            2 => (default_mode, parts[0], parts[1]),
+            3 => {
+                if parts[0] != "IN" && parts[0] != "OUT" {
+                    log_and_bail!("invalid mode: {} in address mapping: {}",parts[0], mapping);
                 }
-                Err(_) => {
-                    // assumes addr is a port
-                    let addr = format!("127.0.0.1:{addr}");
-                    sock_addrs.push(Some(
-                        addr.parse::<SocketAddr>()
-                            .context(format!("invalid address mapping: [{mapping}]"))?,
-                    ));
-                }
+                (parts[0], parts[1], parts[2])
             }
-        }
+            _ => {
+                log_and_bail!("invalid {} address mapping: {}",upstream_type, mapping);
+            }
+        };
+
+        let local_addr = if local_addr == "ANY" {
+            None
+        } else {
+            Some(local_addr.parse::<SocketAddr>().context(format!("invalid local address: [{local_addr}] in mapping: [{mapping}]"))?)
+        };
+
+        let upstream = if upstream_addr == "ANY" {
+            Some(Upstream::PeerDefault)
+        } else {
+            let upstream_addr = if upstream_addr.parse::<u16>().is_ok() {
+                format!("127.0.0.1:{}", upstream_addr)
+            } else {
+                upstream_addr.to_string()
+            };
+            Some(Upstream::ClientSpecified(upstream_addr.parse::<SocketAddr>().context(format!("invalid upstream address: [{upstream_addr}] in mapping: [{mapping}]"))?))
+        };
+
+        result.push((local_addr, upstream, mode.to_string()));
     }
-    Ok(sock_addrs)
+    Ok(result)
 }
 
 pub fn socket_addr_with_unspecified_ip_port(ipv6: bool) -> SocketAddr {
