@@ -153,7 +153,9 @@ impl Server {
             }
         });
 
-        let endpoint = inner_state!(self, endpoint).take().context("failed")?;
+        let endpoint = inner_state!(self, endpoint)
+            .take()
+            .context("failed to get endpoint")?;
         while let Some(client_conn) = endpoint.accept().await {
             let state = self.inner_state.clone();
             let config = inner_state!(self, config).clone();
@@ -168,8 +170,10 @@ impl Server {
                     }
 
                     TunnelType::UdpOut(info) => {
-                        UdpTunnel::process(info.conn, info.upstream_addr, config.udp_timeout_ms)
+                        let udp_server = UdpServer::bind_and_start(info.upstream_addr).await?;
+                        UdpTunnel::start(info.conn, udp_server, None, config.udp_timeout_ms)
                             .await
+                            .ok();
                     }
 
                     TunnelType::TcpIn(mut info) => {
@@ -203,15 +207,9 @@ impl Server {
                                 sender: info.udp_server.clone_udp_sender(),
                             });
 
-                        UdpTunnel::start(
-                            info.conn,
-                            info.udp_server,
-                            None,
-                            false,
-                            config.udp_timeout_ms,
-                        )
-                        .await
-                        .ok();
+                        UdpTunnel::start(info.conn, info.udp_server, None, config.udp_timeout_ms)
+                            .await
+                            .ok();
                     }
                 }
 

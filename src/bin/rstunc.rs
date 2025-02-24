@@ -10,7 +10,6 @@ fn main() {
     rs_utilities::LogHelper::init_logger("rstunc", log_filter.as_str());
 
     let config = ClientConfig::create(
-        &args.mode,
         &args.server_addr,
         &args.password,
         &args.cert,
@@ -48,10 +47,6 @@ fn main() {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstuncArgs {
-    /// Create a tunnel running in IN or OUT mode
-    #[arg(short = 'm', long, value_parser = PossibleValuesParser::new([TUNNEL_MODE_IN, TUNNEL_MODE_OUT]))]
-    mode: String,
-
     /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
     #[arg(short = 'a', long)]
     server_addr: String,

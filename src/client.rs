@@ -3,20 +3,18 @@ use crate::{
     tcp::tcp_tunnel::TcpTunnel,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
-    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelMessage, TUNNEL_MODE_IN,
-    TUNNEL_MODE_OUT,
+    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TransportProtocol, TunnelMessage,
+    TUNNEL_MODE_IN, TUNNEL_MODE_OUT,
 };
 use anyhow::{bail, Context, Result};
 use backon::ExponentialBuilder;
 use backon::Retryable;
+use futures_util::future::try_join_all;
 use log::{error, info, warn};
 use quinn::{congestion, crypto::rustls::QuicClientConfig, Connection, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
+use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
-use rs_utilities::{
-    dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
-    unwrap_or_return,
-};
 use rustls::{
     client::danger::ServerCertVerified,
     crypto::{ring::cipher_suite, CryptoProvider},
@@ -68,8 +66,8 @@ impl Display for ClientState {
 struct State {
     tcp_conn: Option<Connection>,
     udp_conn: Option<Connection>,
-    tcp_server: Option<TcpServer>,
-    udp_server: Option<UdpServer>,
+    tcp_servers: Vec<TcpServer>,
+    udp_servers: Vec<UdpServer>,
     client_state: ClientState,
     total_traffic_data: TunnelTraffic,
     tunnel_info_bridge: TunnelInfoBridge,
@@ -79,8 +77,8 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
-            tcp_server: None,
-            udp_server: None,
+            tcp_servers: Vec::new(),
+            udp_servers: Vec::new(),
             tcp_conn: None,
             udp_conn: None,
             client_state: ClientState::Idle,
@@ -135,61 +133,82 @@ impl Client {
             .block_on(async { self.connect_and_serve().await });
     }
 
-    pub async fn start_tcp_server(&self) -> Result<Option<SocketAddr>> {
-        if self.config.mode != TUNNEL_MODE_OUT {
-            bail!("call start_tcp_server() for TunnelOut mode only");
+    pub async fn start_tcp_servers(&self) -> Result<Vec<SocketAddr>> {
+        let mut addrs = Vec::new();
+
+        let tunnels = self.config.tunnels.clone();
+
+        for tunnel in &tunnels {
+            if tunnel.transport_protocol == TransportProtocol::Tcp && tunnel.mode == TUNNEL_MODE_OUT
+            {
+                if let Some(addr) = tunnel.local_server_addr {
+                    self.post_tunnel_log("preparing tcp server...");
+
+                    let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
+                    let tcp_server = bind_tcp_server
+                        .retry(
+                            ExponentialBuilder::default()
+                                .with_max_delay(Duration::from_secs(10))
+                                .with_max_times(10),
+                        )
+                        .sleep(tokio::time::sleep)
+                        .notify(|err: &anyhow::Error, dur: Duration| {
+                            warn!("will retry after {dur:?}, err: {err:?}");
+                        })
+                        .await?;
+
+                    let addr = tcp_server.addr();
+                    self.post_tunnel_log(
+                        format!("[TunnelOut] tcp server bound to: {addr}").as_str(),
+                    );
+
+                    let mut state = self.inner_state.lock().unwrap();
+                    state.tcp_servers.push(tcp_server);
+                    addrs.push(addr);
+                }
+            }
         }
-        let addr = unwrap_or_return!(self.config.local_tcp_server_addr, Ok(None));
 
-        self.post_tunnel_log("preparing tcp server...");
-
-        let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
-        let tcp_server = bind_tcp_server
-            .retry(
-                ExponentialBuilder::default()
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(10),
-            )
-            .sleep(tokio::time::sleep)
-            .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will retry after {dur:?}, err: {err:?}");
-            })
-            .await?;
-
-        let addr = tcp_server.addr();
-        self.post_tunnel_log(format!("[TunnelOut] tcp server bound to: {addr}").as_str());
-
-        let mut state = self.inner_state.lock().unwrap();
-        state.tcp_server = Some(tcp_server);
-        Ok(Some(addr))
+        Ok(addrs)
     }
 
-    pub async fn start_udp_server(&self) -> Result<Option<SocketAddr>> {
-        if self.config.mode != TUNNEL_MODE_OUT {
-            bail!("call start_udp_server() for TunnelOut mode only");
+    pub async fn start_udp_servers(&self) -> Result<Vec<SocketAddr>> {
+        let mut addrs = Vec::new();
+
+        let tunnels = self.config.tunnels.clone();
+
+        for tunnel in &tunnels {
+            if tunnel.transport_protocol == TransportProtocol::Udp && tunnel.mode == TUNNEL_MODE_OUT
+            {
+                if let Some(addr) = tunnel.local_server_addr {
+                    self.post_tunnel_log("preparing udp server...");
+
+                    let bind_udp_server = || async { UdpServer::bind_and_start(addr).await };
+                    let udp_server = bind_udp_server
+                        .retry(
+                            ExponentialBuilder::default()
+                                .with_max_delay(Duration::from_secs(10))
+                                .with_max_times(10),
+                        )
+                        .sleep(tokio::time::sleep)
+                        .notify(|err: &anyhow::Error, dur: Duration| {
+                            warn!("will retry after {dur:?}, err: {err:?}");
+                        })
+                        .await?;
+
+                    let addr = udp_server.addr();
+                    self.post_tunnel_log(
+                        format!("[TunnelOut] udp server bound to: {addr}").as_str(),
+                    );
+
+                    let mut state = self.inner_state.lock().unwrap();
+                    state.udp_servers.push(udp_server);
+                    addrs.push(addr);
+                }
+            }
         }
-        let addr = unwrap_or_return!(self.config.local_udp_server_addr, Ok(None));
-        self.post_tunnel_log("preparing udp server...");
 
-        // create a local udp server for 'OUT' tunnel
-        let bind_udp_server = || async { UdpServer::bind_and_start(addr).await };
-        let udp_server = bind_udp_server
-            .retry(
-                ExponentialBuilder::default()
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(10),
-            )
-            .sleep(tokio::time::sleep)
-            .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will retry after {dur:?}, err: {err:?}");
-            })
-            .await?;
-        let addr = udp_server.addr();
-
-        self.post_tunnel_log(format!("[TunnelOut] udp server bound to: {addr}").as_str());
-
-        inner_state!(self, udp_server) = Some(udp_server);
-        Ok(Some(addr))
+        Ok(addrs)
     }
 
     pub fn get_config(&self) -> ClientConfig {
@@ -200,13 +219,13 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Stopping);
 
         if let Ok(mut state) = self.inner_state.lock() {
-            if let Some(mut tcp_server) = state.tcp_server.take() {
+            for mut tcp_server in state.tcp_servers.drain(..) {
                 tokio::spawn(async move {
                     tcp_server.shutdown().await.ok();
                 });
             }
 
-            if let Some(mut udp_server) = state.udp_server.take() {
+            for mut udp_server in state.udp_servers.drain(..) {
                 tokio::spawn(async move {
                     udp_server.shutdown().await.ok();
                 });
@@ -249,9 +268,20 @@ impl Client {
                 .await;
             match result {
                 Ok(_) => {
-                    if self.config.mode == TUNNEL_MODE_OUT {
+                    if self
+                        .config
+                        .tunnels
+                        .iter()
+                        .any(|tunnel| tunnel.mode == TUNNEL_MODE_OUT)
+                    {
                         self.serve_outgoing(&mut pending_conn).await.ok();
-                    } else {
+                    }
+                    if self
+                        .config
+                        .tunnels
+                        .iter()
+                        .any(|tunnel| tunnel.mode == TUNNEL_MODE_IN)
+                    {
                         self.serve_incoming().await.ok();
                     }
                 }
@@ -298,39 +328,68 @@ impl Client {
         let mut endpoint = quinn::Endpoint::client(local_addr)?;
         endpoint.set_default_client_config(quinn_client_cfg);
 
-        let is_tunnel_in = self.config.mode == TUNNEL_MODE_IN;
-        if let Some(tcp_upstream) = &self.config.tcp_upstream {
+        let mut login_tasks = Vec::new();
+
+        let tunnels = self.config.tunnels.clone();
+        for tunnel in tunnels {
             let login_info = LoginInfo {
                 password: self.config.password.clone(),
-                upstream: tcp_upstream.clone(),
+                upstream: tunnel.upstream.clone().unwrap(),
             };
-            let login_msg = if is_tunnel_in {
-                TunnelMessage::ReqTcpInLogin(login_info)
-            } else {
-                TunnelMessage::ReqTcpOutLogin(login_info)
+            let login_msg = match tunnel.transport_protocol {
+                TransportProtocol::Tcp => {
+                    if tunnel.mode == TUNNEL_MODE_IN {
+                        TunnelMessage::ReqTcpInLogin(login_info)
+                    } else {
+                        TunnelMessage::ReqTcpOutLogin(login_info)
+                    }
+                }
+                TransportProtocol::Udp => {
+                    if tunnel.mode == TUNNEL_MODE_IN {
+                        TunnelMessage::ReqUdpInLogin(login_info)
+                    } else {
+                        TunnelMessage::ReqUdpOutLogin(login_info)
+                    }
+                }
             };
 
-            let conn = self
-                .login(&endpoint, &remote_addr, domain.as_str(), login_msg)
-                .await?;
-            inner_state!(self, tcp_conn) = Some(conn);
+            let endpoint_clone = endpoint.clone();
+            let remote_addr_clone = remote_addr;
+            let domain_clone = domain.clone();
+            let self_clone = self.clone();
+
+            let task = tokio::spawn(async move {
+                let conn = self_clone
+                    .login(
+                        &endpoint_clone,
+                        &remote_addr_clone,
+                        &domain_clone,
+                        login_msg,
+                    )
+                    .await?;
+                Ok((tunnel.transport_protocol, conn)) as Result<(TransportProtocol, Connection)>
+            });
+
+            login_tasks.push(task);
         }
 
-        if let Some(udp_upstream) = &self.config.udp_upstream {
-            let login_info = LoginInfo {
-                password: self.config.password.clone(),
-                upstream: udp_upstream.clone(),
-            };
-            let login_msg = if is_tunnel_in {
-                TunnelMessage::ReqUdpInLogin(login_info)
-            } else {
-                TunnelMessage::ReqUdpOutLogin(login_info)
-            };
+        let results = try_join_all(
+            login_tasks
+                .into_iter()
+                .map(|task| async { task.await.unwrap_or_else(|e| Err(anyhow::Error::new(e))) }),
+        )
+        .await;
 
-            let conn = self
-                .login(&endpoint, &remote_addr, domain.as_str(), login_msg)
-                .await?;
-            inner_state!(self, udp_conn) = Some(conn);
+        match results {
+            Ok(connections) => {
+                for (protocol, conn) in connections {
+                    match protocol {
+                        TransportProtocol::Tcp => inner_state!(self, tcp_conn) = Some(conn),
+                        TransportProtocol::Udp => inner_state!(self, udp_conn) = Some(conn),
+                    }
+                }
+            }
+            Err(e) => return Err(e),
         }
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
@@ -381,35 +440,34 @@ impl Client {
     async fn serve_outgoing(&mut self, pending_tcp_stream: &mut Option<TcpStream>) -> Result<()> {
         self.set_and_post_tunnel_state(ClientState::Preparing);
 
-        if self.config.local_tcp_server_addr.is_some() && inner_state!(self, tcp_server).is_none() {
-            self.start_tcp_server().await?;
+        if self.config.tunnels.iter().any(|tunnel| {
+            tunnel.transport_protocol == TransportProtocol::Tcp
+                && tunnel.mode == TUNNEL_MODE_OUT
+                && tunnel.local_server_addr.is_some()
+        }) && inner_state!(self, tcp_servers).is_empty()
+        {
+            self.start_tcp_servers().await?;
             let conn = inner_state!(self, tcp_conn).clone().unwrap();
             self.report_traffic_data_in_background(conn).await;
         }
 
-        if self.config.local_udp_server_addr.is_some() && inner_state!(self, udp_server).is_none() {
-            self.start_udp_server().await?;
+        if self.config.tunnels.iter().any(|tunnel| {
+            tunnel.transport_protocol == TransportProtocol::Udp
+                && tunnel.mode == TUNNEL_MODE_OUT
+                && tunnel.local_server_addr.is_some()
+        }) && inner_state!(self, udp_servers).is_empty()
+        {
+            self.start_udp_servers().await?;
             let conn = inner_state!(self, udp_conn).clone().unwrap();
             self.report_traffic_data_in_background(conn.clone()).await;
         }
 
-        let (tcp_server, tcp_sender) = {
-            if let Some(tcp_server) = &self.inner_state.lock().unwrap().tcp_server {
-                (
-                    Some(tcp_server.clone()),
-                    Some(tcp_server.clone_tcp_sender()),
-                )
-            } else {
-                (None, None)
-            }
-        };
-
+        let tcp_servers = inner_state!(self, tcp_servers).clone();
+        let udp_servers = inner_state!(self, udp_servers).clone();
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let udp_server = inner_state!(self, udp_server).clone();
-        if let Some(udp_server) = udp_server {
+        for udp_server in udp_servers {
             let conn = inner_state!(self, udp_conn).clone().unwrap();
-            let udp_only = self.config.local_tcp_server_addr.is_none();
             let udp_timeout_ms = self.config.udp_timeout_ms;
             self.post_tunnel_log(
                 format!(
@@ -418,12 +476,12 @@ impl Client {
                 )
                 .as_str(),
             );
-            UdpTunnel::start(conn, udp_server, tcp_sender, udp_only, udp_timeout_ms)
+            UdpTunnel::start(conn, udp_server, None, udp_timeout_ms)
                 .await
                 .ok();
         }
 
-        if let Some(mut tcp_server) = tcp_server {
+        for mut tcp_server in tcp_servers {
             let conn = inner_state!(self, tcp_conn).take().unwrap();
             self.post_tunnel_log(
                 format!(
@@ -460,24 +518,29 @@ impl Client {
     async fn serve_incoming(&self) -> Result<()> {
         self.post_tunnel_log("start serving in [TunnelIn] mode...");
 
-        if let Some(udp_server_addr) = self.config.local_udp_server_addr {
-            let conn = inner_state!(self, udp_conn).clone().unwrap();
-            let udp_only = self.config.local_tcp_server_addr.is_none();
-            let udp_timeout_ms = self.config.udp_timeout_ms;
-            if udp_only {
-                UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
-            } else {
-                tokio::spawn(async move {
-                    UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
-                });
+        for tunnel in &self.config.tunnels {
+            if tunnel.mode == TUNNEL_MODE_IN {
+                match tunnel.transport_protocol {
+                    TransportProtocol::Tcp => {
+                        if let Some(addr) = tunnel.local_server_addr {
+                            let conn = inner_state!(self, tcp_conn).clone().unwrap();
+                            let tcp_timeout_ms = self.config.tcp_timeout_ms;
+                            TcpTunnel::process(conn, addr, tcp_timeout_ms).await;
+                        }
+                    }
+                    TransportProtocol::Udp => {
+                        if let Some(addr) = tunnel.local_server_addr {
+                            let conn = inner_state!(self, udp_conn).clone().unwrap();
+                            let udp_timeout_ms = self.config.udp_timeout_ms;
+                            tokio::spawn(async move {
+                                UdpTunnel::process(conn, addr, udp_timeout_ms).await;
+                            });
+                        }
+                    }
+                }
             }
         }
 
-        if let Some(addr) = self.config.local_tcp_server_addr {
-            let conn = inner_state!(self, tcp_conn).clone().unwrap();
-            let tcp_timeout_ms = self.config.tcp_timeout_ms;
-            TcpTunnel::process(conn, addr, tcp_timeout_ms).await;
-        }
         Ok(())
     }
 
