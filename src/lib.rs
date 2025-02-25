@@ -356,12 +356,12 @@ pub mod android {
 
     #[no_mangle]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_initCertificateVerifier(
-        env: JNIEnv,
+        mut env: JNIEnv,
         _: JClass,
         context: JObject,
     ) {
         if let Err(e) = rustls_platform_verifier::android::init_hosted(
-            &env,
+            &mut env,
             JObject::try_from(context).unwrap(),
         ) {
             error!("failed to init rustls_platform_verifier: {}", e);
@@ -480,7 +480,7 @@ pub mod android {
         client_ptr: jlong,
     ) -> jstring {
         if client_ptr == 0 {
-            return env.new_string("").unwrap().into_inner();
+            return env.new_string("").unwrap().into_raw();
         }
 
         let client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
@@ -488,7 +488,7 @@ pub mod android {
             .unwrap();
         env.new_string(client.get_state().to_string())
             .unwrap()
-            .into_inner()
+            .into_raw()
     }
 
     #[no_mangle]
@@ -510,13 +510,13 @@ pub mod android {
             let jvm = env.get_java_vm().unwrap();
             let jobj_global_ref = env.new_global_ref(jobj).unwrap();
             client.set_on_info_listener(move |data: &str| {
-                let env = jvm.attach_current_thread().unwrap();
+                let mut env = jvm.attach_current_thread().unwrap();
                 if let Ok(s) = env.new_string(data) {
                     env.call_method(
                         &jobj_global_ref,
                         "onInfo",
                         "(Ljava/lang/String;)V",
-                        &[s.into()],
+                        &[(&s).into()],
                     )
                     .unwrap();
                 }
@@ -528,7 +528,7 @@ pub mod android {
 
     fn convert_jstring(env: &mut JNIEnv, jstr: JString) -> String {
         if !jstr.is_null() {
-            env.get_string(jstr).unwrap().into()
+            env.get_string(&jstr).unwrap().to_string_lossy().to_string()
         } else {
             String::from("")
         }
