@@ -155,17 +155,17 @@ pub enum TunnelType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ServerType {
+pub enum TransportProtocol {
     Tcp,
     Udp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TunnelConfig {
-    pub server_type: ServerType,
+    pub transport_protocol: TransportProtocol,
+    pub mode: String,
     pub local_server_addr: Option<SocketAddr>,
     pub upstream: Option<Upstream>,
-    pub mode: String,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -182,7 +182,6 @@ pub struct ClientConfig {
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
     pub workers: usize,
-    pub mode: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +206,6 @@ pub struct ServerConfig {
 
 impl ClientConfig {
     pub fn create(
-        mode: &str,
         server_addr: &str,
         password: &str,
         cert: &str,
@@ -225,11 +223,8 @@ impl ClientConfig {
         if tcp_addr_mapping.is_empty() && udp_addr_mapping.is_empty() {
             log_and_bail!("must specify either --tcp-mapping or --udp-mapping, or both");
         }
-        if mode != "IN" && mode != "OUT" {
-            log_and_bail!("invalid mode: {} , mode can only be IN or OUT",mode);
-        }
-        let tcp_sock_mappings = parse_addr_mappings(UpstreamType::Tcp, tcp_addr_mapping, mode)?;
-        let udp_sock_mappings = parse_addr_mappings(UpstreamType::Udp, udp_addr_mapping, mode)?;
+        let tcp_sock_mappings = parse_addr_mapping(UpstreamType::Tcp, tcp_addr_mapping)?;
+        let udp_sock_mappings = parse_addr_mapping(UpstreamType::Udp, udp_addr_mapping)?;
 
         if quic_timeout_ms == 0 {
             quic_timeout_ms = 30000;
@@ -261,26 +256,21 @@ impl ClientConfig {
         config.udp_timeout_ms = udp_timeout_ms;
         config.dot_servers = dot.split(',').map(|s| s.to_string()).collect();
         config.dns_servers = dns.split(',').map(|s| s.to_string()).collect();
-        config.mode = if mode == TUNNEL_MODE_IN {
-            TUNNEL_MODE_IN
-        } else {
-            TUNNEL_MODE_OUT
-        };
-        for (local_addr, upstream, mode) in tcp_sock_mappings {
+        for (mode, local_addr, upstream) in tcp_sock_mappings {
             config.tunnels.push(TunnelConfig {
-                server_type: ServerType::Tcp,
+                transport_protocol: TransportProtocol::Tcp,
+                mode,
                 local_server_addr: local_addr,
                 upstream,
-                mode,
             });
         }
 
-        for (local_addr, upstream, mode) in udp_sock_mappings {
+        for (mode, local_addr, upstream) in udp_sock_mappings {
             config.tunnels.push(TunnelConfig {
-                server_type: ServerType::Udp,
+                transport_protocol: TransportProtocol::Udp,
+                mode,
                 local_server_addr: local_addr,
                 upstream,
-                mode,
             });
         }
 
@@ -288,11 +278,10 @@ impl ClientConfig {
     }
 }
 
-fn parse_addr_mappings(
+fn parse_addr_mapping(
     upstream_type: UpstreamType,
     mapping: &str,
-    default_mode: &str,
-) -> Result<Vec<(Option<SocketAddr>, Option<Upstream>, String)>> {
+) -> Result<Vec<(String, Option<SocketAddr>, Option<Upstream>)>> {
     if mapping.is_empty() {
         return Ok(vec![]);
     }
@@ -301,22 +290,23 @@ fn parse_addr_mappings(
     for mapping in mapping.split(',') {
         let parts: Vec<&str> = mapping.split('^').collect();
         let (mode, local_addr, upstream_addr) = match parts.len() {
-            2 => (default_mode, parts[0], parts[1]),
             3 => {
                 if parts[0] != "IN" && parts[0] != "OUT" {
-                    log_and_bail!("invalid mode: {} in address mapping: {}",parts[0], mapping);
+                    log_and_bail!("invalid mode: {} in address mapping: {}", parts[0], mapping);
                 }
                 (parts[0], parts[1], parts[2])
             }
             _ => {
-                log_and_bail!("invalid {} address mapping: {}",upstream_type, mapping);
+                log_and_bail!("invalid {} address mapping: {}", upstream_type, mapping);
             }
         };
 
         let local_addr = if local_addr == "ANY" {
             None
         } else {
-            Some(local_addr.parse::<SocketAddr>().context(format!("invalid local address: [{local_addr}] in mapping: [{mapping}]"))?)
+            Some(local_addr.parse::<SocketAddr>().context(format!(
+                "invalid local address: [{local_addr}] in mapping: [{mapping}]"
+            ))?)
         };
 
         let upstream = if upstream_addr == "ANY" {
@@ -327,10 +317,14 @@ fn parse_addr_mappings(
             } else {
                 upstream_addr.to_string()
             };
-            Some(Upstream::ClientSpecified(upstream_addr.parse::<SocketAddr>().context(format!("invalid upstream address: [{upstream_addr}] in mapping: [{mapping}]"))?))
+            Some(Upstream::ClientSpecified(
+                upstream_addr.parse::<SocketAddr>().context(format!(
+                    "invalid upstream address: [{upstream_addr}] in mapping: [{mapping}]"
+                ))?,
+            ))
         };
 
-        result.push((local_addr, upstream, mode.to_string()));
+        result.push((mode.to_string(), local_addr, upstream));
     }
     Ok(result)
 }
