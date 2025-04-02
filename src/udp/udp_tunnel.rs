@@ -27,64 +27,58 @@ impl UdpTunnel {
         conn: Connection,
         mut udp_server: UdpServer,
         tcp_sender: Option<TcpSender>,
-        use_sync: bool,
         udp_timeout_ms: u64,
     ) -> Result<()> {
-        let task = || async move {
-            let stream_map = Arc::new(DashMap::new());
-            udp_server.set_active(true);
-            let mut udp_receiver = udp_server.take_receiver().unwrap();
+        let stream_map = Arc::new(DashMap::new());
+        udp_server.set_active(true);
+        let mut udp_receiver = udp_server.take_receiver().unwrap();
 
-            debug!("start transfering udp packets from: {}", udp_server.addr());
-            while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
-                let quic_send = match UdpTunnel::open_stream(
-                    conn.clone(),
-                    udp_server.clone(),
-                    packet.addr,
-                    stream_map.clone(),
-                    udp_timeout_ms,
-                )
-                .await
-                {
-                    Ok(quic_send) => quic_send,
-                    Err(e) => {
-                        error!("{e}");
-                        if conn.close_reason().is_some() {
-                            if let Some(tcp_sender) = tcp_sender {
-                                tcp_sender.send(TcpMessage::Quit).await.ok();
-                            }
-                            debug!("connection is closed, will quit");
-                            break;
+        debug!("start transferring udp packets from: {}", udp_server.addr());
+        while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
+            let quic_send = match UdpTunnel::open_stream(
+                conn.clone(),
+                udp_server.clone(),
+                packet.addr,
+                stream_map.clone(),
+                udp_timeout_ms,
+            )
+            .await
+            {
+                Ok(quic_send) => quic_send,
+                Err(e) => {
+                    error!("{e}");
+                    if conn.close_reason().is_some() {
+                        if let Some(tcp_sender) = tcp_sender {
+                            tcp_sender.send(TcpMessage::Quit).await.ok();
                         }
-                        continue;
+                        debug!("connection is closed, will quit");
+                        break;
                     }
-                };
+                    continue;
+                }
+            };
 
-                // send the packet using an async task
-                tokio::spawn(async move {
-                    let mut quic_send = quic_send.lock().await;
-                    let payload_len = packet.payload.len();
-                    TunnelMessage::send_raw(&mut quic_send, &packet.payload)
-                        .await
-                        .map_err(|e| {
-                            warn!("failed to send datagram({payload_len}) through the tunnel, err: {e:?}");
-                            e
-                        })
-                        .ok();
-                });
-            }
-
-            // put the receiver back
-            udp_server.set_active(false);
-            udp_server.put_receiver(udp_receiver);
-            info!("local udp server paused");
-        };
-
-        if use_sync {
-            task().await;
-        } else {
-            tokio::spawn(task());
+            // send the packet using an async task
+            tokio::spawn(async move {
+                let mut quic_send = quic_send.lock().await;
+                let payload_len = packet.payload.len();
+                TunnelMessage::send_raw(&mut quic_send, &packet.payload)
+                    .await
+                    .map_err(|e| {
+                        warn!(
+                            "failed to send datagram({payload_len}) through the tunnel, err: {e:?}"
+                        );
+                        e
+                    })
+                    .ok();
+            });
         }
+
+        // put the receiver back
+        udp_server.set_active(false);
+        udp_server.put_receiver(udp_receiver);
+        info!("local udp server paused");
+
         Ok(())
     }
 
