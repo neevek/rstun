@@ -227,9 +227,17 @@ impl TcpTunnel {
                     break;
                 }
                 Ok(quic_stream) => tokio::spawn(async move {
-                    match TcpStream::connect(&upstream_addr).await {
-                        Ok(tcp_stream) => Self::run(true, tcp_stream, quic_stream, tcp_timeout_ms),
-                        Err(e) => error!("failed to connect to {upstream_addr}, err: {e}"),
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        TcpStream::connect(&upstream_addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(tcp_stream)) => {
+                            Self::run(true, tcp_stream, quic_stream, tcp_timeout_ms)
+                        }
+                        Ok(Err(e)) => error!("failed to connect to {upstream_addr}, err: {e}"),
+                        Err(_) => error!("timeout connecting to {upstream_addr}"),
                     }
                 }),
             };
