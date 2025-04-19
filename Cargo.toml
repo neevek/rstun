@@ -16,8 +16,10 @@ ring = "0.17"
 log = "0.4"
 chrono = "0.4"
 anyhow = "1.0"
-quinn = "0.11.5"
-quinn-proto = "0.11.8"
+# quinn = "0.11.5"
+# quinn-proto = "0.11.8"
+quinn = { git = "https://github.com/neevek/quinn", branch = "test-bbr", subdir = "./quinn" }
+quinn-proto = { git = "https://github.com/neevek/quinn", branch = "test-bbr", subdir = "./quinn-proto" }
 futures-util = "0.3"
 bincode = "1.3"
 pin-utils = "0.1.0"
