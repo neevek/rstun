@@ -89,7 +89,7 @@ fn parse_upstreams(upstream_type: &str, upstreams_str: &str) -> Result<Option<So
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstundArgs {
-    /// Address ([ip:]port pair) to listen on
+    /// Address ([ip:]port) to listen on. If only a port is given, binds to 127.0.0.1:PORT.
     #[arg(
         short = 'a',
         long,
@@ -99,7 +99,7 @@ struct RstundArgs {
     )]
     addr: String,
 
-    /// The default TCP upstream for TunnelOut connections, format: [ip:]port
+    /// Default TCP upstream for OUT tunnels ([ip:]port). Used if client does not specify an upstream.
     #[arg(
         short = 't',
         long,
@@ -109,7 +109,7 @@ struct RstundArgs {
     )]
     tcp_upstream: String,
 
-    /// The default UDP upstream for TunnelOut connections, format: [ip:]port
+    /// Default UDP upstream for OUT tunnels ([ip:]port). Used if client does not specify an upstream.
     #[arg(
         short = 'u',
         long,
@@ -119,35 +119,35 @@ struct RstundArgs {
     )]
     udp_upstream: String,
 
-    /// Password of the tunnel server
+    /// Server password (required, must match client --password)
     #[arg(short = 'p', long, required = true)]
     password: String,
 
-    /// Path to the certificate file, if empty, a self-signed certificate
-    /// with the domain "localhost" will be used
+    /// Path to certificate file (optional). If empty, a self-signed certificate for "localhost" is generated (testing only).
     #[arg(short = 'c', long, default_value = "", verbatim_doc_comment)]
     cert: String,
 
-    /// Path to the key file, can be empty if no cert is provided
+    /// Path to key file (optional, only needed if --cert is set)
     #[arg(short = 'k', long, default_value = "")]
     key: String,
 
-    /// Threads to run async tasks
+    /// Number of async worker threads [uses all logical CPUs if 0]
     #[arg(short = 'w', long, default_value_t = 0)]
     workers: usize,
 
-    /// Quic idle timeout in milliseconds for the connection
+    /// QUIC idle timeout in milliseconds
     #[arg(long, default_value_t = 40000)]
     quic_timeout_ms: u64,
 
-    /// Tcp idle timeout in milliseconds for the connection
+    /// TCP idle timeout in milliseconds
     #[arg(long, default_value_t = 30000)]
     tcp_timeout_ms: u64,
 
-    /// Udp idle timeout in milliseconds for the connection
+    /// UDP idle timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     udp_timeout_ms: u64,
 
+    /// Log level
     #[arg(short = 'l', long, default_value_t = String::from("I"),
         value_parser = PossibleValuesParser::new(["T", "D", "I", "W", "E"]).map(|v| match v.as_str() {
             "T" => "trace",

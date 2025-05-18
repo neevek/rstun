@@ -2,9 +2,10 @@ use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
     tcp::tcp_tunnel::TcpTunnel,
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
+    tunnel_message::TunnelMessage,
     udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
-    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelMessage, TUNNEL_MODE_IN,
-    TUNNEL_MODE_OUT,
+    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelConfig, TunnelMode,
+    UpstreamType,
 };
 use anyhow::{bail, Context, Result};
 use backon::ExponentialBuilder;
@@ -12,11 +13,8 @@ use backon::Retryable;
 use log::{error, info, warn};
 use quinn::{congestion, crypto::rustls::QuicClientConfig, Connection, Endpoint, TransportConfig};
 use quinn_proto::{IdleTimeout, VarInt};
+use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
-use rs_utilities::{
-    dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy},
-    unwrap_or_return,
-};
 use rustls::{
     client::danger::ServerCertVerified,
     crypto::{ring::cipher_suite, CryptoProvider},
@@ -24,6 +22,7 @@ use rustls::{
 };
 use rustls_platform_verifier::{self, Verifier};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::{
     fmt::Display,
     net::{IpAddr, SocketAddr},
@@ -31,17 +30,16 @@ use std::{
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
-use tokio::{net::TcpStream, task::JoinHandle};
+use tokio::net::TcpStream;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
-const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 10;
+const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 30;
 static INIT: Once = Once::new();
 
 #[derive(Clone, Serialize, PartialEq)]
 pub enum ClientState {
     Idle = 0,
-    Preparing,
     Connecting,
     Connected,
     LoggingIn,
@@ -54,7 +52,6 @@ impl Display for ClientState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientState::Idle => write!(f, "Idle"),
-            ClientState::Preparing => write!(f, "Preparing"),
             ClientState::Connecting => write!(f, "Connecting"),
             ClientState::Connected => write!(f, "Connected"),
             ClientState::LoggingIn => write!(f, "LoggingIn"),
@@ -66,10 +63,9 @@ impl Display for ClientState {
 }
 
 struct State {
-    tcp_conn: Option<Connection>,
-    udp_conn: Option<Connection>,
-    tcp_server: Option<TcpServer>,
-    udp_server: Option<UdpServer>,
+    tcp_servers: HashMap<SocketAddr, TcpServer>,
+    udp_servers: HashMap<SocketAddr, UdpServer>,
+    connections: HashMap<SocketAddr, Connection>,
     client_state: ClientState,
     total_traffic_data: TunnelTraffic,
     tunnel_info_bridge: TunnelInfoBridge,
@@ -79,10 +75,9 @@ struct State {
 impl State {
     fn new() -> Self {
         Self {
-            tcp_server: None,
-            udp_server: None,
-            tcp_conn: None,
-            udp_conn: None,
+            tcp_servers: HashMap::new(),
+            udp_servers: HashMap::new(),
+            connections: HashMap::new(),
             client_state: ClientState::Idle,
             total_traffic_data: TunnelTraffic::default(),
             tunnel_info_bridge: TunnelInfoBridge::new(),
@@ -98,6 +93,13 @@ impl State {
             self.tunnel_info_bridge.post_tunnel_info(server_info);
         }
     }
+}
+
+struct LoginConfig {
+    local_addr: SocketAddr,
+    remote_addr: SocketAddr,
+    quinn_client_cfg: quinn::ClientConfig,
+    domain: String,
 }
 
 #[derive(Clone)]
@@ -127,22 +129,23 @@ impl Client {
     }
 
     pub fn start_tunneling(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
+            .expect("Error setting Ctrl-C handler");
+
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(self.config.workers)
             .build()
             .unwrap()
-            .block_on(async { self.connect_and_serve().await });
+            .block_on(async {
+                self.connect_and_serve_async();
+                rx.recv().expect("Could not receive from channel.");
+                self.stop_async().await;
+            });
     }
 
-    pub async fn start_tcp_server(&self) -> Result<Option<SocketAddr>> {
-        if self.config.mode != TUNNEL_MODE_OUT {
-            bail!("call start_tcp_server() for TunnelOut mode only");
-        }
-        let addr = unwrap_or_return!(self.config.local_tcp_server_addr, Ok(None));
-
-        self.post_tunnel_log("preparing tcp server...");
-
+    pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
         let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
         let tcp_server = bind_tcp_server
             .retry(
@@ -152,25 +155,16 @@ impl Client {
             )
             .sleep(tokio::time::sleep)
             .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will retry after {dur:?}, err: {err:?}");
+                warn!("will start tcp server ({addr}) after {dur:?}, err: {err:?}");
             })
             .await?;
 
-        let addr = tcp_server.addr();
-        self.post_tunnel_log(format!("[TunnelOut] tcp server bound to: {addr}").as_str());
+        inner_state!(self, tcp_servers).insert(addr, tcp_server.clone());
 
-        let mut state = self.inner_state.lock().unwrap();
-        state.tcp_server = Some(tcp_server);
-        Ok(Some(addr))
+        Ok(tcp_server)
     }
 
-    pub async fn start_udp_server(&self) -> Result<Option<SocketAddr>> {
-        if self.config.mode != TUNNEL_MODE_OUT {
-            bail!("call start_udp_server() for TunnelOut mode only");
-        }
-        let addr = unwrap_or_return!(self.config.local_udp_server_addr, Ok(None));
-        self.post_tunnel_log("preparing udp server...");
-
+    pub async fn start_udp_server(&self, addr: SocketAddr) -> Result<UdpServer> {
         // create a local udp server for 'OUT' tunnel
         let bind_udp_server = || async { UdpServer::bind_and_start(addr).await };
         let udp_server = bind_udp_server
@@ -181,97 +175,201 @@ impl Client {
             )
             .sleep(tokio::time::sleep)
             .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will retry after {dur:?}, err: {err:?}");
+                warn!("will start udp server ({addr}) after {dur:?}, err: {err:?}");
             })
             .await?;
-        let addr = udp_server.addr();
 
-        self.post_tunnel_log(format!("[TunnelOut] udp server bound to: {addr}").as_str());
-
-        inner_state!(self, udp_server) = Some(udp_server);
-        Ok(Some(addr))
+        inner_state!(self, udp_servers).insert(addr, udp_server.clone());
+        Ok(udp_server)
     }
 
     pub fn get_config(&self) -> ClientConfig {
         self.config.clone()
     }
 
+    #[allow(clippy::unnecessary_to_owned)]
     pub fn stop(&self) {
         self.set_and_post_tunnel_state(ClientState::Stopping);
 
         if let Ok(mut state) = self.inner_state.lock() {
-            if let Some(mut tcp_server) = state.tcp_server.take() {
+            for mut s in state.tcp_servers.values().cloned() {
                 tokio::spawn(async move {
-                    tcp_server.shutdown().await.ok();
+                    s.shutdown().await.ok();
+                });
+            }
+            for mut s in state.udp_servers.values().cloned() {
+                tokio::spawn(async move {
+                    s.shutdown().await.ok();
                 });
             }
 
-            if let Some(mut udp_server) = state.udp_server.take() {
+            for c in state.connections.values().cloned() {
                 tokio::spawn(async move {
-                    udp_server.shutdown().await.ok();
+                    c.close(VarInt::from_u32(1), b"");
                 });
             }
 
-            if let Some(conn) = &state.tcp_conn {
-                conn.close(VarInt::from_u32(1), b"");
-            }
-            if let Some(conn) = &state.udp_conn {
-                conn.close(VarInt::from_u32(1), b"");
-            }
+            state.tcp_servers.clear();
+            state.udp_servers.clear();
+            state.connections.clear();
         }
+
+        std::thread::sleep(Duration::from_secs(3));
     }
 
-    pub fn connect_and_serve_async(&self) -> JoinHandle<()> {
-        let mut this = self.clone();
-        tokio::spawn(async move { this.connect_and_serve().await })
+    #[allow(clippy::unnecessary_to_owned)]
+    pub async fn stop_async(&self) {
+        self.set_and_post_tunnel_state(ClientState::Stopping);
+
+        let mut tasks = tokio::task::JoinSet::new();
+        if let Ok(mut state) = self.inner_state.lock() {
+            for mut s in state.tcp_servers.values().cloned() {
+                tasks.spawn(async move {
+                    s.shutdown().await.ok();
+                });
+            }
+            for mut s in state.udp_servers.values().cloned() {
+                tasks.spawn(async move {
+                    s.shutdown().await.ok();
+                });
+            }
+
+            for c in state.connections.values().cloned() {
+                tasks.spawn(async move {
+                    c.close(VarInt::from_u32(1), b"");
+                });
+            }
+
+            state.tcp_servers.clear();
+            state.udp_servers.clear();
+            state.connections.clear();
+        }
+
+        while tasks.join_next().await.is_some() {}
     }
 
-    async fn connect_and_serve(&mut self) {
-        info!(
-            "connecting, idle_timeout:{}, retry_timeout:{}, threads:{}",
-            self.config.quic_timeout_ms, self.config.wait_before_retry_ms, self.config.workers
-        );
+    #[allow(clippy::unnecessary_to_owned)]
+    pub fn connect_and_serve_async(&mut self) {
+        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
+            let mut this = self.clone();
+            tokio::spawn(async move {
+                this.connect_and_serve(index, tunnel_config.clone()).await;
+            });
+        }
 
-        let mut pending_conn = None;
+        self.report_traffic_data_in_background();
+    }
+
+    async fn connect_and_serve(&mut self, index: usize, tunnel_config: TunnelConfig) {
+        let login_info = LoginInfo {
+            password: self.config.password.clone(),
+            tunnel_config: tunnel_config.clone(),
+        };
+
+        let mut pending_tcp_stream = None;
         loop {
-            let connect = || async { self.connect().await };
+            let connect = || async {
+                let login_cfg = self.prepare_login_config().await?;
+                let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
+                endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
+
+                let conn = self
+                    .login(
+                        index,
+                        &endpoint,
+                        &login_info,
+                        &login_cfg.remote_addr,
+                        login_cfg.domain.as_str(),
+                    )
+                    .await?;
+
+                Ok(conn)
+            };
             let result = connect
                 .retry(
                     ExponentialBuilder::default()
                         .with_max_delay(Duration::from_secs(10))
                         .with_max_times(usize::MAX),
                 )
-                .when(|_| self.get_state() != ClientState::Stopping)
+                .when(|_| !self.should_quit())
                 .sleep(tokio::time::sleep)
                 .notify(|err: &anyhow::Error, dur: Duration| {
                     warn!("will retry after {dur:?}, err: {err:?}");
                 })
                 .await;
+
+            if self.should_quit() {
+                break;
+            }
+
             match result {
-                Ok(_) => {
-                    if self.config.mode == TUNNEL_MODE_OUT {
-                        self.serve_outgoing(&mut pending_conn).await.ok();
+                Ok(conn) => {
+                    let upstream_type = &tunnel_config.upstream.upstream_type;
+                    let local_server_addr = tunnel_config.local_server_addr.unwrap();
+
+                    inner_state!(self, connections).insert(local_server_addr, conn.clone());
+
+                    if tunnel_config.mode == TunnelMode::Out {
+                        match upstream_type {
+                            UpstreamType::Tcp => {
+                                self.serve_outbound_tcp(
+                                    index,
+                                    conn.clone(),
+                                    local_server_addr,
+                                    &mut pending_tcp_stream,
+                                )
+                                .await
+                                .ok();
+                            }
+                            UpstreamType::Udp => {
+                                self.serve_outbound_udp(index, conn.clone(), local_server_addr)
+                                    .await
+                                    .ok();
+                            }
+                        }
                     } else {
-                        self.serve_incoming().await.ok();
+                        match upstream_type {
+                            UpstreamType::Tcp => {
+                                self.serve_inbound_tcp(index, conn.clone(), local_server_addr)
+                                    .await
+                                    .ok();
+                            }
+                            UpstreamType::Udp => {
+                                self.serve_inbound_udp(index, conn.clone(), local_server_addr)
+                                    .await
+                                    .ok();
+                            }
+                        }
                     }
+
+                    inner_state!(self, connections).remove(&local_server_addr);
+
+                    let stats = conn.stats();
+                    let data = &mut inner_state!(self, total_traffic_data);
+                    data.rx_bytes += stats.udp_rx.bytes;
+                    data.tx_bytes += stats.udp_tx.bytes;
+                    data.rx_dgrams += stats.udp_rx.datagrams;
+                    data.tx_dgrams += stats.udp_tx.datagrams;
                 }
 
                 Err(e) => {
                     error!("{e}");
-                    info!("quit after having retried for {} times", usize::MAX);
+                    info!(
+                        "[{login_info}] quit after having retried for {} times",
+                        usize::MAX
+                    );
                     break;
                 }
             };
 
-            if self.get_state() == ClientState::Stopping {
+            if self.should_quit() {
                 break;
             }
         }
-        self.post_tunnel_log("quit");
-        self.set_and_post_tunnel_state(ClientState::Terminated);
+        self.post_tunnel_log(format!("[{login_info}] quit").as_str());
     }
 
-    async fn connect(&self) -> Result<()> {
+    async fn prepare_login_config(&self) -> Result<LoginConfig> {
         let mut transport_cfg = TransportConfig::default();
         transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
         transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
@@ -289,67 +387,36 @@ impl Client {
 
         let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
         let quic_client_cfg = Arc::new(QuicClientConfig::try_from(tls_client_cfg)?);
-        let mut quinn_client_cfg = quinn::ClientConfig::new(quic_client_cfg);
-        quinn_client_cfg.transport_config(Arc::new(transport_cfg));
+        let mut client_cfg = quinn::ClientConfig::new(quic_client_cfg);
+        client_cfg.transport_config(Arc::new(transport_cfg));
 
         let remote_addr = self.parse_server_addr().await?;
-        let local_addr: SocketAddr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
-
-        let mut endpoint = quinn::Endpoint::client(local_addr)?;
-        endpoint.set_default_client_config(quinn_client_cfg);
-
-        let is_tunnel_in = self.config.mode == TUNNEL_MODE_IN;
-        if let Some(tcp_upstream) = &self.config.tcp_upstream {
-            let login_info = LoginInfo {
-                password: self.config.password.clone(),
-                upstream: tcp_upstream.clone(),
-            };
-            let login_msg = if is_tunnel_in {
-                TunnelMessage::ReqTcpInLogin(login_info)
-            } else {
-                TunnelMessage::ReqTcpOutLogin(login_info)
-            };
-
-            let conn = self
-                .login(&endpoint, &remote_addr, domain.as_str(), login_msg)
-                .await?;
-            inner_state!(self, tcp_conn) = Some(conn);
-        }
-
-        if let Some(udp_upstream) = &self.config.udp_upstream {
-            let login_info = LoginInfo {
-                password: self.config.password.clone(),
-                upstream: udp_upstream.clone(),
-            };
-            let login_msg = if is_tunnel_in {
-                TunnelMessage::ReqUdpInLogin(login_info)
-            } else {
-                TunnelMessage::ReqUdpOutLogin(login_info)
-            };
-
-            let conn = self
-                .login(&endpoint, &remote_addr, domain.as_str(), login_msg)
-                .await?;
-            inner_state!(self, udp_conn) = Some(conn);
-        }
-
-        self.set_and_post_tunnel_state(ClientState::Tunneling);
-
-        Ok(())
+        let local_addr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
+        Ok(LoginConfig {
+            local_addr,
+            remote_addr,
+            quinn_client_cfg: client_cfg,
+            domain,
+        })
     }
 
     async fn login(
         &self,
+        index: usize,
         endpoint: &Endpoint,
+        login_info: &LoginInfo,
         remote_addr: &SocketAddr,
         domain: &str,
-        login_msg: TunnelMessage,
     ) -> Result<Connection> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
         self.post_tunnel_log(
             format!(
-                "[{login_msg}] connecting to {remote_addr}, local_addr: {}",
-                endpoint.local_addr().unwrap()
+                "{index}:{} connecting, idle_timeout:{}, retry_timeout:{}, cipher:{}, threads:{}",
+                login_info.format_with_remote_addr(remote_addr),
+                self.config.quic_timeout_ms,
+                self.config.wait_before_retry_ms,
+                self.config.cipher,
+                self.config.workers,
             )
             .as_str(),
         );
@@ -361,127 +428,164 @@ impl Client {
             .context("open bidirectional connection failed")?;
 
         self.set_and_post_tunnel_state(ClientState::Connected);
-        self.post_tunnel_log(format!("[{login_msg}] connected: {remote_addr:?}",).as_str());
-        self.post_tunnel_log(format!("[{login_msg}] logging in...").as_str());
 
+        self.post_tunnel_log(
+            format!(
+                "{index}:{} logging in...",
+                login_info.format_with_remote_addr(remote_addr)
+            )
+            .as_str(),
+        );
+
+        let login_msg = TunnelMessage::ReqLogin(login_info.clone());
         TunnelMessage::send(&mut quic_send, &login_msg).await?;
 
         let resp = TunnelMessage::recv(&mut quic_recv).await?;
         if let TunnelMessage::RespFailure(msg) = resp {
-            bail!("[{login_msg}] failed to login: {msg}");
+            bail!(
+                "{index}:{} failed to login: {msg}",
+                login_info.format_with_remote_addr(remote_addr)
+            );
         }
         if !resp.is_resp_success() {
-            bail!("[{login_msg}] unexpected response, failed to login");
+            bail!(
+                "{index}:{} unexpected response, failed to login",
+                login_info.format_with_remote_addr(remote_addr)
+            );
         }
         TunnelMessage::handle_message(&resp)?;
-        self.post_tunnel_log(format!("[{login_msg}] logged in").as_str());
+        self.post_tunnel_log(
+            format!(
+                "{index}:{} login succeeded!",
+                login_info.format_with_remote_addr(remote_addr)
+            )
+            .as_str(),
+        );
         Ok(conn)
     }
 
-    async fn serve_outgoing(&mut self, pending_tcp_stream: &mut Option<TcpStream>) -> Result<()> {
-        self.set_and_post_tunnel_state(ClientState::Preparing);
-
-        if self.config.local_tcp_server_addr.is_some() && inner_state!(self, tcp_server).is_none() {
-            self.start_tcp_server().await?;
-            let conn = inner_state!(self, tcp_conn).clone().unwrap();
-            self.report_traffic_data_in_background(conn).await;
-        }
-
-        if self.config.local_udp_server_addr.is_some() && inner_state!(self, udp_server).is_none() {
-            self.start_udp_server().await?;
-            let conn = inner_state!(self, udp_conn).clone().unwrap();
-            self.report_traffic_data_in_background(conn.clone()).await;
-        }
-
-        let (tcp_server, tcp_sender) = {
-            if let Some(tcp_server) = &self.inner_state.lock().unwrap().tcp_server {
-                (
-                    Some(tcp_server.clone()),
-                    Some(tcp_server.clone_tcp_sender()),
-                )
-            } else {
-                (None, None)
-            }
+    async fn serve_outbound_tcp(
+        &mut self,
+        index: usize,
+        conn: Connection,
+        local_server_addr: SocketAddr,
+        pending_tcp_stream: &mut Option<TcpStream>,
+    ) -> Result<()> {
+        let tcp_server = {
+            inner_state!(self, tcp_servers)
+                .get(&local_server_addr)
+                .cloned()
         };
+
+        let mut tcp_server = match tcp_server {
+            Some(server) => server.clone(),
+            None => self.start_tcp_server(local_server_addr).await?,
+        };
+
+        self.post_tunnel_log(
+            format!(
+                "{index}:TCP_OUT start serving from {} via {}",
+                tcp_server.addr(),
+                conn.remote_address()
+            )
+            .as_str(),
+        );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let udp_server = inner_state!(self, udp_server).clone();
-        if let Some(udp_server) = udp_server {
-            let conn = inner_state!(self, udp_conn).clone().unwrap();
-            let udp_only = self.config.local_tcp_server_addr.is_none();
-            let udp_timeout_ms = self.config.udp_timeout_ms;
-            self.post_tunnel_log(
-                format!(
-                    "[TunnelOut] start serving udp via: {}",
-                    conn.remote_address()
-                )
-                .as_str(),
-            );
-            UdpTunnel::start(conn, udp_server, tcp_sender, udp_only, udp_timeout_ms)
-                .await
-                .ok();
-        }
+        TcpTunnel::start(
+            true,
+            &conn,
+            &mut tcp_server,
+            pending_tcp_stream,
+            self.config.tcp_timeout_ms,
+        )
+        .await;
 
-        if let Some(mut tcp_server) = tcp_server {
-            let conn = inner_state!(self, tcp_conn).take().unwrap();
-            self.post_tunnel_log(
-                format!(
-                    "[TunnelOut] start serving tcp via: {}",
-                    conn.remote_address()
-                )
-                .as_str(),
-            );
-            TcpTunnel::start(
-                true,
-                &conn,
-                &mut tcp_server,
-                pending_tcp_stream,
-                self.config.tcp_timeout_ms,
+        Ok(())
+    }
+
+    async fn serve_outbound_udp(
+        &mut self,
+        index: usize,
+        conn: Connection,
+        local_server_addr: SocketAddr,
+    ) -> Result<()> {
+        let udp_server = {
+            inner_state!(self, udp_servers)
+                .get(&local_server_addr)
+                .cloned()
+        };
+
+        let udp_server = match udp_server {
+            Some(server) => server.clone(),
+            None => self.start_udp_server(local_server_addr).await?,
+        };
+
+        self.post_tunnel_log(
+            format!(
+                "{index}:UDP_OUT start serving from {} via {}",
+                udp_server.addr(),
+                conn.remote_address()
             )
-            .await;
+            .as_str(),
+        );
 
-            let mut state = self.inner_state.lock().unwrap();
-            state.tcp_conn = Some(conn);
-        }
+        self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let mut inner_state = self.inner_state.lock().unwrap();
-        if let Some(tcp_conn) = &inner_state.tcp_conn {
-            let stats = tcp_conn.stats();
-            let data = &mut inner_state.total_traffic_data;
-            data.rx_bytes += stats.udp_rx.bytes;
-            data.tx_bytes += stats.udp_tx.bytes;
-            data.rx_dgrams += stats.udp_rx.datagrams;
-            data.tx_dgrams += stats.udp_tx.datagrams;
-        }
+        UdpTunnel::start(&conn, udp_server, None, self.config.udp_timeout_ms)
+            .await
+            .ok();
+
         Ok(())
     }
 
-    async fn serve_incoming(&self) -> Result<()> {
-        self.post_tunnel_log("start serving in [TunnelIn] mode...");
+    async fn serve_inbound_tcp(
+        &mut self,
+        index: usize,
+        conn: Connection,
+        local_server_addr: SocketAddr,
+    ) -> Result<()> {
+        self.post_tunnel_log(
+            format!(
+                "{index}:TCP_IN start serving via: {}",
+                conn.remote_address()
+            )
+            .as_str(),
+        );
 
-        if let Some(udp_server_addr) = self.config.local_udp_server_addr {
-            let conn = inner_state!(self, udp_conn).clone().unwrap();
-            let udp_only = self.config.local_tcp_server_addr.is_none();
-            let udp_timeout_ms = self.config.udp_timeout_ms;
-            if udp_only {
-                UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
-            } else {
-                tokio::spawn(async move {
-                    UdpTunnel::process(conn, udp_server_addr, udp_timeout_ms).await;
-                });
-            }
-        }
+        self.set_and_post_tunnel_state(ClientState::Tunneling);
+        TcpTunnel::process(&conn, local_server_addr, self.config.tcp_timeout_ms).await;
 
-        if let Some(addr) = self.config.local_tcp_server_addr {
-            let conn = inner_state!(self, tcp_conn).clone().unwrap();
-            let tcp_timeout_ms = self.config.tcp_timeout_ms;
-            TcpTunnel::process(conn, addr, tcp_timeout_ms).await;
-        }
         Ok(())
     }
 
-    async fn report_traffic_data_in_background(&self, conn: Connection) {
+    async fn serve_inbound_udp(
+        &mut self,
+        index: usize,
+        conn: Connection,
+        local_server_addr: SocketAddr,
+    ) -> Result<()> {
+        self.post_tunnel_log(
+            format!(
+                "{index}:UDP_IN start serving via: {}",
+                conn.remote_address()
+            )
+            .as_str(),
+        );
+
+        self.set_and_post_tunnel_state(ClientState::Tunneling);
+        UdpTunnel::process(&conn, local_server_addr, self.config.udp_timeout_ms).await;
+
+        Ok(())
+    }
+
+    fn should_quit(&self) -> bool {
+        let state = self.get_state();
+        state == ClientState::Stopping || state == ClientState::Terminated
+    }
+
+    fn report_traffic_data_in_background(&self) {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
             let mut interval =
@@ -491,22 +595,49 @@ impl Client {
             loop {
                 interval.tick().await;
 
-                let state = state.lock().unwrap();
-                let stats = conn.stats();
-                let data = {
-                    // have to be very careful to avoid deadlock, don't hold the lock for too long
-                    let total_traffic_data = &state.total_traffic_data;
-                    TunnelTraffic {
-                        rx_bytes: stats.udp_rx.bytes + total_traffic_data.rx_bytes,
-                        tx_bytes: stats.udp_tx.bytes + total_traffic_data.tx_bytes,
-                        rx_dgrams: stats.udp_rx.datagrams + total_traffic_data.rx_dgrams,
-                        tx_dgrams: stats.udp_tx.datagrams + total_traffic_data.tx_dgrams,
+                let mut rx_bytes = 0;
+                let mut tx_bytes = 0;
+                let mut rx_dgrams = 0;
+                let mut tx_dgrams = 0;
+
+                {
+                    let connections = &state.lock().unwrap().connections;
+                    for conn in connections.values() {
+                        let stats = conn.stats();
+                        rx_bytes += stats.udp_rx.bytes;
+                        tx_bytes += stats.udp_tx.bytes;
+                        rx_dgrams += stats.udp_rx.datagrams;
+                        tx_dgrams += stats.udp_tx.datagrams;
                     }
+                }
+
+                {
+                    let total_traffic_data = &&state.lock().unwrap().total_traffic_data;
+                    rx_bytes += total_traffic_data.rx_bytes;
+                    tx_bytes += total_traffic_data.tx_bytes;
+                    rx_dgrams += total_traffic_data.rx_dgrams;
+                    tx_dgrams += total_traffic_data.tx_dgrams;
+                }
+
+                let state = state.lock().unwrap();
+                let client_state = state.client_state.clone();
+                let data = TunnelTraffic {
+                    rx_bytes,
+                    tx_bytes,
+                    rx_dgrams,
+                    tx_dgrams,
                 };
+
+                info!("traffic log, rx_bytes:{rx_bytes}, tx_bytes:{tx_bytes}, rx_dgrams:{rx_dgrams}, tx_dgrams:{tx_dgrams}");
                 state.post_tunnel_info(TunnelInfo::new(
                     TunnelInfoType::TunnelTraffic,
                     Box::new(data),
                 ));
+
+                if client_state == ClientState::Stopping || client_state == ClientState::Terminated
+                {
+                    break;
+                }
             }
         });
     }
@@ -537,7 +668,6 @@ impl Client {
     }
 
     fn parse_client_config_and_domain(&self) -> Result<(rustls::ClientConfig, String)> {
-        self.post_tunnel_log(format!("will use cipher: {}", self.config.cipher).as_str());
         let cipher = *SelectedCipherSuite::from_str(&self.config.cipher).map_err(|_| {
             rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
         })?;
@@ -566,7 +696,12 @@ impl Client {
                 )))
                 .with_no_client_auth();
 
-            warn!("No certificate is provided for verification, domain \"localhost\" is assumed");
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| {
+                warn!(
+                    "No certificate is provided for verification, domain \"localhost\" is assumed"
+                );
+            });
             return Ok((client_config, "localhost".to_string()));
         }
 
@@ -669,20 +804,19 @@ impl Client {
         Ok(ip)
     }
 
-    fn post_tunnel_log(&self, log: &str) {
-        info!("{}", log);
+    fn post_tunnel_log(&self, msg: &str) {
+        info!("{msg}");
         let state = self.inner_state.lock().unwrap();
         state.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelLog,
             Box::new(format!(
-                "{} {log}",
+                "{} {msg}",
                 chrono::Local::now().format(TIME_FORMAT)
             )),
         ));
     }
 
     fn set_and_post_tunnel_state(&self, client_state: ClientState) {
-        info!("client state: {client_state}");
         let mut state = self.inner_state.lock().unwrap();
         state.client_state = client_state.clone();
         state.post_tunnel_info(TunnelInfo::new(
@@ -757,10 +891,13 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
-        warn!("======================================= WARNING ======================================");
-        warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
-        warn!("Provide the self-signed certificate for verification or connect with a domain name");
-        warn!("======================= Be cautious, this is for TEST only!!! ========================");
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            warn!("======================================= WARNING ======================================");
+            warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
+            warn!("Provide the self-signed certificate for verification or connect with a domain name");
+            warn!("======================= Be cautious, this is for TEST only!!! ========================");
+        });
         Ok(ServerCertVerified::assertion())
     }
 }

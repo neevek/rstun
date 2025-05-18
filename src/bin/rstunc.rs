@@ -10,13 +10,12 @@ fn main() {
     rs_utilities::LogHelper::init_logger("rstunc", log_filter.as_str());
 
     let config = ClientConfig::create(
-        &args.mode,
         &args.server_addr,
         &args.password,
         &args.cert,
         &args.cipher,
-        &args.tcp_mapping,
-        &args.udp_mapping,
+        &args.tcp_mappings,
+        &args.udp_mappings,
         &args.dot,
         &args.dns,
         args.workers,
@@ -48,33 +47,25 @@ fn main() {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstuncArgs {
-    /// Create a tunnel running in IN or OUT mode
-    #[arg(short = 'm', long, value_parser = PossibleValuesParser::new([TUNNEL_MODE_IN, TUNNEL_MODE_OUT]))]
-    mode: String,
-
-    /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
+    /// Server address (<domain:ip>[:port]) of rstund. Default port is 3515.
     #[arg(short = 'a', long)]
     server_addr: String,
 
-    /// Password to connect with rstund
+    /// Password for server authentication (must match server's --password)
     #[arg(short = 'p', long, required = true)]
     password: String,
 
-    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
-    ///            decides that port, so it depends on that the server is started with
-    ///            explicitly setting the `--tcp-upstream` option.
+    /// Comma-separated list of TCP tunnel mappings. Each mapping is in the form MODE^[ip:]port^[ip:]port, e.g. OUT^8080^0.0.0.0:9090
+    /// MODE is either OUT or IN. Use OUT^8000^ANY to use the server's default upstream for OUT mode.
     #[arg(short = 't', long, verbatim_doc_comment, default_value = "")]
-    tcp_mapping: String,
+    tcp_mappings: String,
 
-    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
-    ///            decides that port, so it depends on that the server is started with
-    ///            explicitly setting the `--udp-upstream` option.
+    /// Comma-separated list of UDP tunnel mappings. Each mapping is in the form MODE^[ip:]port^[ip:]port, e.g. OUT^8080^0.0.0.0:9090
+    /// MODE is either OUT or IN. Use OUT^8000^ANY to use the server's default upstream for OUT mode.
     #[arg(short = 'u', long, verbatim_doc_comment, default_value = "")]
-    udp_mapping: String,
+    udp_mappings: String,
 
-    /// Path to the certificate file, only needed for self signed certificate
+    /// Path to the certificate file (only needed for self-signed certificates)
     #[arg(short = 'c', long, default_value = "")]
     cert: String,
 
@@ -83,35 +74,31 @@ struct RstuncArgs {
         value_parser = PossibleValuesParser::new(SUPPORTED_CIPHER_SUITE_STRS).map(|v| v.to_string()))]
     cipher: String,
 
-    /// Workers to run async tasks
+    /// Number of async worker threads [uses all logical CPUs if 0]
     #[arg(short = 'w', long, default_value_t = 0)]
     workers: usize,
 
-    /// Wait time in milliseconds before trying
+    /// Wait time in milliseconds before retrying connection
     #[arg(short = 'r', long, default_value_t = 5000)]
     wait_before_retry_ms: u64,
 
-    /// Quic idle timeout in milliseconds for the connection
+    /// QUIC idle timeout in milliseconds
     #[arg(long, default_value_t = 30000)]
     quic_timeout_ms: u64,
 
-    /// Tcp idle timeout in milliseconds for the connection
+    /// TCP idle timeout in milliseconds
     #[arg(long, default_value_t = 30000)]
     tcp_timeout_ms: u64,
 
-    /// Udp idle timeout in milliseconds for the connection
+    /// UDP idle timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     udp_timeout_ms: u64,
 
-    /// Comma separated DoT servers (domains) used to resolve the server address (domain)
-    /// e.g. "dns.google,one.one.one.one"
-    /// Note that DoT servers will be resolved using any available system DNS
+    /// Comma-separated DoT servers (domains) for DNS resolution, e.g. "dns.google,one.one.one.one". Takes precedence over --dns if set.
     #[arg(long, verbatim_doc_comment, default_value = "")]
     dot: String,
 
-    /// Comma separated DNS' (IPs) used to resolve the server address (domain)
-    /// Note that the --dot option if not empty takes precedence over this option
-    /// e.g. "1.1.1.1,8.8.8.8"
+    /// Comma-separated DNS servers (IPs) for DNS resolution, e.g. "1.1.1.1,8.8.8.8"
     #[arg(long, verbatim_doc_comment, default_value = "")]
     dns: String,
 

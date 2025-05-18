@@ -1,8 +1,8 @@
 use crate::{
     tcp::tcp_server::{TcpMessage, TcpSender},
-    tunnel_message::UdpLocalAddr,
+    tunnel_message::{TunnelMessage, UdpLocalAddr},
     udp::{udp_packet::UdpPacket, udp_server::UdpMessage},
-    TunnelMessage, BUFFER_POOL, UDP_PACKET_SIZE,
+    BUFFER_POOL, UDP_PACKET_SIZE,
 };
 
 use super::udp_server::UdpServer;
@@ -24,67 +24,60 @@ pub struct UdpTunnel;
 
 impl UdpTunnel {
     pub async fn start(
-        conn: Connection,
+        conn: &quinn::Connection,
         mut udp_server: UdpServer,
         tcp_sender: Option<TcpSender>,
-        use_sync: bool,
         udp_timeout_ms: u64,
     ) -> Result<()> {
-        let task = || async move {
-            let stream_map = Arc::new(DashMap::new());
-            udp_server.set_active(true);
-            let mut udp_receiver = udp_server.take_receiver().unwrap();
+        let stream_map = Arc::new(DashMap::new());
+        udp_server.set_active(true);
+        let mut udp_receiver = udp_server.take_receiver().unwrap();
 
-            debug!("start transfering udp packets from: {}", udp_server.addr());
-            while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
-                let quic_send = match UdpTunnel::open_stream(
-                    conn.clone(),
-                    udp_server.clone(),
-                    packet.addr,
-                    stream_map.clone(),
-                    udp_timeout_ms,
-                )
-                .await
-                {
-                    Ok(quic_send) => quic_send,
-                    Err(e) => {
-                        error!("{e}");
-                        if conn.close_reason().is_some() {
-                            if let Some(tcp_sender) = tcp_sender {
-                                tcp_sender.send(TcpMessage::Quit).await.ok();
-                            }
-                            debug!("connection is closed, will quit");
-                            break;
+        debug!("start transfering udp packets from: {}", udp_server.addr());
+        while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
+            let quic_send = match UdpTunnel::open_stream(
+                conn.clone(),
+                udp_server.clone(),
+                packet.addr,
+                stream_map.clone(),
+                udp_timeout_ms,
+            )
+            .await
+            {
+                Ok(quic_send) => quic_send,
+                Err(e) => {
+                    error!("{e}");
+                    if conn.close_reason().is_some() {
+                        if let Some(tcp_sender) = tcp_sender {
+                            tcp_sender.send(TcpMessage::Quit).await.ok();
                         }
-                        continue;
+                        debug!("connection is closed, will quit");
+                        break;
                     }
-                };
+                    continue;
+                }
+            };
 
-                // send the packet using an async task
-                tokio::spawn(async move {
-                    let mut quic_send = quic_send.lock().await;
-                    let payload_len = packet.payload.len();
-                    TunnelMessage::send_raw(&mut quic_send, &packet.payload)
-                        .await
-                        .map_err(|e| {
-                            warn!("failed to send datagram({payload_len}) through the tunnel, err: {e:?}");
-                            e
-                        })
-                        .ok();
-                });
-            }
-
-            // put the receiver back
-            udp_server.set_active(false);
-            udp_server.put_receiver(udp_receiver);
-            info!("local udp server paused");
-        };
-
-        if use_sync {
-            task().await;
-        } else {
-            tokio::spawn(task());
+            // send the packet using an async task
+            tokio::spawn(async move {
+                let mut quic_send = quic_send.lock().await;
+                let payload_len = packet.payload.len();
+                TunnelMessage::send_raw(&mut quic_send, &packet.payload)
+                    .await
+                    .map_err(|e| {
+                        warn!(
+                            "failed to send datagram({payload_len}) through the tunnel, err: {e:?}"
+                        );
+                        e
+                    })
+                    .ok();
+            });
         }
+
+        // put the receiver back
+        udp_server.set_active(false);
+        udp_server.put_receiver(udp_receiver);
+        info!("local udp server paused");
         Ok(())
     }
 
@@ -109,7 +102,7 @@ impl UdpTunnel {
         .await?;
 
         debug!(
-            " new udp session: {peer_addr}, streams: {}",
+            "new udp session: {peer_addr}, streams: {}",
             stream_map.len()
         );
 
@@ -144,7 +137,7 @@ impl UdpTunnel {
                     e => {
                         match e {
                             Ok(Err(e)) => {
-                                warn!("failed to read for udp, err: {}", e.to_string());
+                                warn!("failed to read for udp, err: {e}");
                             }
                             Err(_) => {
                                 // timedout
@@ -159,7 +152,7 @@ impl UdpTunnel {
 
             stream_map.remove(&peer_addr);
             debug!(
-                "drop udp session({peer_addr}), streams: {}",
+                "drop udp session: {peer_addr}, streams: {}",
                 stream_map.len()
             );
         });
@@ -167,9 +160,9 @@ impl UdpTunnel {
         Ok(quic_send)
     }
 
-    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr, udp_timeout_ms: u64) {
+    pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, udp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
-        info!("start udp streaming, {remote_addr} ↔ {upstream_addr}");
+        info!("start udp streaming, {remote_addr} ↔  {upstream_addr}");
 
         loop {
             match conn.accept_bi().await {
@@ -223,7 +216,7 @@ impl UdpTunnel {
 
         let udp_socket_clone = udp_socket.clone();
         tokio::spawn(async move {
-            debug!("start udp stream: {peer_addr} ← {upstream_addr}");
+            debug!("start udp stream: {peer_addr} ←  {upstream_addr}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 match tokio::time::timeout(
@@ -253,10 +246,10 @@ impl UdpTunnel {
                     }
                 }
             }
-            debug!("drop udp stream: {peer_addr} ← {upstream_addr}");
+            debug!("drop udp stream: {peer_addr} ←  {upstream_addr}");
         });
 
-        debug!("start sending datagrams to upstream, {peer_addr} → {upstream_addr}");
+        debug!("start sending datagrams to upstream, {peer_addr} →  {upstream_addr}");
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
             match tokio::time::timeout(

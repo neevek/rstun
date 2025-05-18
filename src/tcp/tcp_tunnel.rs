@@ -2,7 +2,7 @@ use super::tcp_server::TcpMessage;
 use crate::{TcpServer, BUFFER_POOL};
 use anyhow::Result;
 use log::{debug, error, info};
-use quinn::{Connection, RecvStream, SendStream};
+use quinn::{RecvStream, SendStream};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -25,7 +25,7 @@ pub struct TcpTunnel;
 impl TcpTunnel {
     pub async fn start(
         tunnel_out: bool,
-        conn: &Connection,
+        conn: &quinn::Connection,
         tcp_server: &mut TcpServer,
         pending_stream: &mut Option<TcpStream>,
         tcp_timeout_ms: u64,
@@ -208,9 +208,9 @@ impl TcpTunnel {
         }
     }
 
-    pub async fn process(conn: quinn::Connection, upstream_addr: SocketAddr, tcp_timeout_ms: u64) {
+    pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, tcp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
-        info!("start tcp streaming, {remote_addr} ↔ {upstream_addr}");
+        info!("start tcp streaming, {remote_addr} ↔  {upstream_addr}");
 
         loop {
             match conn.accept_bi().await {
