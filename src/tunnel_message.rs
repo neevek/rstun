@@ -1,4 +1,3 @@
-use crate::Upstream;
 use anyhow::Result;
 use anyhow::{bail, Context};
 use enum_as_inner::EnumAsInner;
@@ -9,12 +8,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::{TunnelMode, Upstream};
+
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
-    ReqTcpInLogin(LoginInfo),
-    ReqTcpOutLogin(LoginInfo),
-    ReqUdpInLogin(LoginInfo),
-    ReqUdpOutLogin(LoginInfo),
+    ReqLogin(LoginInfo),
     ReqUdpStart(UdpLocalAddr),
     RespFailure(String),
     RespSuccess,
@@ -24,18 +22,22 @@ pub enum TunnelMessage {
 pub struct LoginInfo {
     pub password: String,
     pub upstream: Upstream,
+    pub mode: TunnelMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UdpLocalAddr(pub SocketAddr);
 
+impl Display for LoginInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(format!("{}_{}", self.upstream.upstream_type, self.mode).as_str())
+    }
+}
+
 impl Display for TunnelMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReqTcpInLogin(_) => f.write_str("tcp_in"),
-            Self::ReqTcpOutLogin(_) => f.write_str("tcp_out"),
-            Self::ReqUdpInLogin(_) => f.write_str("udp_in"),
-            Self::ReqUdpOutLogin(_) => f.write_str("udp_out"),
+            Self::ReqLogin(login_info) => f.write_str(login_info.to_string().as_str()),
             _ => f.write_str("tunnel message"),
         }
     }

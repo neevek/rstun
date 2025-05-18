@@ -10,13 +10,12 @@ fn main() {
     rs_utilities::LogHelper::init_logger("rstunc", log_filter.as_str());
 
     let config = ClientConfig::create(
-        &args.mode,
         &args.server_addr,
         &args.password,
         &args.cert,
         &args.cipher,
-        &args.tcp_mapping,
-        &args.udp_mapping,
+        &args.tcp_mappings,
+        &args.udp_mappings,
         &args.dot,
         &args.dns,
         args.workers,
@@ -48,10 +47,6 @@ fn main() {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct RstuncArgs {
-    /// Create a tunnel running in IN or OUT mode
-    #[arg(short = 'm', long, value_parser = PossibleValuesParser::new([TUNNEL_MODE_IN, TUNNEL_MODE_OUT]))]
-    mode: String,
-
     /// Address (<domain:ip>[:port] pair) of rstund, default port is 3515
     #[arg(short = 'a', long)]
     server_addr: String,
@@ -60,19 +55,19 @@ struct RstuncArgs {
     #[arg(short = 'p', long, required = true)]
     password: String,
 
-    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
+    /// LOCAL and REMOTE mappings in MODE^[ip:]port^[ip:]port format, e.g. OUT^8080^0.0.0.0:9090
+    /// `OUT^8000^ANY` for not explicitly specifying the upstream on the server, the server
     ///            decides that port, so it depends on that the server is started with
     ///            explicitly setting the `--tcp-upstream` option.
     #[arg(short = 't', long, verbatim_doc_comment, default_value = "")]
-    tcp_mapping: String,
+    tcp_mappings: String,
 
-    /// LOCAL and REMOTE mapping in [ip:]port^[ip:]port format, e.g. 8080^0.0.0.0:9090
-    /// `8000^ANY` for not explicitly specifying the upstream on the server, the server
+    /// LOCAL and REMOTE mappings in MODE^[ip:]port^[ip:]port format, e.g. OUT^8080^0.0.0.0:9090
+    /// `OUT^8000^ANY` for not explicitly specifying the upstream on the server, the server
     ///            decides that port, so it depends on that the server is started with
     ///            explicitly setting the `--udp-upstream` option.
     #[arg(short = 'u', long, verbatim_doc_comment, default_value = "")]
-    udp_mapping: String,
+    udp_mappings: String,
 
     /// Path to the certificate file, only needed for self signed certificate
     #[arg(short = 'c', long, default_value = "")]
