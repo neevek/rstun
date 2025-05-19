@@ -210,7 +210,7 @@ impl TcpTunnel {
 
     pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, tcp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
-        info!("start tcp streaming, {remote_addr} ↔ {upstream_addr}");
+        info!("start tcp streaming, {remote_addr} ↔  {upstream_addr}");
 
         loop {
             match conn.accept_bi().await {

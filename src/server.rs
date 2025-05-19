@@ -15,7 +15,7 @@ use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use tokio::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -240,8 +240,6 @@ impl Server {
                 let upstream_addr =
                     Self::obtain_upstream_addr(&login_info, &config.default_tcp_upstream)?;
 
-                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-
                 let tunnel_type = match login_info.mode {
                     TunnelMode::Out => match login_info.upstream.upstream_type {
                         UpstreamType::Tcp => TunnelType::TcpOut(TcpTunnelOutInfo {
@@ -265,7 +263,7 @@ impl Server {
                                         format!("udp server failed to bind at: {upstream_addr}"),
                                     )
                                     .await?;
-                                    log_and_bail!("login rejected: {e}");
+                                    log_and_bail!("tcp_IN login rejected: {e}");
                                 }
                             };
 
@@ -283,7 +281,7 @@ impl Server {
                                         format!("udp server failed to bind at: {upstream_addr}"),
                                     )
                                     .await?;
-                                    log_and_bail!("login rejected: {e}");
+                                    log_and_bail!("udp_IN login rejected: {e}");
                                 }
                             };
 
@@ -294,6 +292,7 @@ impl Server {
                     },
                 };
 
+                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 info!("connection authenticated! addr: {remote_addr}");
                 Ok(tunnel_type)
             }
@@ -373,11 +372,15 @@ impl Server {
         key_path: &str,
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         let (certs, key) = if cert_path.is_empty() {
-            info!("will use auto-generated self-signed certificate.");
-            warn!("============================= WARNING ==============================");
-            warn!("No valid certificate path is provided, a self-signed certificate");
-            warn!("for the domain \"localhost\" is generated.");
-            warn!("============== Be cautious, this is for TEST only!!! ===============");
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| {
+                info!("will use auto-generated self-signed certificate.");
+                warn!("============================= WARNING ==============================");
+                warn!("No valid certificate path is provided, a self-signed certificate");
+                warn!("for the domain \"localhost\" is generated.");
+                warn!("============== Be cautious, this is for TEST only!!! ===============");
+            });
+
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
             let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
             let cert = CertificateDer::from(cert.cert);

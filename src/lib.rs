@@ -224,6 +224,7 @@ pub struct ServerConfig {
 }
 
 impl ClientConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         server_addr: &str,
         password: &str,
@@ -253,28 +254,32 @@ impl ClientConfig {
             udp_timeout_ms = 5000;
         }
 
-        let mut config = ClientConfig::default();
-        config.cert_path = cert.to_string();
-        config.cipher = cipher.to_string();
-        config.server_addr = if !server_addr.contains(':') {
-            format!("127.0.0.1:{server_addr}")
-        } else {
-            server_addr.to_string()
+        let mut config = ClientConfig {
+            cert_path: cert.to_string(),
+            cipher: cipher.to_string(),
+            server_addr: if !server_addr.contains(':') {
+                format!("127.0.0.1:{server_addr}")
+            } else {
+                server_addr.to_string()
+            },
+            password: password.to_string(),
+            workers: if workers > 0 {
+                workers
+            } else {
+                num_cpus::get()
+            },
+            wait_before_retry_ms,
+            quic_timeout_ms,
+            tcp_timeout_ms,
+            udp_timeout_ms,
+            dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
+            dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
+            ..ClientConfig::default()
         };
-        config.password = password.to_string();
-        config.workers = if workers > 0 {
-            workers
-        } else {
-            num_cpus::get()
-        };
-        config.wait_before_retry_ms = wait_before_retry_ms;
-        config.quic_timeout_ms = quic_timeout_ms;
-        config.tcp_timeout_ms = tcp_timeout_ms;
-        config.udp_timeout_ms = udp_timeout_ms;
+
         parse_addr_mappings(tcp_addr_mappings, UpstreamType::Tcp, &mut config.tunnels)?;
         parse_addr_mappings(udp_addr_mappings, UpstreamType::Udp, &mut config.tunnels)?;
-        config.dot_servers = dot.split(',').map(|s| s.to_string()).collect();
-        config.dns_servers = dns.split(',').map(|s| s.to_string()).collect();
+
         Ok(config)
     }
 }

@@ -240,18 +240,12 @@ impl Client {
                 let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
                 endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
 
-                let login_info = LoginInfo {
-                    password: self.config.password.clone(),
-                    upstream: tunnel_config.upstream.clone(),
-                    mode: tunnel_config.mode.clone(),
-                };
-
                 let conn = self
                     .login(
                         &endpoint,
                         &login_cfg.remote_addr,
+                        &tunnel_config,
                         login_cfg.domain.as_str(),
-                        TunnelMessage::ReqLogin(login_info),
                     )
                     .await?;
 
@@ -274,9 +268,6 @@ impl Client {
 
             match result {
                 Ok(conn) => {
-                    // inner_state!(self, connections).insert(k, v)
-                    // save conn here...
-
                     let upstream_type = &tunnel_config.upstream.upstream_type;
                     let local_server_addr = tunnel_config.local_server_addr.unwrap();
 
@@ -364,9 +355,17 @@ impl Client {
         &self,
         endpoint: &Endpoint,
         remote_addr: &SocketAddr,
+        tunnel_config: &TunnelConfig,
         domain: &str,
-        login_msg: TunnelMessage,
     ) -> Result<Connection> {
+        let login_info = LoginInfo {
+            password: self.config.password.clone(),
+            upstream: tunnel_config.upstream.clone(),
+            mode: tunnel_config.mode.clone(),
+        };
+
+        let login_msg = TunnelMessage::ReqLogin(login_info);
+
         self.set_and_post_tunnel_state(ClientState::Connecting);
         self.post_tunnel_log(
             format!(
@@ -383,9 +382,13 @@ impl Client {
             .context("open bidirectional connection failed")?;
 
         self.set_and_post_tunnel_state(ClientState::Connected);
-        self.post_tunnel_log(format!("[{login_msg}] connected: {remote_addr:?}",).as_str());
-        self.post_tunnel_log(format!("[{login_msg}] logging in...").as_str());
-
+        self.post_tunnel_log(
+            format!(
+                "[{login_msg}] {} →  {remote_addr:?} logging in...",
+                tunnel_config.local_server_addr.unwrap()
+            )
+            .as_str(),
+        );
         TunnelMessage::send(&mut quic_send, &login_msg).await?;
 
         let resp = TunnelMessage::recv(&mut quic_recv).await?;
@@ -396,7 +399,13 @@ impl Client {
             bail!("[{login_msg}] unexpected response, failed to login");
         }
         TunnelMessage::handle_message(&resp)?;
-        self.post_tunnel_log(format!("[{login_msg}] logged in").as_str());
+        self.post_tunnel_log(
+            format!(
+                "[{login_msg}] {} →  {remote_addr:?} logged in!",
+                tunnel_config.local_server_addr.unwrap()
+            )
+            .as_str(),
+        );
         Ok(conn)
     }
 
@@ -411,7 +420,7 @@ impl Client {
         let tcp_server = {
             inner_state!(self, tcp_servers)
                 .get(&local_server_addr)
-                .and_then(|s| Some(s.clone()))
+                .cloned()
         };
 
         let mut tcp_server = match tcp_server {
@@ -458,7 +467,7 @@ impl Client {
         let udp_server = {
             inner_state!(self, udp_servers)
                 .get(&local_server_addr)
-                .and_then(|s| Some(s.clone()))
+                .cloned()
         };
 
         let udp_server = match udp_server {
@@ -820,10 +829,13 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
-        warn!("======================================= WARNING ======================================");
-        warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
-        warn!("Provide the self-signed certificate for verification or connect with a domain name");
-        warn!("======================= Be cautious, this is for TEST only!!! ========================");
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            warn!("======================================= WARNING ======================================");
+            warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
+            warn!("Provide the self-signed certificate for verification or connect with a domain name");
+            warn!("======================= Be cautious, this is for TEST only!!! ========================");
+        });
         Ok(ServerCertVerified::assertion())
     }
 }

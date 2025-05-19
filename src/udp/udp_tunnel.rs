@@ -102,7 +102,7 @@ impl UdpTunnel {
         .await?;
 
         debug!(
-            " new udp session: {peer_addr}, streams: {}",
+            "new udp session: {peer_addr}, streams: {}",
             stream_map.len()
         );
 
@@ -162,7 +162,7 @@ impl UdpTunnel {
 
     pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, udp_timeout_ms: u64) {
         let remote_addr = &conn.remote_address();
-        info!("start udp streaming, {remote_addr} ↔ {upstream_addr}");
+        info!("start udp streaming, {remote_addr} ↔  {upstream_addr}");
 
         loop {
             match conn.accept_bi().await {
@@ -216,7 +216,7 @@ impl UdpTunnel {
 
         let udp_socket_clone = udp_socket.clone();
         tokio::spawn(async move {
-            debug!("start udp stream: {peer_addr} ← {upstream_addr}");
+            debug!("start udp stream: {peer_addr} ←  {upstream_addr}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 match tokio::time::timeout(
@@ -246,10 +246,10 @@ impl UdpTunnel {
                     }
                 }
             }
-            debug!("drop udp stream: {peer_addr} ← {upstream_addr}");
+            debug!("drop udp stream: {peer_addr} ←  {upstream_addr}");
         });
 
-        debug!("start sending datagrams to upstream, {peer_addr} → {upstream_addr}");
+        debug!("start sending datagrams to upstream, {peer_addr} →  {upstream_addr}");
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
             match tokio::time::timeout(
