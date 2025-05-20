@@ -158,8 +158,8 @@ pub enum UpstreamType {
 impl Display for UpstreamType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Tcp => write!(f, "tcp"),
-            Self::Udp => write!(f, "udp"),
+            Self::Tcp => write!(f, "TCP"),
+            Self::Udp => write!(f, "UDP"),
         }
     }
 }
@@ -172,15 +172,14 @@ pub struct Upstream {
 
 impl Display for Upstream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.upstream_type).unwrap();
         match self.upstream_addr {
-            Some(addr) => write!(f, "^{}", addr),
-            None => write!(f, "^PeerDefault"),
+            Some(addr) => write!(f, "{}", addr),
+            None => write!(f, "PeerDefault"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TunnelConfig {
     pub mode: TunnelMode,
     pub local_server_addr: Option<SocketAddr>,

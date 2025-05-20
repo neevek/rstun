@@ -240,8 +240,8 @@ impl Server {
                 let upstream_addr =
                     Self::obtain_upstream_addr(&login_info, &config.default_tcp_upstream)?;
 
-                let tunnel_type = match login_info.mode {
-                    TunnelMode::Out => match login_info.upstream.upstream_type {
+                let tunnel_type = match login_info.tunnel_config.mode {
+                    TunnelMode::Out => match login_info.tunnel_config.upstream.upstream_type {
                         UpstreamType::Tcp => TunnelType::TcpOut(TcpTunnelOutInfo {
                             conn,
                             upstream_addr,
@@ -253,7 +253,7 @@ impl Server {
                         }),
                     },
 
-                    TunnelMode::In => match login_info.upstream.upstream_type {
+                    TunnelMode::In => match login_info.tunnel_config.upstream.upstream_type {
                         UpstreamType::Tcp => {
                             let tcp_server = match TcpServer::bind_and_start(upstream_addr).await {
                                 Ok(tcp_server) => tcp_server,
@@ -307,16 +307,17 @@ impl Server {
         login_info: &LoginInfo,
         default_upstream: &Option<SocketAddr>,
     ) -> Result<SocketAddr> {
-        Ok(match login_info.upstream.upstream_addr {
+        let tcfg = &login_info.tunnel_config;
+        Ok(match tcfg.upstream.upstream_addr {
             None => {
-                if login_info.mode == TunnelMode::In {
+                if tcfg.mode == TunnelMode::In {
                     log_and_bail!("explicit port is required to start TunnelIn mode tunneling");
                 }
 
                 if default_upstream.is_none() {
                     log_and_bail!(
                         "explicit {} upstream address must be specified when logging in because there's no default upstream specified for the server",
-                        login_info.upstream.upstream_type
+                        tcfg.upstream.upstream_type
                     );
                 }
 
@@ -324,7 +325,7 @@ impl Server {
             }
 
             Some(addr) => {
-                if login_info.mode == TunnelMode::In
+                if tcfg.mode == TunnelMode::In
                     && !addr.ip().is_unspecified()
                     && !addr.ip().is_loopback()
                 {

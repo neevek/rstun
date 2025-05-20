@@ -1,3 +1,4 @@
+use crate::{TunnelConfig, TunnelMode, UpstreamType};
 use anyhow::Result;
 use anyhow::{bail, Context};
 use enum_as_inner::EnumAsInner;
@@ -7,8 +8,6 @@ use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-use crate::{TunnelMode, Upstream};
 
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
@@ -21,8 +20,48 @@ pub enum TunnelMessage {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LoginInfo {
     pub password: String,
-    pub upstream: Upstream,
-    pub mode: TunnelMode,
+    pub tunnel_config: TunnelConfig,
+}
+
+impl LoginInfo {
+    pub fn format_with_remote_addr(&self, remote_addr: &SocketAddr) -> String {
+        let cfg = &self.tunnel_config;
+        let upstream = &cfg.upstream;
+        let upstream_str = if let Some(upstream) = upstream.upstream_addr {
+            if upstream.ip().is_loopback() {
+                format!("{}:{}", remote_addr.ip(), upstream.port())
+            } else {
+                format!("{upstream}")
+            }
+        } else {
+            String::from("PeerDefault")
+        };
+
+        match self.tunnel_config.mode {
+            TunnelMode::Out => {
+                format!(
+                    "{}_OUT →  {} →  {remote_addr} →  {upstream_str}",
+                    if upstream.upstream_type == UpstreamType::Tcp {
+                        "TCP"
+                    } else {
+                        "UDP"
+                    },
+                    cfg.local_server_addr.unwrap()
+                )
+            }
+            TunnelMode::In => {
+                format!(
+                    "{}_IN ←  {} ←  {remote_addr} ←  {upstream_str}",
+                    if upstream.upstream_type == UpstreamType::Tcp {
+                        "TCP"
+                    } else {
+                        "UDP"
+                    },
+                    cfg.local_server_addr.unwrap()
+                )
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -30,7 +69,13 @@ pub struct UdpLocalAddr(pub SocketAddr);
 
 impl Display for LoginInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(format!("{}_{}", self.upstream.upstream_type, self.mode).as_str())
+        f.write_str(
+            format!(
+                "{}_{}",
+                self.tunnel_config.upstream.upstream_type, self.tunnel_config.mode
+            )
+            .as_str(),
+        )
     }
 }
 
