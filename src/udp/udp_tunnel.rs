@@ -137,7 +137,7 @@ impl UdpTunnel {
                     e => {
                         match e {
                             Ok(Err(e)) => {
-                                warn!("failed to read for udp, err: {}", e.to_string());
+                                warn!("failed to read for udp, err: {e}");
                             }
                             Err(_) => {
                                 // timedout
@@ -152,7 +152,7 @@ impl UdpTunnel {
 
             stream_map.remove(&peer_addr);
             debug!(
-                "drop udp session({peer_addr}), streams: {}",
+                "drop udp session: {peer_addr}, streams: {}",
                 stream_map.len()
             );
         });

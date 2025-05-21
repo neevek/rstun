@@ -418,7 +418,6 @@ impl Client {
             None => {
                 let tcp_server = self.start_tcp_server(local_server_addr).await?;
                 inner_state!(self, tcp_servers).insert(local_server_addr, tcp_server.clone());
-                self.report_traffic_data_in_background(conn.clone()).await;
                 tcp_server
             }
         };
@@ -433,6 +432,7 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
+        self.report_traffic_data_in_background(conn.clone());
 
         TcpTunnel::start(
             true,
@@ -464,7 +464,6 @@ impl Client {
             None => {
                 let udp_server = self.start_udp_server(local_server_addr).await?;
                 inner_state!(self, udp_servers).insert(local_server_addr, udp_server.clone());
-                self.report_traffic_data_in_background(conn.clone()).await;
                 udp_server
             }
         };
@@ -479,6 +478,7 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
+        self.report_traffic_data_in_background(conn.clone());
 
         UdpTunnel::start(&conn, udp_server, None, self.config.udp_timeout_ms)
             .await
@@ -531,7 +531,7 @@ impl Client {
         data.tx_dgrams += stats.udp_tx.datagrams;
     }
 
-    async fn report_traffic_data_in_background(&self, conn: Connection) {
+    fn report_traffic_data_in_background(&self, conn: Connection) {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
             let mut interval =
@@ -557,6 +557,10 @@ impl Client {
                     TunnelInfoType::TunnelTraffic,
                     Box::new(data),
                 ));
+
+                if conn.close_reason().is_some() {
+                    break;
+                }
             }
         });
     }
