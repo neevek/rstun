@@ -1,6 +1,7 @@
 use crate::{TunnelConfig, TunnelMode, UpstreamType};
 use anyhow::Result;
 use anyhow::{bail, Context};
+use bincode::config::{self, Configuration};
 use enum_as_inner::EnumAsInner;
 use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
@@ -101,13 +102,17 @@ impl TunnelMessage {
             .await
             .context("read message failed")?;
 
-        let tun_msg =
-            bincode::deserialize::<TunnelMessage>(&msg).context("deserialize message failed")?;
-        Ok(tun_msg)
+        let tun_msg = bincode::serde::decode_from_slice::<TunnelMessage, Configuration>(
+            &msg,
+            config::standard(),
+        )
+        .context("deserialize message failed")?;
+        Ok(tun_msg.0)
     }
 
     pub async fn send(quic_send: &mut SendStream, msg: &TunnelMessage) -> Result<()> {
-        let msg = bincode::serialize(msg).context("serialize message failed")?;
+        let msg = bincode::serde::encode_to_vec(msg, config::standard())
+            .context("serialize message failed")?;
         quic_send.write_u32(msg.len() as u32).await?;
         quic_send.write_all(&msg).await?;
         Ok(())

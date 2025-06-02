@@ -20,7 +20,7 @@ use rustls::{
     crypto::{ring::cipher_suite, CryptoProvider},
     RootCertStore, SupportedCipherSuite,
 };
-use rustls_platform_verifier::{self, Verifier};
+use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::{
@@ -681,8 +681,7 @@ impl Client {
 
                 let client_config = self
                     .create_client_config_builder(&cipher)?
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(Verifier::new()))
+                    .with_platform_verifier()?
                     .with_no_client_auth();
 
                 return Ok((client_config, domain));

@@ -1,53 +1,53 @@
 [package]
 name = "rstun"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 
 [lib]
 crate-type = ["lib"]
 
 [dependencies]
-rustls = { version = "0.23.25", default-features = false, features = ["ring"] }
-clap = { version = "4.4", features = ["derive"] }
+rustls = { version = "0.23.27", default-features = false, features = ["ring"] }
+clap = { version = "4.5", features = ["derive"] }
 rcgen = "0.13"
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.45", features = ["full"] }
 pretty_env_logger = "0.5.0"
 ring = "0.17"
 log = "0.4"
 chrono = "0.4"
 anyhow = "1.0"
-quinn = "0.11.5"
-quinn-proto = "0.11.8"
+quinn = "0.11.8"
+quinn-proto = "0.11.12"
 futures-util = "0.3"
-bincode = "1.3"
+bincode = { version = "2", features = ["serde"] }
 pin-utils = "0.1.0"
 enum-as-inner = "0.6"
-num_cpus = "1.16"
+num_cpus = "1.17"
 rs-utilities = "0.4.2"
 # rs-utilities = { path = "../rs-utilities" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rustls-platform-verifier = "0.5.1"
+rustls-platform-verifier = "0.6.0"
 byte-pool = { git = "https://github.com/neevek/byte-pool" }
-x509-parser = "0.16"
+x509-parser = "0.17"
 lazy_static = "1.5"
-rustls-pemfile = "2.1"
+rustls-pemfile = "2.2"
 bytes = "1"
-backon = "1.2"
+backon = "1.5"
 dashmap = "6"
 ctrlc = "3.4"
 
 [dev-dependencies]
 jni = "0.21"
-android_logger = "0.13"
+android_logger = "0.15"
 
 [target.aarch64-linux-android.dependencies]
 jni = "0.21"
-android_logger = "0.13"
+android_logger = "0.15"
 
 [target.armv7-linux-androideabi.dependencies]
 jni = "0.21"
-android_logger = "0.13"
+android_logger = "0.15"
 
 [profile.release]
 opt-level = "z"
