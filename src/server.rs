@@ -76,9 +76,8 @@ impl Server {
             .context(format!("invalid address: {}", config.addr))?;
 
         let quinn_server_cfg = Self::load_quinn_server_config(&config)?;
-        let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).map_err(|e| {
+        let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).inspect_err(|e| {
             error!("failed to bind tunnel server on address: {addr}, err: {e}");
-            e
         })?;
 
         info!(

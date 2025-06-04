@@ -64,11 +64,10 @@ impl UdpTunnel {
                 let payload_len = packet.payload.len();
                 TunnelMessage::send_raw(&mut quic_send, &packet.payload)
                     .await
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         warn!(
-                            "failed to send datagram({payload_len}) through the tunnel, err: {e:?}"
+                            "failed to send datagram({payload_len}) through the tunnel, err: {e}"
                         );
-                        e
                     })
                     .ok();
             });
