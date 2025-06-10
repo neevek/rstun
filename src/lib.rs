@@ -5,6 +5,7 @@ mod tcp;
 mod tunnel_info_bridge;
 mod tunnel_message;
 mod udp;
+mod util;
 
 use anyhow::{Context, Result};
 use byte_pool::Block;

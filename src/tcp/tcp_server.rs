@@ -1,19 +1,12 @@
+use crate::tcp::{TcpMessage, TcpReceiver, TcpSender};
 use anyhow::Result;
 use log::{debug, error, info};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-
-pub enum TcpMessage {
-    Request(TcpStream),
-    Quit,
-}
-
-pub type TcpSender = Sender<TcpMessage>;
-pub type TcpReceiver = Receiver<TcpMessage>;
 
 #[derive(Debug, Clone)]
 pub struct TcpServer {
@@ -23,8 +16,8 @@ pub struct TcpServer {
 #[derive(Debug)]
 struct State {
     addr: SocketAddr,
-    tcp_sender: TcpSender,
-    tcp_receiver: Option<TcpReceiver>,
+    tcp_sender: TcpSender<TcpStream>,
+    tcp_receiver: Option<TcpReceiver<TcpStream>>,
     active: bool,
     terminated: bool,
 }
@@ -110,15 +103,15 @@ impl TcpServer {
         self.state.lock().unwrap().addr
     }
 
-    pub fn take_tcp_receiver(&mut self) -> Option<TcpReceiver> {
+    pub fn take_tcp_receiver(&mut self) -> Option<TcpReceiver<TcpStream>> {
         self.state.lock().unwrap().tcp_receiver.take()
     }
 
-    pub fn put_tcp_receiver(&mut self, tcp_receiver: TcpReceiver) {
+    pub fn put_tcp_receiver(&mut self, tcp_receiver: TcpReceiver<TcpStream>) {
         self.state.lock().unwrap().tcp_receiver = Some(tcp_receiver)
     }
 
-    pub fn clone_tcp_sender(&self) -> Sender<TcpMessage> {
+    pub fn clone_tcp_sender(&self) -> TcpSender<TcpStream> {
         self.state.lock().unwrap().tcp_sender.clone()
     }
 

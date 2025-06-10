@@ -1,11 +1,10 @@
+use crate::udp::udp_server::UdpServer;
 use crate::{
-    tcp::tcp_server::{TcpMessage, TcpSender},
+    tcp::{TcpMessage, TcpSender},
     tunnel_message::{TunnelMessage, UdpLocalAddr},
     udp::{udp_packet::UdpPacket, udp_server::UdpMessage},
     BUFFER_POOL, UDP_PACKET_SIZE,
 };
-
-use super::udp_server::UdpServer;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
@@ -16,7 +15,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::net::UdpSocket;
+use tokio::net::{TcpStream, UdpSocket};
 
 type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
@@ -26,7 +25,7 @@ impl UdpTunnel {
     pub async fn start(
         conn: &quinn::Connection,
         mut udp_server: UdpServer,
-        tcp_sender: Option<TcpSender>,
+        tcp_sender: Option<TcpSender<TcpStream>>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let stream_map = Arc::new(DashMap::new());

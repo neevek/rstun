@@ -1,5 +1,5 @@
-use crate::tcp::tcp_server::{TcpMessage, TcpSender};
 use crate::tcp::tcp_tunnel::TcpTunnel;
+use crate::tcp::{TcpMessage, TcpSender};
 use crate::tunnel_message::TunnelMessage;
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
@@ -16,12 +16,13 @@ use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Once};
+use tokio::net::TcpStream;
 use tokio::time::Duration;
 
 #[derive(Debug, Clone)]
 struct ConnectedTcpInSession {
     conn: Connection,
-    sender: TcpSender,
+    sender: TcpSender<TcpStream>,
 }
 
 #[derive(Debug, Clone)]
