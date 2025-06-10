@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
 use clap::Parser;

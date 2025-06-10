@@ -5,14 +5,14 @@ mod tcp;
 mod tunnel_info_bridge;
 mod tunnel_message;
 mod udp;
+mod util;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use byte_pool::Block;
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
 use lazy_static::lazy_static;
-use log::error;
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;
@@ -24,7 +24,8 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
-pub use tunnel_message::LoginInfo;
+pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
+use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
 
 extern crate bincode;
@@ -132,6 +133,8 @@ pub enum TunnelType {
     TcpIn(TcpTunnelInInfo),
     UdpOut(UdpTunnelOutInfo),
     UdpIn(UdpTunnelInInfo),
+    DynamicUpstreamTcpOut(quinn::Connection),
+    DynamicUpstreamUdpOut(quinn::Connection),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -184,6 +187,12 @@ pub struct TunnelConfig {
     pub mode: TunnelMode,
     pub local_server_addr: Option<SocketAddr>,
     pub upstream: Upstream,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Tunnel {
+    NetworkBased(TunnelConfig),
+    ChannelBased(UpstreamType),
 }
 
 #[derive(Debug, Default, Clone)]
