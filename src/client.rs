@@ -1,10 +1,10 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::tcp_tunnel::TcpTunnel,
+    tcp::{tcp_tunnel::TcpTunnel, AsyncStream, StreamReceiver, StreamRequest},
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     tunnel_message::TunnelMessage,
-    udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
-    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, TunnelConfig, TunnelMode,
+    udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel, UdpReceiver, UdpSender},
+    ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
     UpstreamType,
 };
 use anyhow::{bail, Context, Result};
@@ -145,6 +145,52 @@ impl Client {
             });
     }
 
+    pub fn connect_and_serve_async(&mut self) {
+        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
+            let mut this = self.clone();
+            tokio::spawn(async move {
+                this.connect_and_serve::<TcpStream>(
+                    index,
+                    Tunnel::NetworkBased(tunnel_config),
+                    None,
+                    None,
+                )
+                .await;
+            });
+        }
+
+        self.report_traffic_data_in_background();
+    }
+
+    pub fn connect_and_serve_tcp_async<S: AsyncStream>(
+        &mut self,
+        stream_receiver: StreamReceiver<S>,
+    ) {
+        let mut this = self.clone();
+        tokio::spawn(async move {
+            this.connect_and_serve::<S>(
+                0,
+                Tunnel::ChannelBased(UpstreamType::Tcp),
+                Some(stream_receiver),
+                None,
+            )
+            .await;
+        });
+    }
+
+    pub fn connect_and_serve_udp_async(&mut self, ch: (UdpSender, UdpReceiver)) {
+        let mut this = self.clone();
+        tokio::spawn(async move {
+            this.connect_and_serve::<TcpStream>(
+                0,
+                Tunnel::ChannelBased(UpstreamType::Udp),
+                None,
+                Some(ch),
+            )
+            .await;
+        });
+    }
+
     pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
         let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
         let tcp_server = bind_tcp_server
@@ -248,25 +294,20 @@ impl Client {
         while tasks.join_next().await.is_some() {}
     }
 
-    #[allow(clippy::unnecessary_to_owned)]
-    pub fn connect_and_serve_async(&mut self) {
-        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
-            let mut this = self.clone();
-            tokio::spawn(async move {
-                this.connect_and_serve(index, tunnel_config.clone()).await;
-            });
-        }
-
-        self.report_traffic_data_in_background();
-    }
-
-    async fn connect_and_serve(&mut self, index: usize, tunnel_config: TunnelConfig) {
+    async fn connect_and_serve<S: AsyncStream>(
+        &mut self,
+        index: usize,
+        tunnel: Tunnel,
+        mut stream_receiver: Option<StreamReceiver<S>>,
+        mut ch: Option<(UdpSender, UdpReceiver)>,
+    ) {
         let login_info = LoginInfo {
             password: self.config.password.clone(),
-            tunnel_config: tunnel_config.clone(),
+            tunnel: tunnel.clone(),
         };
 
-        let mut pending_tcp_stream = None;
+        let mut pending_network_based_stream = None;
+        let mut pending_channel_based_stream = None;
         loop {
             let connect = || async {
                 let login_cfg = self.prepare_login_config().await?;
@@ -303,54 +344,59 @@ impl Client {
             }
 
             match result {
-                Ok(conn) => {
-                    let upstream_type = &tunnel_config.upstream.upstream_type;
-                    let local_server_addr = tunnel_config.local_server_addr.unwrap();
-
-                    inner_state!(self, connections).insert(local_server_addr, conn.clone());
-
-                    if tunnel_config.mode == TunnelMode::Out {
-                        match upstream_type {
-                            UpstreamType::Tcp => {
-                                self.serve_outbound_tcp(
-                                    index,
-                                    conn.clone(),
-                                    local_server_addr,
-                                    &mut pending_tcp_stream,
-                                )
-                                .await
-                                .ok();
-                            }
-                            UpstreamType::Udp => {
-                                self.serve_outbound_udp(index, conn.clone(), local_server_addr)
-                                    .await
-                                    .ok();
-                            }
-                        }
-                    } else {
-                        match upstream_type {
-                            UpstreamType::Tcp => {
-                                self.serve_inbound_tcp(index, conn.clone(), local_server_addr)
-                                    .await
-                                    .ok();
-                            }
-                            UpstreamType::Udp => {
-                                self.serve_inbound_udp(index, conn.clone(), local_server_addr)
-                                    .await
-                                    .ok();
-                            }
-                        }
+                Ok(conn) => match &tunnel {
+                    Tunnel::NetworkBased(tunnel_config) => {
+                        self.handle_network_based_tunnel(
+                            index,
+                            conn,
+                            tunnel_config,
+                            &mut pending_network_based_stream,
+                        )
+                        .await;
                     }
+                    Tunnel::ChannelBased(upstream_type) => match upstream_type {
+                        UpstreamType::Tcp => {
+                            self.post_tunnel_log(
+                                format!(
+                                    "{index}:STREAM_OUT start serving via {}",
+                                    conn.remote_address()
+                                )
+                                .as_str(),
+                            );
+                            self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-                    inner_state!(self, connections).remove(&local_server_addr);
+                            let stream_receiver = stream_receiver.as_mut().unwrap();
+                            TcpTunnel::start_serving(
+                                true,
+                                &conn,
+                                stream_receiver,
+                                &mut pending_channel_based_stream,
+                                self.config.tcp_timeout_ms,
+                            )
+                            .await;
+                        }
 
-                    let stats = conn.stats();
-                    let data = &mut inner_state!(self, total_traffic_data);
-                    data.rx_bytes += stats.udp_rx.bytes;
-                    data.tx_bytes += stats.udp_tx.bytes;
-                    data.rx_dgrams += stats.udp_rx.datagrams;
-                    data.tx_dgrams += stats.udp_tx.datagrams;
-                }
+                        UpstreamType::Udp => {
+                            self.post_tunnel_log(
+                                format!(
+                                    "{index}:UDP_OUT start serving via {}",
+                                    conn.remote_address()
+                                )
+                                .as_str(),
+                            );
+                            self.set_and_post_tunnel_state(ClientState::Tunneling);
+
+                            let ch = ch.as_mut().unwrap();
+                            UdpTunnel::start_serving(
+                                &conn,
+                                &ch.0,
+                                &mut ch.1,
+                                self.config.udp_timeout_ms,
+                            )
+                            .await;
+                        }
+                    },
+                },
 
                 Err(e) => {
                     error!("{e}");
@@ -367,6 +413,61 @@ impl Client {
             }
         }
         self.post_tunnel_log(format!("[{login_info}] quit").as_str());
+    }
+
+    async fn handle_network_based_tunnel(
+        &mut self,
+        index: usize,
+        conn: Connection,
+        tunnel_config: &TunnelConfig,
+        pending_request: &mut Option<StreamRequest<TcpStream>>,
+    ) {
+        let upstream_type = &tunnel_config.upstream.upstream_type;
+        let local_server_addr = tunnel_config.local_server_addr.unwrap();
+
+        inner_state!(self, connections).insert(local_server_addr, conn.clone());
+
+        if tunnel_config.mode == TunnelMode::Out {
+            match upstream_type {
+                UpstreamType::Tcp => {
+                    self.serve_outbound_tcp(
+                        index,
+                        conn.clone(),
+                        local_server_addr,
+                        pending_request,
+                    )
+                    .await
+                    .ok();
+                }
+                UpstreamType::Udp => {
+                    self.serve_outbound_udp(index, conn.clone(), local_server_addr)
+                        .await
+                        .ok();
+                }
+            }
+        } else {
+            match upstream_type {
+                UpstreamType::Tcp => {
+                    self.serve_inbound_tcp(index, conn.clone(), local_server_addr)
+                        .await
+                        .ok();
+                }
+                UpstreamType::Udp => {
+                    self.serve_inbound_udp(index, conn.clone(), local_server_addr)
+                        .await
+                        .ok();
+                }
+            }
+        }
+
+        inner_state!(self, connections).remove(&local_server_addr);
+
+        let stats = conn.stats();
+        let data = &mut inner_state!(self, total_traffic_data);
+        data.rx_bytes += stats.udp_rx.bytes;
+        data.tx_bytes += stats.udp_tx.bytes;
+        data.rx_dgrams += stats.udp_rx.datagrams;
+        data.tx_dgrams += stats.udp_tx.datagrams;
     }
 
     async fn prepare_login_config(&self) -> Result<LoginConfig> {
@@ -469,7 +570,7 @@ impl Client {
         index: usize,
         conn: Connection,
         local_server_addr: SocketAddr,
-        pending_tcp_stream: &mut Option<TcpStream>,
+        pending_request: &mut Option<StreamRequest<TcpStream>>,
     ) -> Result<()> {
         let tcp_server = {
             inner_state!(self, tcp_servers)
@@ -490,17 +591,20 @@ impl Client {
             )
             .as_str(),
         );
-
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        TcpTunnel::start(
+        let mut tcp_receiver = tcp_server.take_receiver();
+
+        TcpTunnel::start_serving(
             true,
             &conn,
-            &mut tcp_server,
-            pending_tcp_stream,
+            &mut tcp_receiver,
+            pending_request,
             self.config.tcp_timeout_ms,
         )
         .await;
+
+        tcp_server.put_receiver(tcp_receiver);
 
         Ok(())
     }
@@ -517,7 +621,7 @@ impl Client {
                 .cloned()
         };
 
-        let udp_server = match udp_server {
+        let mut udp_server = match udp_server {
             Some(server) => server.clone(),
             None => self.start_udp_server(local_server_addr).await?,
         };
@@ -533,9 +637,18 @@ impl Client {
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        UdpTunnel::start(&conn, udp_server, None, self.config.udp_timeout_ms)
-            .await
-            .ok();
+        let mut udp_receiver = udp_server.take_receiver();
+        let udp_sender = udp_server.clone_sender();
+
+        UdpTunnel::start_serving(
+            &conn,
+            &udp_sender,
+            &mut udp_receiver,
+            self.config.udp_timeout_ms,
+        )
+        .await;
+
+        udp_server.put_receiver(udp_receiver);
 
         Ok(())
     }
@@ -555,7 +668,8 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        TcpTunnel::process(&conn, local_server_addr, self.config.tcp_timeout_ms).await;
+        TcpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.tcp_timeout_ms)
+            .await;
 
         Ok(())
     }
@@ -575,7 +689,8 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        UdpTunnel::process(&conn, local_server_addr, self.config.udp_timeout_ms).await;
+        UdpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.udp_timeout_ms)
+            .await;
 
         Ok(())
     }
