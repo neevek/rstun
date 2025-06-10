@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::udp_server::UdpServer;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use quinn::{Connection, RecvStream, SendStream};

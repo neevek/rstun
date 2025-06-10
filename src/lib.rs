@@ -6,13 +6,12 @@ mod tunnel_info_bridge;
 mod tunnel_message;
 mod udp;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use byte_pool::Block;
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
 use lazy_static::lazy_static;
-use log::error;
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;

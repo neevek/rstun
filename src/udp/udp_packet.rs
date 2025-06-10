@@ -1,8 +1,7 @@
 use crate::{PooledBuffer, BUFFER_POOL, UDP_PACKET_SIZE};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use byte_pool::Block;
 use bytes::{BufMut, Bytes, BytesMut};
-use log::error;
 use rs_utilities::log_and_bail;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 

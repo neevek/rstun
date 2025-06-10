@@ -7,7 +7,7 @@ use crate::{
     pem_util, LoginInfo, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, TunnelMode,
     TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, UpstreamType, SUPPORTED_CIPHER_SUITES,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{congestion, Connection, Endpoint, TransportConfig};
