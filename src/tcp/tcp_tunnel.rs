@@ -23,7 +23,7 @@ pub enum TransferError {
 pub struct TcpTunnel;
 
 impl TcpTunnel {
-    pub async fn start(
+    pub async fn start_serving(
         tunnel_out: bool,
         conn: &quinn::Connection,
         tcp_server: &mut TcpServer,
@@ -208,7 +208,11 @@ impl TcpTunnel {
         }
     }
 
-    pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, tcp_timeout_ms: u64) {
+    pub async fn start_accepting(
+        conn: &quinn::Connection,
+        upstream_addr: SocketAddr,
+        tcp_timeout_ms: u64,
+    ) {
         let remote_addr = &conn.remote_address();
         info!("start tcp streaming, {remote_addr} ↔  {upstream_addr}");
 

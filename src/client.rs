@@ -493,7 +493,7 @@ impl Client {
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        TcpTunnel::start(
+        TcpTunnel::start_serving(
             true,
             &conn,
             &mut tcp_server,
@@ -555,7 +555,7 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        TcpTunnel::process(&conn, local_server_addr, self.config.tcp_timeout_ms).await;
+        TcpTunnel::start_accepting(&conn, local_server_addr, self.config.tcp_timeout_ms).await;
 
         Ok(())
     }

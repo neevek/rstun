@@ -163,8 +163,12 @@ impl Server {
 
                 match tun_type {
                     TunnelType::TcpOut(info) => {
-                        TcpTunnel::process(&info.conn, info.upstream_addr, config.tcp_timeout_ms)
-                            .await;
+                        TcpTunnel::start_accepting(
+                            &info.conn,
+                            info.upstream_addr,
+                            config.tcp_timeout_ms,
+                        )
+                        .await;
                     }
 
                     TunnelType::UdpOut(info) => {
@@ -182,7 +186,7 @@ impl Server {
                                 sender: info.tcp_server.clone_tcp_sender(),
                             });
 
-                        TcpTunnel::start(
+                        TcpTunnel::start_serving(
                             false,
                             &info.conn,
                             &mut info.tcp_server,
