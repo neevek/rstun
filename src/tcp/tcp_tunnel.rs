@@ -33,6 +33,7 @@ impl TcpTunnel {
                     if tunnel_out { "OUT" } else { "IN" },
                     tcp_stream,
                     quic_stream,
+                    None,
                     tcp_timeout_ms,
                 ),
                 Err(e) => {
@@ -80,6 +81,7 @@ impl TcpTunnel {
                             "OUT",
                             tcp_stream,
                             quic_stream,
+                            None,
                             tcp_timeout_ms,
                         ),
                         Ok(Err(e)) => error!("failed to connect to {upstream_addr}, err: {e}"),
