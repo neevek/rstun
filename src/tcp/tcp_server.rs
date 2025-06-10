@@ -1,19 +1,12 @@
+use crate::tcp::{StreamMessage, StreamReceiver, StreamRequest, StreamSender};
 use anyhow::Result;
 use log::{debug, error, info};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::SendTimeoutError;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-
-pub enum TcpMessage {
-    Request(TcpStream),
-    Quit,
-}
-
-pub type TcpSender = Sender<TcpMessage>;
-pub type TcpReceiver = Receiver<TcpMessage>;
 
 #[derive(Debug, Clone)]
 pub struct TcpServer {
@@ -23,8 +16,8 @@ pub struct TcpServer {
 #[derive(Debug)]
 struct State {
     addr: SocketAddr,
-    tcp_sender: TcpSender,
-    tcp_receiver: Option<TcpReceiver>,
+    tcp_sender: StreamSender<TcpStream>,
+    tcp_receiver: Option<StreamReceiver<TcpStream>>,
     active: bool,
     terminated: bool,
 }
@@ -47,7 +40,7 @@ impl TcpServer {
         tokio::spawn(async move {
             loop {
                 match tcp_listener.accept().await {
-                    Ok((socket, addr)) => {
+                    Ok((stream, addr)) => {
                         {
                             let (terminated, active) = {
                                 let state = state.lock().unwrap();
@@ -55,7 +48,7 @@ impl TcpServer {
                             };
 
                             if terminated {
-                                tcp_sender.send(TcpMessage::Quit).await.ok();
+                                tcp_sender.send(StreamMessage::Quit).await.ok();
                                 break;
                             }
 
@@ -68,14 +61,20 @@ impl TcpServer {
                         }
 
                         match tcp_sender
-                            .send_timeout(TcpMessage::Request(socket), Duration::from_millis(3000))
+                            .send_timeout(
+                                StreamMessage::Request(StreamRequest {
+                                    stream,
+                                    dst_addr: None,
+                                }),
+                                Duration::from_millis(3000),
+                            )
                             .await
                         {
                             Ok(_) => {
                                 // succeeded
                             }
                             Err(SendTimeoutError::Timeout(_)) => {
-                                debug!("timedout sending the request, drop the socket");
+                                debug!("timedout sending the request, drop the stream");
                             }
                             Err(e) => {
                                 info!("channel is closed, will quit tcp server, err: {e}");
@@ -110,19 +109,19 @@ impl TcpServer {
         self.state.lock().unwrap().addr
     }
 
-    pub fn take_tcp_receiver(&mut self) -> Option<TcpReceiver> {
-        self.state.lock().unwrap().tcp_receiver.take()
+    pub fn take_receiver(&mut self) -> StreamReceiver<TcpStream> {
+        let mut state = self.state.lock().unwrap();
+        state.active = true;
+        state.tcp_receiver.take().unwrap()
     }
 
-    pub fn put_tcp_receiver(&mut self, tcp_receiver: TcpReceiver) {
-        self.state.lock().unwrap().tcp_receiver = Some(tcp_receiver)
+    pub fn put_receiver(&mut self, tcp_receiver: StreamReceiver<TcpStream>) {
+        let mut state = self.state.lock().unwrap();
+        state.active = false;
+        state.tcp_receiver = Some(tcp_receiver);
     }
 
-    pub fn clone_tcp_sender(&self) -> Sender<TcpMessage> {
+    pub fn clone_sender(&self) -> StreamSender<TcpStream> {
         self.state.lock().unwrap().tcp_sender.clone()
-    }
-
-    pub fn set_active(&self, flag: bool) {
-        self.state.lock().unwrap().active = flag
     }
 }

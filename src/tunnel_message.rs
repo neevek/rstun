@@ -1,4 +1,4 @@
-use crate::{TunnelConfig, TunnelMode, UpstreamType};
+use crate::{Tunnel, TunnelMode};
 use anyhow::Result;
 use anyhow::{bail, Context};
 use bincode::config::{self, Configuration};
@@ -13,70 +13,69 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
     ReqLogin(LoginInfo),
-    ReqUdpStart(UdpLocalAddr),
+    ReqUdpStart(UdpPeerAddr),
     RespFailure(String),
     RespSuccess,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct LoginInfo {
+pub(crate) struct LoginInfo {
     pub password: String,
-    pub tunnel_config: TunnelConfig,
+    pub tunnel: Tunnel,
 }
 
 impl LoginInfo {
     pub fn format_with_remote_addr(&self, remote_addr: &SocketAddr) -> String {
-        let cfg = &self.tunnel_config;
-        let upstream = &cfg.upstream;
-        let upstream_str = if let Some(upstream) = upstream.upstream_addr {
-            if upstream.ip().is_loopback() {
-                format!("{}:{}", remote_addr.ip(), upstream.port())
-            } else {
-                format!("{upstream}")
+        match &self.tunnel {
+            Tunnel::ChannelBased(upstream_type) => {
+                format!("{upstream_type}_ChannelBased →  {remote_addr}")
             }
-        } else {
-            String::from("PeerDefault")
-        };
+            Tunnel::NetworkBased(cfg) => {
+                let upstream = &cfg.upstream;
+                let upstream_str = if let Some(upstream) = upstream.upstream_addr {
+                    if upstream.ip().is_loopback() {
+                        format!("{}:{}", remote_addr.ip(), upstream.port())
+                    } else {
+                        format!("{upstream}")
+                    }
+                } else {
+                    String::from("PeerDefault")
+                };
 
-        match self.tunnel_config.mode {
-            TunnelMode::Out => {
-                format!(
-                    "{}_OUT →  {} →  {remote_addr} →  {upstream_str}",
-                    if upstream.upstream_type == UpstreamType::Tcp {
-                        "TCP"
-                    } else {
-                        "UDP"
-                    },
-                    cfg.local_server_addr.unwrap()
-                )
-            }
-            TunnelMode::In => {
-                format!(
-                    "{}_IN ←  {} ←  {remote_addr} ←  {upstream_str}",
-                    if upstream.upstream_type == UpstreamType::Tcp {
-                        "TCP"
-                    } else {
-                        "UDP"
-                    },
-                    cfg.local_server_addr.unwrap()
-                )
+                match cfg.mode {
+                    TunnelMode::Out => {
+                        format!(
+                            "{}_OUT →  {} →  {remote_addr} →  {upstream_str}",
+                            upstream.upstream_type,
+                            cfg.local_server_addr.unwrap()
+                        )
+                    }
+                    TunnelMode::In => {
+                        format!(
+                            "{}_IN ←  {} ←  {remote_addr} ←  {upstream_str}",
+                            upstream.upstream_type,
+                            cfg.local_server_addr.unwrap()
+                        )
+                    }
+                }
             }
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct UdpLocalAddr(pub SocketAddr);
+pub struct UdpPeerAddr(pub Option<SocketAddr>);
 
 impl Display for LoginInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            format!(
-                "{}_{}",
-                self.tunnel_config.upstream.upstream_type, self.tunnel_config.mode
-            )
-            .as_str(),
-        )
+        match &self.tunnel {
+            Tunnel::ChannelBased(upstream_type) => {
+                f.write_str(format!("{upstream_type}_ChannelBased").as_str())
+            }
+            Tunnel::NetworkBased(cfg) => {
+                f.write_str(format!("{}_{}", cfg.upstream.upstream_type, cfg.mode).as_str())
+            }
+        }
     }
 }
 
@@ -84,8 +83,8 @@ impl Display for TunnelMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReqLogin(login_info) => f.write_str(login_info.to_string().as_str()),
-            Self::ReqUdpStart(udp_local_addr) => {
-                f.write_str(format!("udp_start:{udp_local_addr:?}").as_str())
+            Self::ReqUdpStart(udp_peer_addr) => {
+                f.write_str(format!("udp_start:{udp_peer_addr:?}").as_str())
             }
             Self::RespFailure(msg) => f.write_str(format!("fail:{msg}").as_str()),
             Self::RespSuccess => f.write_str("succeeded"),
