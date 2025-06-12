@@ -3,7 +3,7 @@ use crate::BUFFER_POOL;
 use anyhow::Result;
 use log::debug;
 use quinn::{RecvStream, SendStream};
-use rs_utilities::log_and_bail;
+use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -12,9 +12,22 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, Wr
 use tokio::time::error::Elapsed;
 
 #[derive(Debug, PartialEq, Eq)]
-enum TransferError {
+pub enum TransferError {
     InternalError,
+    InvalidIPAddress,
+    InvalidIPFamily,
     TimeoutError,
+}
+
+impl Display for TransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InternalError => write!(f, "InternalError"),
+            Self::InvalidIPAddress => write!(f, "InvalidIPAddress"),
+            Self::InvalidIPFamily => write!(f, "InvalidIPFamily"),
+            Self::TimeoutError => write!(f, "TimeoutError"),
+        }
+    }
 }
 
 pub struct StreamUtil {}
@@ -24,7 +37,6 @@ impl StreamUtil {
         tag: &'static str,
         stream: S,
         quic_stream: (SendStream, RecvStream),
-        dst_addr: Option<SocketAddr>,
         stream_timeout_ms: u64,
     ) {
         let peer_addr = match stream.peer_addr() {
@@ -80,10 +92,6 @@ impl StreamUtil {
         });
 
         tokio::spawn(async move {
-            if let Some(dst_addr) = dst_addr {
-                Self::write_socket_addr(&mut quic_send, &dst_addr).await?;
-            }
-
             let mut transfer_bytes = 0u64;
             let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
             loop {
@@ -178,33 +186,7 @@ impl StreamUtil {
         }
     }
 
-    // pub async fn process<S: AsyncStream>(
-    //     tag: &'static str,
-    //     stream: S,
-    //     quic_stream: (SendStream, RecvStream),
-    //     stream_timeout_ms: u64,
-    // ) {
-    //     let (r, w) = split(stream.take().unwrap());
-    //     tokio::spawn(async move {
-    //         let a = r;
-    //     });
-    //
-    //     tokio::spawn(async move {
-    //         let a = w;
-    //     });
-    //
-    //     match conn.open_bi().await {
-    //         Ok((mut quic_send, quic_recv)) => {
-    //             Self::write_socket_addr(&mut quic_send, &dst_addr).await;
-    //             let stream = stream.take().unwrap();
-    //         }
-    //         Err(e) => {
-    //             log::error!("failed to open_bi, will retry: {e}");
-    //         }
-    //     }
-    // }
-
-    async fn write_socket_addr(quic_send: &mut SendStream, addr: &SocketAddr) -> Result<()> {
+    pub async fn write_socket_addr(quic_send: &mut SendStream, addr: &SocketAddr) -> Result<()> {
         match addr {
             SocketAddr::V4(v4) => {
                 let ip = v4.ip().octets();
@@ -224,26 +206,46 @@ impl StreamUtil {
         Ok(())
     }
 
-    async fn read_socket_addr(quic_recv: &mut RecvStream) -> Result<SocketAddr> {
-        let tag = quic_recv.read_u8().await?;
+    pub async fn read_socket_addr(
+        quic_recv: &mut RecvStream,
+        stream_timeout_ms: u64,
+    ) -> Result<SocketAddr, TransferError> {
+        let mut buf = [0u8; 19];
+        tokio::time::timeout(
+            Duration::from_millis(stream_timeout_ms),
+            quic_recv.read_exact(&mut buf[..7]),
+        )
+        .await
+        .map_err(|_: Elapsed| TransferError::TimeoutError)?
+        .map_err(|_| TransferError::InternalError)?;
 
-        match tag {
+        match buf[0] {
             4 => {
-                let mut buf = [0u8; 6];
-                quic_recv.read_exact(&mut buf).await?;
-                let ip = Ipv4Addr::from(<[u8; 4]>::try_from(&buf[0..4])?);
-                let port = u16::from_be_bytes(buf[4..6].try_into().unwrap());
+                let ip = Ipv4Addr::from(
+                    <[u8; 4]>::try_from(&buf[1..5]).map_err(|_| TransferError::InvalidIPAddress)?,
+                );
+                let port = u16::from_be_bytes(buf[5..7].try_into().unwrap());
                 Ok(SocketAddr::new(ip.into(), port))
             }
             6 => {
-                let mut buf = [0u8; 18];
-                quic_recv.read_exact(&mut buf).await?;
-                let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&buf[0..16])?);
-                let port = u16::from_be_bytes(buf[16..18].try_into().unwrap());
+                tokio::time::timeout(
+                    Duration::from_millis(stream_timeout_ms),
+                    quic_recv.read_exact(&mut buf[7..]),
+                )
+                .await
+                .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                .map_err(|_| TransferError::InternalError)?;
+
+                let ip = Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&buf[1..17])
+                        .map_err(|_| TransferError::InvalidIPAddress)?,
+                );
+                let port = u16::from_be_bytes(buf[17..19].try_into().unwrap());
                 Ok(SocketAddr::new(ip.into(), port))
             }
             _ => {
-                log_and_bail!("invalid address family tag: {tag}");
+                log::error!("invalid address family");
+                Err(TransferError::InvalidIPFamily)
             }
         }
     }

@@ -1,6 +1,6 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::tcp_tunnel::TcpTunnel,
+    tcp::{tcp_tunnel::TcpTunnel, StreamRequest},
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     tunnel_message::TunnelMessage,
     udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
@@ -145,6 +145,18 @@ impl Client {
             });
     }
 
+    #[allow(clippy::unnecessary_to_owned)]
+    pub fn connect_and_serve_async(&mut self) {
+        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
+            let mut this = self.clone();
+            tokio::spawn(async move {
+                this.connect_and_serve(index, tunnel_config.clone()).await;
+            });
+        }
+
+        self.report_traffic_data_in_background();
+    }
+
     pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
         let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
         let tcp_server = bind_tcp_server
@@ -248,25 +260,13 @@ impl Client {
         while tasks.join_next().await.is_some() {}
     }
 
-    #[allow(clippy::unnecessary_to_owned)]
-    pub fn connect_and_serve_async(&mut self) {
-        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
-            let mut this = self.clone();
-            tokio::spawn(async move {
-                this.connect_and_serve(index, tunnel_config.clone()).await;
-            });
-        }
-
-        self.report_traffic_data_in_background();
-    }
-
     async fn connect_and_serve(&mut self, index: usize, tunnel_config: TunnelConfig) {
         let login_info = LoginInfo {
             password: self.config.password.clone(),
             tunnel_config: tunnel_config.clone(),
         };
 
-        let mut pending_tcp_stream = None;
+        let mut pending_request = None;
         loop {
             let connect = || async {
                 let login_cfg = self.prepare_login_config().await?;
@@ -316,7 +316,7 @@ impl Client {
                                     index,
                                     conn.clone(),
                                     local_server_addr,
-                                    &mut pending_tcp_stream,
+                                    &mut pending_request,
                                 )
                                 .await
                                 .ok();
@@ -469,7 +469,7 @@ impl Client {
         index: usize,
         conn: Connection,
         local_server_addr: SocketAddr,
-        pending_tcp_stream: &mut Option<TcpStream>,
+        pending_request: &mut Option<StreamRequest<TcpStream>>,
     ) -> Result<()> {
         let tcp_server = {
             inner_state!(self, tcp_servers)
@@ -490,17 +490,20 @@ impl Client {
             )
             .as_str(),
         );
-
         self.set_and_post_tunnel_state(ClientState::Tunneling);
+
+        let mut tcp_receiver = tcp_server.take_tcp_receiver();
 
         TcpTunnel::start_serving(
             true,
             &conn,
-            &mut tcp_server,
-            pending_tcp_stream,
+            &mut tcp_receiver,
+            pending_request,
             self.config.tcp_timeout_ms,
         )
         .await;
+
+        tcp_server.put_tcp_receiver(tcp_receiver);
 
         Ok(())
     }
@@ -555,7 +558,8 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        TcpTunnel::start_accepting(&conn, local_server_addr, self.config.tcp_timeout_ms).await;
+        TcpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.tcp_timeout_ms)
+            .await;
 
         Ok(())
     }

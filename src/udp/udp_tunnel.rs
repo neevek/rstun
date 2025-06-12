@@ -1,6 +1,6 @@
 use crate::udp::udp_server::UdpServer;
 use crate::{
-    tcp::{TcpMessage, TcpSender},
+    tcp::{StreamMessage, StreamSender},
     tunnel_message::{TunnelMessage, UdpLocalAddr},
     udp::{udp_packet::UdpPacket, udp_server::UdpMessage},
     BUFFER_POOL, UDP_PACKET_SIZE,
@@ -25,7 +25,7 @@ impl UdpTunnel {
     pub async fn start(
         conn: &quinn::Connection,
         mut udp_server: UdpServer,
-        tcp_sender: Option<TcpSender<TcpStream>>,
+        tcp_sender: Option<StreamSender<TcpStream>>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let stream_map = Arc::new(DashMap::new());
@@ -48,7 +48,7 @@ impl UdpTunnel {
                     error!("{e}");
                     if conn.close_reason().is_some() {
                         if let Some(tcp_sender) = tcp_sender {
-                            tcp_sender.send(TcpMessage::Quit).await.ok();
+                            tcp_sender.send(StreamMessage::Quit).await.ok();
                         }
                         debug!("connection is closed, will quit");
                         break;

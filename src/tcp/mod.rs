@@ -16,11 +16,15 @@ impl AsyncStream for TcpStream {
     }
 }
 
-pub enum TcpMessage<S: AsyncStream> {
-    Request(S),
-    RequestWithUpstream(S, SocketAddr),
+pub struct StreamRequest<S: AsyncStream> {
+    stream: S,
+    dst_addr: Option<SocketAddr>,
+}
+
+pub enum StreamMessage<S: AsyncStream> {
+    Request(StreamRequest<S>),
     Quit,
 }
 
-pub type TcpSender<S> = Sender<TcpMessage<S>>;
-pub type TcpReceiver<S> = Receiver<TcpMessage<S>>;
+pub type StreamSender<S> = Sender<StreamMessage<S>>;
+pub type StreamReceiver<S> = Receiver<StreamMessage<S>>;

@@ -1,5 +1,5 @@
 use crate::tcp::tcp_tunnel::TcpTunnel;
-use crate::tcp::{TcpMessage, TcpSender};
+use crate::tcp::{StreamMessage, StreamSender};
 use crate::tunnel_message::TunnelMessage;
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
@@ -22,7 +22,7 @@ use tokio::time::Duration;
 #[derive(Debug, Clone)]
 struct ConnectedTcpInSession {
     conn: Connection,
-    sender: TcpSender<TcpStream>,
+    sender: StreamSender<TcpStream>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +166,7 @@ impl Server {
                     TunnelType::TcpOut(info) => {
                         TcpTunnel::start_accepting(
                             &info.conn,
-                            info.upstream_addr,
+                            Some(info.upstream_addr),
                             config.tcp_timeout_ms,
                         )
                         .await;
@@ -187,14 +187,17 @@ impl Server {
                                 sender: info.tcp_server.clone_tcp_sender(),
                             });
 
+                        let mut tcp_receiver = info.tcp_server.take_tcp_receiver();
+
                         TcpTunnel::start_serving(
                             false,
                             &info.conn,
-                            &mut info.tcp_server,
+                            &mut tcp_receiver,
                             &mut None,
                             config.tcp_timeout_ms,
                         )
                         .await;
+
                         info.tcp_server.shutdown().await.ok();
                     }
 
@@ -362,7 +365,7 @@ impl Server {
             if sess.conn.close_reason().is_some() {
                 let sess = sess.clone();
                 tokio::spawn(async move {
-                    sess.sender.send(TcpMessage::Quit).await.ok();
+                    sess.sender.send(StreamMessage::Quit).await.ok();
                     debug!("dropped tcp session: {}", sess.conn.remote_address());
                 });
                 false
