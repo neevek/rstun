@@ -24,6 +24,8 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
+use tcp::AsyncStream;
+use tcp::StreamSender;
 pub use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
 
@@ -132,6 +134,8 @@ pub enum TunnelType {
     TcpIn(TcpTunnelInInfo),
     UdpOut(UdpTunnelOutInfo),
     UdpIn(UdpTunnelInInfo),
+    DynamicUpstreamTcpOut(quinn::Connection),
+    DynamicUpstreamUdpOut(quinn::Connection),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -186,6 +190,12 @@ pub struct TunnelConfig {
     pub upstream: Upstream,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum Tunnel {
+    NetworkBased(TunnelConfig),
+    ChannelBased(UpstreamType),
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ClientConfig {
     pub cert_path: String,
@@ -196,7 +206,7 @@ pub struct ClientConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
-    pub tunnels: Vec<TunnelConfig>,
+    pub tunnels: Vec<Tunnel>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
     pub workers: usize,
@@ -286,7 +296,7 @@ impl ClientConfig {
 fn parse_addr_mappings(
     mappings: &str,
     upstream_type: UpstreamType,
-    v: &mut Vec<TunnelConfig>,
+    v: &mut Vec<Tunnel>,
 ) -> Result<()> {
     if mappings.is_empty() {
         return Ok(());
@@ -329,7 +339,7 @@ fn parse_addr_mappings(
         }
         let upstream_addr = parse_addr(parts[2])?;
 
-        v.push(TunnelConfig {
+        v.push(Tunnel::NetworkBased(TunnelConfig {
             mode: if tunnel_mode == "IN" {
                 TunnelMode::In
             } else {
@@ -340,7 +350,7 @@ fn parse_addr_mappings(
                 upstream_type: upstream_type.clone(),
             },
             local_server_addr,
-        });
+        }));
     }
 
     Ok(())
