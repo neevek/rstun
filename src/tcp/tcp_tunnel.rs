@@ -64,7 +64,7 @@ impl TcpTunnel {
 
         loop {
             match conn.accept_bi().await {
-                Err(quinn::ConnectionError::TimedOut { .. }) => {
+                Err(quinn::ConnectionError::TimedOut) => {
                     info!("connection timeout: {remote_addr}");
                     break;
                 }

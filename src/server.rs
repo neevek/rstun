@@ -216,8 +216,10 @@ impl Server {
                             .await
                             .ok();
                     }
-                    TunnelType::DynamicUpstreamTcpOut(con) => {}
-                    TunnelType::DynamicUpstreamUdpOut(con) => {}
+                    TunnelType::DynamicUpstreamTcpOut(conn) => {
+                        TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;
+                    }
+                    TunnelType::DynamicUpstreamUdpOut(conn) => {}
                 }
 
                 Ok::<(), anyhow::Error>(())

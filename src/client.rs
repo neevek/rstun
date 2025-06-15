@@ -1,6 +1,6 @@
 use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::{tcp_tunnel::TcpTunnel, AsyncStream, StreamReceiver, StreamRequest, StreamSender},
+    tcp::{tcp_tunnel::TcpTunnel, AsyncStream, StreamReceiver, StreamRequest},
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     tunnel_message::TunnelMessage,
     udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel},
@@ -22,7 +22,7 @@ use rustls::{
 };
 use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
-use std::{collections::HashMap, future::Future};
+use std::collections::HashMap;
 use std::{
     fmt::Display,
     net::{IpAddr, SocketAddr},
@@ -30,7 +30,7 @@ use std::{
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
-use tokio::{net::TcpStream, sync::mpsc::channel};
+use tokio::net::TcpStream;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
@@ -145,23 +145,37 @@ impl Client {
             });
     }
 
-    #[allow(clippy::unnecessary_to_owned)]
     pub fn connect_and_serve_async(&mut self) {
-        for (index, tunnel) in self.config.tunnels.iter().cloned().enumerate() {
+        for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
             let mut this = self.clone();
             tokio::spawn(async move {
-                this.connect_and_serve::<TcpStream>(index, tunnel.clone(), None)
-                    .await;
+                this.connect_and_serve::<TcpStream>(
+                    index,
+                    Tunnel::NetworkBased(tunnel_config),
+                    None,
+                )
+                .await;
             });
         }
 
         self.report_traffic_data_in_background();
     }
 
-    // pub fn start_tun<S: AsyncStream>(&mut self) -> Result<StreamSender<S>> {
-    //     let (sender, receiver) = channel(4);
-    //     Ok(sender)
-    // }
+    pub fn connect_and_serve_async_with_stream_receiver<S: AsyncStream>(
+        &mut self,
+        upstream_type: UpstreamType,
+        stream_receiver: StreamReceiver<S>,
+    ) {
+        let mut this = self.clone();
+        tokio::spawn(async move {
+            this.connect_and_serve::<S>(
+                0,
+                Tunnel::ChannelBased(upstream_type),
+                Some(stream_receiver),
+            )
+            .await;
+        });
+    }
 
     pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
         let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
@@ -277,7 +291,8 @@ impl Client {
             tunnel: tunnel.clone(),
         };
 
-        let mut pending_request = None;
+        let mut pending_network_based_stream = None;
+        let mut pending_channel_based_stream = None;
         loop {
             let connect = || async {
                 let login_cfg = self.prepare_login_config().await?;
@@ -320,7 +335,7 @@ impl Client {
                             index,
                             conn,
                             tunnel_config,
-                            &mut pending_request,
+                            &mut pending_network_based_stream,
                         )
                         .await;
                     }
@@ -328,7 +343,23 @@ impl Client {
                         let stream_receiver = stream_receiver.as_mut().unwrap();
                         match upstream_type {
                             UpstreamType::Tcp => {
-                                let s = stream_receiver.recv().await;
+                                self.post_tunnel_log(
+                                    format!(
+                                        "{index}:STREAM_OUT start serving via {}",
+                                        conn.remote_address()
+                                    )
+                                    .as_str(),
+                                );
+                                self.set_and_post_tunnel_state(ClientState::Tunneling);
+
+                                TcpTunnel::start_serving(
+                                    true,
+                                    &conn,
+                                    stream_receiver,
+                                    &mut pending_channel_based_stream,
+                                    self.config.tcp_timeout_ms,
+                                )
+                                .await;
                             }
                             UpstreamType::Udp => {}
                         }
