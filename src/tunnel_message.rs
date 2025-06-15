@@ -19,7 +19,7 @@ pub enum TunnelMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct LoginInfo {
+pub(crate) struct LoginInfo {
     pub password: String,
     pub tunnel: Tunnel,
 }
