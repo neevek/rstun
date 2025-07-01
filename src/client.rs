@@ -299,7 +299,7 @@ impl Client {
                         loop {
                             interval.tick().await;
 
-                            // 创建新的 UDP socket
+                            // create new UDP socket
                             let new_socket = match tokio::net::UdpSocket::bind(SocketAddr::new(
                                 if remote_addr.is_ipv6() {
                                     IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
@@ -317,7 +317,7 @@ impl Client {
                                 }
                             };
 
-                            // 将 Tokio UdpSocket 转换为 std::net::UdpSocket
+                            // transform Tokio UdpSocket to std::net::UdpSocket
                             let std_socket = match new_socket.into_std() {
                                 Ok(std_socket) => std_socket,
                                 Err(e) => {
