@@ -283,6 +283,59 @@ impl Client {
                     )
                     .await?;
 
+                // start rebind timer task after login success
+                if self.config.hop_interval_ms > 0 {
+                    let hop_interval_ms = self.config.hop_interval_ms;
+                    let endpoint_clone = endpoint.clone();
+                    let remote_addr = conn.remote_address();
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(Duration::from_millis(hop_interval_ms));
+                        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                        // skip the first tick
+                        interval.tick().await;
+
+                        loop {
+                            interval.tick().await;
+
+                            // 创建新的 UDP socket
+                            let new_socket = match tokio::net::UdpSocket::bind(SocketAddr::new(
+                                if remote_addr.is_ipv6() {
+                                    IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+                                } else {
+                                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED.into())
+                                },
+                                0,
+                            ))
+                            .await
+                            {
+                                Ok(socket) => socket,
+                                Err(e) => {
+                                    warn!("Failed to bind new UDP socket: {:?}", e);
+                                    continue;
+                                }
+                            };
+
+                            // 将 Tokio UdpSocket 转换为 std::net::UdpSocket
+                            let std_socket = match new_socket.into_std() {
+                                Ok(std_socket) => std_socket,
+                                Err(e) => {
+                                    warn!("Failed to convert Tokio UdpSocket to std::net::UdpSocket: {:?}", e);
+                                    continue;
+                                }
+                            };
+
+                            // call rebind method
+                            if let Err(e) = endpoint_clone.rebind(std_socket) {
+                                warn!("Failed to rebind QUIC connection: {:?}", e);
+                            } else {
+                                info!("Successfully rebind QUIC connection to a new UDP socket");
+                            }
+                        }
+                    });
+                }
+
                 Ok(conn)
             };
             let result = connect

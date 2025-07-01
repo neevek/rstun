@@ -196,6 +196,7 @@ pub struct ClientConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
+    pub hop_interval_ms: u64,
     pub tunnels: Vec<TunnelConfig>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
@@ -238,6 +239,7 @@ impl ClientConfig {
         mut quic_timeout_ms: u64,
         mut tcp_timeout_ms: u64,
         mut udp_timeout_ms: u64,
+        mut hop_interval_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mappings.is_empty() && udp_addr_mappings.is_empty() {
             log_and_bail!("must specify either --tcp-mappings or --udp-mappings, or both");
@@ -251,6 +253,11 @@ impl ClientConfig {
         }
         if udp_timeout_ms == 0 {
             udp_timeout_ms = 5000;
+        }
+        if hop_interval_ms <= 0 {
+            hop_interval_ms = 0;
+        } else if hop_interval_ms < 30000 {
+            hop_interval_ms = 30000;
         }
 
         let mut config = ClientConfig {
@@ -271,6 +278,7 @@ impl ClientConfig {
             quic_timeout_ms,
             tcp_timeout_ms,
             udp_timeout_ms,
+            hop_interval_ms,
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
             ..ClientConfig::default()
