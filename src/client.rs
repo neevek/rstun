@@ -22,7 +22,7 @@ use rustls::{
 };
 use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, net::Ipv4Addr, time::Instant};
 use std::{
     fmt::Display,
     net::{IpAddr, SocketAddr},
@@ -62,10 +62,22 @@ impl Display for ClientState {
     }
 }
 
+#[derive(Clone)]
+struct RstunConnection {
+    conn: Connection,
+    endpoint: Endpoint,
+}
+
+impl RstunConnection {
+    fn new(conn: Connection, endpoint: Endpoint) -> Self {
+        Self { conn, endpoint }
+    }
+}
+
 struct State {
     tcp_servers: HashMap<SocketAddr, TcpServer>,
     udp_servers: HashMap<SocketAddr, UdpServer>,
-    connections: HashMap<SocketAddr, Connection>,
+    connections: HashMap<SocketAddr, RstunConnection>,
     client_state: ClientState,
     total_traffic_data: TunnelTraffic,
     tunnel_info_bridge: TunnelInfoBridge,
@@ -205,7 +217,7 @@ impl Client {
 
             for c in state.connections.values().cloned() {
                 tokio::spawn(async move {
-                    c.close(VarInt::from_u32(1), b"");
+                    c.conn.close(VarInt::from_u32(1), b"");
                 });
             }
 
@@ -236,7 +248,7 @@ impl Client {
 
             for c in state.connections.values().cloned() {
                 tasks.spawn(async move {
-                    c.close(VarInt::from_u32(1), b"");
+                    c.conn.close(VarInt::from_u32(1), b"");
                 });
             }
 
@@ -258,6 +270,7 @@ impl Client {
         }
 
         self.report_traffic_data_in_background();
+        self.perform_connection_migration();
     }
 
     async fn connect_and_serve(&mut self, index: usize, tunnel_config: TunnelConfig) {
@@ -283,7 +296,7 @@ impl Client {
                     )
                     .await?;
 
-                Ok(conn)
+                Ok((conn, endpoint))
             };
             let result = connect
                 .retry(
@@ -303,11 +316,14 @@ impl Client {
             }
 
             match result {
-                Ok(conn) => {
+                Ok((conn, endpoint)) => {
                     let upstream_type = &tunnel_config.upstream.upstream_type;
                     let local_server_addr = tunnel_config.local_server_addr.unwrap();
 
-                    inner_state!(self, connections).insert(local_server_addr, conn.clone());
+                    inner_state!(self, connections).insert(
+                        local_server_addr,
+                        RstunConnection::new(conn.clone(), endpoint),
+                    );
 
                     if tunnel_config.mode == TunnelMode::Out {
                         match upstream_type {
@@ -585,6 +601,60 @@ impl Client {
         state == ClientState::Stopping || state == ClientState::Terminated
     }
 
+    fn perform_connection_migration(&self) {
+        let state = self.inner_state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let mut times = HashMap::new();
+
+            loop {
+                interval.tick().await;
+
+                let now = Instant::now();
+
+                {
+                    let connections = &state.lock().unwrap().connections;
+                    for conn in connections.values() {
+                        let start_time = times
+                            .entry(conn.conn.stable_id()) // Insert if absent
+                            .or_insert_with(Instant::now);
+
+                        let elapsed = now.duration_since(*start_time);
+                        if elapsed >= Duration::from_secs(15) {
+                            *start_time = now; // Reset start time after rebind
+
+                            let new_local_addr =
+                                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+                            let new_socket = std::net::UdpSocket::bind(new_local_addr);
+                            match new_socket {
+                                Ok(socket) => match conn.endpoint.rebind(socket) {
+                                    Ok(_) => {
+                                        info!("Connection migration successful");
+                                    }
+                                    Err(e) => {
+                                        warn!("Rebind failed,{e}, trying alternative method");
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("failed to bind: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let state = state.lock().unwrap();
+                let client_state = state.client_state.clone();
+                if client_state == ClientState::Stopping || client_state == ClientState::Terminated
+                {
+                    break;
+                }
+            }
+        });
+    }
+
     fn report_traffic_data_in_background(&self) {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
@@ -603,7 +673,7 @@ impl Client {
                 {
                     let connections = &state.lock().unwrap().connections;
                     for conn in connections.values() {
-                        let stats = conn.stats();
+                        let stats = conn.conn.stats();
                         rx_bytes += stats.udp_rx.bytes;
                         tx_bytes += stats.udp_tx.bytes;
                         rx_dgrams += stats.udp_rx.datagrams;
