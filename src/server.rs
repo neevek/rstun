@@ -174,8 +174,12 @@ impl Server {
                     }
 
                     TunnelType::UdpOut(info) => {
-                        UdpTunnel::process(&info.conn, info.upstream_addr, config.udp_timeout_ms)
-                            .await
+                        UdpTunnel::start_accepting(
+                            &info.conn,
+                            info.upstream_addr,
+                            config.udp_timeout_ms,
+                        )
+                        .await
                     }
 
                     TunnelType::TcpIn(mut info) => {
@@ -217,12 +221,11 @@ impl Server {
 
                         UdpTunnel::start_serving(
                             &info.conn,
-                            &mut udp_receiver,
                             &udp_sender,
+                            &mut udp_receiver,
                             config.udp_timeout_ms,
                         )
-                        .await
-                        .ok();
+                        .await;
 
                         info.udp_server.shutdown().await.ok();
                     }

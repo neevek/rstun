@@ -1,6 +1,6 @@
 use crate::{
     tunnel_message::{TunnelMessage, UdpLocalAddr},
-    udp::{udp_packet::UdpPacket, udp_server::UdpMessage},
+    udp::{udp_server::UdpMessage, UdpPacket},
     BUFFER_POOL, UDP_PACKET_SIZE,
 };
 use anyhow::{Context, Result};
@@ -23,17 +23,17 @@ pub struct UdpTunnel;
 impl UdpTunnel {
     pub async fn start_serving(
         conn: &quinn::Connection,
-        udp_receiver: &mut Receiver<UdpMessage>,
         udp_sender: &Sender<UdpMessage>,
+        udp_receiver: &mut Receiver<UdpMessage>,
         udp_timeout_ms: u64,
-    ) -> Result<()> {
+    ) {
         debug!("start transfering udp packets");
         let stream_map = Arc::new(DashMap::new());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
             let quic_send = match UdpTunnel::open_stream(
                 conn.clone(),
                 udp_sender.clone(),
-                packet.addr,
+                packet.local_addr,
                 stream_map.clone(),
                 udp_timeout_ms,
             )
@@ -66,7 +66,6 @@ impl UdpTunnel {
         }
 
         info!("udp server quit");
-        Ok(())
     }
 
     async fn open_stream(
@@ -117,7 +116,7 @@ impl UdpTunnel {
                         }
                         let packet = UdpPacket {
                             payload: buf,
-                            addr: peer_addr,
+                            local_addr: peer_addr,
                         };
                         udp_sender.send(UdpMessage::Packet(packet)).await.ok();
                     }
@@ -147,7 +146,11 @@ impl UdpTunnel {
         Ok(quic_send)
     }
 
-    pub async fn process(conn: &quinn::Connection, upstream_addr: SocketAddr, udp_timeout_ms: u64) {
+    pub async fn start_accepting(
+        conn: &quinn::Connection,
+        upstream_addr: SocketAddr,
+        udp_timeout_ms: u64,
+    ) {
         let remote_addr = &conn.remote_address();
         info!("start udp streaming, {remote_addr} ↔  {upstream_addr}");
 
@@ -166,8 +169,7 @@ impl UdpTunnel {
                     break;
                 }
                 Ok((quic_send, quic_recv)) => tokio::spawn(async move {
-                    Self::process_internal(quic_send, quic_recv, upstream_addr, udp_timeout_ms)
-                        .await
+                    Self::process(quic_send, quic_recv, upstream_addr, udp_timeout_ms).await
                 }),
             };
         }
@@ -175,7 +177,7 @@ impl UdpTunnel {
         info!("connection for udp out is dropped");
     }
 
-    async fn process_internal(
+    async fn process(
         mut quic_send: SendStream,
         mut quic_recv: RecvStream,
         upstream_addr: SocketAddr,

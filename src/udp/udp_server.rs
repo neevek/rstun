@@ -1,4 +1,4 @@
-use super::udp_packet::UdpPacket;
+use super::UdpPacket;
 use crate::BUFFER_POOL;
 use crate::UDP_PACKET_SIZE;
 use anyhow::Result;
@@ -90,7 +90,7 @@ impl UdpServer {
                     result = in_udp_receiver.recv() => {
                         match result {
                             Some(UdpMessage::Packet(p)) => {
-                                match udp_socket.send_to(&p.payload, p.addr).await {
+                                match udp_socket.send_to(&p.payload, p.local_addr).await {
                                     Ok(_) => {
                                         // succeeded
                                     }
