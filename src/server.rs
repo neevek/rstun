@@ -185,10 +185,10 @@ impl Server {
                             .tcp_sessions
                             .push(ConnectedTcpInSession {
                                 conn: info.conn.clone(),
-                                sender: info.tcp_server.clone_tcp_sender(),
+                                sender: info.tcp_server.clone_sender(),
                             });
 
-                        let mut tcp_receiver = info.tcp_server.take_tcp_receiver();
+                        let mut tcp_receiver = info.tcp_server.take_receiver();
 
                         TcpTunnel::start_serving(
                             false,
@@ -202,19 +202,29 @@ impl Server {
                         info.tcp_server.shutdown().await.ok();
                     }
 
-                    TunnelType::UdpIn(info) => {
+                    TunnelType::UdpIn(mut info) => {
                         state
                             .lock()
                             .unwrap()
                             .udp_sessions
                             .push(ConnectedUdpInSession {
                                 conn: info.conn.clone(),
-                                sender: info.udp_server.clone_udp_sender(),
+                                sender: info.udp_server.clone_sender(),
                             });
 
-                        UdpTunnel::start(&info.conn, info.udp_server, None, config.udp_timeout_ms)
-                            .await
-                            .ok();
+                        let mut udp_receiver = info.udp_server.take_receiver();
+                        let udp_sender = info.udp_server.clone_sender();
+
+                        UdpTunnel::start_serving(
+                            &info.conn,
+                            &mut udp_receiver,
+                            &udp_sender,
+                            config.udp_timeout_ms,
+                        )
+                        .await
+                        .ok();
+
+                        info.udp_server.shutdown().await.ok();
                     }
                     TunnelType::DynamicUpstreamTcpOut(conn) => {
                         TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;

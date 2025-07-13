@@ -109,19 +109,19 @@ impl TcpServer {
         self.state.lock().unwrap().addr
     }
 
-    pub fn take_tcp_receiver(&mut self) -> StreamReceiver<TcpStream> {
+    pub fn take_receiver(&mut self) -> StreamReceiver<TcpStream> {
         let mut state = self.state.lock().unwrap();
         state.active = true;
         state.tcp_receiver.take().unwrap()
     }
 
-    pub fn put_tcp_receiver(&mut self, tcp_receiver: StreamReceiver<TcpStream>) {
+    pub fn put_receiver(&mut self, tcp_receiver: StreamReceiver<TcpStream>) {
         let mut state = self.state.lock().unwrap();
         state.active = false;
         state.tcp_receiver = Some(tcp_receiver);
     }
 
-    pub fn clone_tcp_sender(&self) -> StreamSender<TcpStream> {
+    pub fn clone_sender(&self) -> StreamSender<TcpStream> {
         self.state.lock().unwrap().tcp_sender.clone()
     }
 }

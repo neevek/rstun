@@ -133,15 +133,19 @@ impl UdpServer {
         self.0.lock().unwrap().active = active
     }
 
-    pub fn take_receiver(&mut self) -> Option<UdpReceiver> {
-        self.0.lock().unwrap().udp_receiver.take()
+    pub fn take_receiver(&mut self) -> UdpReceiver {
+        let mut state = self.0.lock().unwrap();
+        state.active = true;
+        state.udp_receiver.take().unwrap()
     }
 
     pub fn put_receiver(&mut self, udp_receiver: UdpReceiver) {
-        self.0.lock().unwrap().udp_receiver = Some(udp_receiver);
+        let mut state = self.0.lock().unwrap();
+        state.active = false;
+        state.udp_receiver = Some(udp_receiver);
     }
 
-    pub fn clone_udp_sender(&self) -> UdpSender {
+    pub fn clone_sender(&self) -> UdpSender {
         self.0.lock().unwrap().in_udp_sender.clone()
     }
 }

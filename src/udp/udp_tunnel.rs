@@ -1,6 +1,4 @@
-use crate::udp::udp_server::UdpServer;
 use crate::{
-    tcp::{StreamMessage, StreamSender},
     tunnel_message::{TunnelMessage, UdpLocalAddr},
     udp::{udp_packet::UdpPacket, udp_server::UdpMessage},
     BUFFER_POOL, UDP_PACKET_SIZE,
@@ -15,28 +13,26 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
 pub struct UdpTunnel;
 
 impl UdpTunnel {
-    pub async fn start(
+    pub async fn start_serving(
         conn: &quinn::Connection,
-        mut udp_server: UdpServer,
-        tcp_sender: Option<StreamSender<TcpStream>>,
+        udp_receiver: &mut Receiver<UdpMessage>,
+        udp_sender: &Sender<UdpMessage>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
+        debug!("start transfering udp packets");
         let stream_map = Arc::new(DashMap::new());
-        udp_server.set_active(true);
-        let mut udp_receiver = udp_server.take_receiver().unwrap();
-
-        debug!("start transfering udp packets from: {}", udp_server.addr());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
             let quic_send = match UdpTunnel::open_stream(
                 conn.clone(),
-                udp_server.clone(),
+                udp_sender.clone(),
                 packet.addr,
                 stream_map.clone(),
                 udp_timeout_ms,
@@ -47,9 +43,6 @@ impl UdpTunnel {
                 Err(e) => {
                     error!("{e}");
                     if conn.close_reason().is_some() {
-                        if let Some(tcp_sender) = tcp_sender {
-                            tcp_sender.send(StreamMessage::Quit).await.ok();
-                        }
                         debug!("connection is closed, will quit");
                         break;
                     }
@@ -72,16 +65,13 @@ impl UdpTunnel {
             });
         }
 
-        // put the receiver back
-        udp_server.set_active(false);
-        udp_server.put_receiver(udp_receiver);
-        info!("local udp server paused");
+        info!("udp server quit");
         Ok(())
     }
 
     async fn open_stream(
         conn: Connection,
-        udp_server: UdpServer,
+        udp_sender: Sender<UdpMessage>,
         peer_addr: SocketAddr,
         stream_map: Arc<DashMap<SocketAddr, TSafe<SendStream>>>,
         udp_timeout_ms: u64,
@@ -106,7 +96,6 @@ impl UdpTunnel {
 
         let quic_send = Arc::new(tokio::sync::Mutex::new(quic_send));
         stream_map.insert(peer_addr, quic_send.clone());
-        let udp_sender = udp_server.clone_udp_sender();
 
         let stream_map = stream_map.clone();
         tokio::spawn(async move {

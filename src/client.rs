@@ -561,7 +561,7 @@ impl Client {
         );
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let mut tcp_receiver = tcp_server.take_tcp_receiver();
+        let mut tcp_receiver = tcp_server.take_receiver();
 
         TcpTunnel::start_serving(
             true,
@@ -572,7 +572,7 @@ impl Client {
         )
         .await;
 
-        tcp_server.put_tcp_receiver(tcp_receiver);
+        tcp_server.put_receiver(tcp_receiver);
 
         Ok(())
     }
@@ -589,7 +589,7 @@ impl Client {
                 .cloned()
         };
 
-        let udp_server = match udp_server {
+        let mut udp_server = match udp_server {
             Some(server) => server.clone(),
             None => self.start_udp_server(local_server_addr).await?,
         };
@@ -605,9 +605,19 @@ impl Client {
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        UdpTunnel::start(&conn, udp_server, None, self.config.udp_timeout_ms)
-            .await
-            .ok();
+        let mut udp_receiver = udp_server.take_receiver();
+        let udp_sender = udp_server.clone_sender();
+
+        UdpTunnel::start_serving(
+            &conn,
+            &mut udp_receiver,
+            &udp_sender,
+            self.config.udp_timeout_ms,
+        )
+        .await
+        .ok();
+
+        udp_server.put_receiver(udp_receiver);
 
         Ok(())
     }
