@@ -65,7 +65,7 @@ impl UdpServer {
                                 }
 
                                 unsafe { buf.set_len(size); }
-                                let msg = UdpMessage::Packet(UdpPacket::new(buf, addr));
+                                let msg = UdpMessage::Packet(UdpPacket::new(buf, addr, None));
                                 match tokio::time::timeout(
                                         Duration::from_millis(300),
                                         out_udp_sender.send(msg)).await {

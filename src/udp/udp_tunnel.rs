@@ -71,11 +71,11 @@ impl UdpTunnel {
     async fn open_stream(
         conn: Connection,
         udp_sender: Sender<UdpMessage>,
-        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
         stream_map: Arc<DashMap<SocketAddr, TSafe<SendStream>>>,
         udp_timeout_ms: u64,
     ) -> Result<TSafe<SendStream>> {
-        if let Some(s) = stream_map.get(&peer_addr) {
+        if let Some(s) = stream_map.get(&local_addr) {
             return Ok((*s).clone());
         }
 
@@ -84,22 +84,22 @@ impl UdpTunnel {
 
         TunnelMessage::send(
             &mut quic_send,
-            &TunnelMessage::ReqUdpStart(UdpLocalAddr(peer_addr)),
+            &TunnelMessage::ReqUdpStart(UdpLocalAddr(local_addr)),
         )
         .await?;
 
         debug!(
-            "new udp session: {peer_addr}, streams: {}",
+            "new udp session: {local_addr}, streams: {}",
             stream_map.len()
         );
 
         let quic_send = Arc::new(tokio::sync::Mutex::new(quic_send));
-        stream_map.insert(peer_addr, quic_send.clone());
+        stream_map.insert(local_addr, quic_send.clone());
 
         let stream_map = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream: {peer_addr}, streams: {}",
+                "start udp stream: {local_addr}, streams: {}",
                 stream_map.len()
             );
             loop {
@@ -114,10 +114,7 @@ impl UdpTunnel {
                         unsafe {
                             buf.set_len(len as usize);
                         }
-                        let packet = UdpPacket {
-                            payload: buf,
-                            local_addr: peer_addr,
-                        };
+                        let packet = UdpPacket::new(buf, local_addr, None);
                         udp_sender.send(UdpMessage::Packet(packet)).await.ok();
                     }
                     e => {
@@ -136,9 +133,9 @@ impl UdpTunnel {
                 }
             }
 
-            stream_map.remove(&peer_addr);
+            stream_map.remove(&local_addr);
             debug!(
-                "drop udp session: {peer_addr}, streams: {}",
+                "drop udp session: {local_addr}, streams: {}",
                 stream_map.len()
             );
         });
