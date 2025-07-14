@@ -1,6 +1,6 @@
 use crate::{
     tunnel_message::{TunnelMessage, UdpLocalAddr, UdpPeerAddr},
-    udp::{udp_server::UdpMessage, UdpPacket},
+    udp::{self, udp_server::UdpMessage, UdpPacket},
     util::stream_util::StreamUtil,
     BUFFER_POOL, UDP_PACKET_SIZE,
 };
@@ -202,25 +202,25 @@ impl UdpTunnel {
         debug!("new udp session: {peer_addr:?}");
 
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-        let udp_socket = match UdpSocket::bind(local_addr).await {
+        let udp_socket_send = match UdpSocket::bind(local_addr).await {
             Ok(udp_socket) => Arc::new(udp_socket),
             Err(e) => {
                 log_and_bail!("failed to bind to localhost, err: {e:?}");
             }
         };
 
-        if let Err(e) = udp_socket.connect(upstream_addr).await {
+        if let Err(e) = udp_socket_send.connect(upstream_addr).await {
             log_and_bail!("failed to connect to upstream: {upstream_addr}, err: {e:?}");
         };
 
-        let udp_socket_clone = udp_socket.clone();
+        let udp_socket_recv = udp_socket_send.clone();
         tokio::spawn(async move {
             debug!("start udp stream: {peer_addr:?} ←  {upstream_addr}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 match tokio::time::timeout(
                     Duration::from_millis(udp_timeout_ms),
-                    udp_socket_clone.recv(&mut buf),
+                    udp_socket_recv.recv(&mut buf),
                 )
                 .await
                 {
@@ -249,17 +249,54 @@ impl UdpTunnel {
         });
 
         debug!("start sending datagrams to upstream, {peer_addr} →  {upstream_addr}");
+
+        let udp_socket: Option<Arc<UdpSocket>> = None;
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
-            match tokio::time::timeout(
-                Duration::from_millis(udp_timeout_ms),
-                TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
-            )
+            match tokio::time::timeout(Duration::from_millis(udp_timeout_ms), async {
+                let peer_addr = match TunnelMessage::recv(&mut quic_recv).await? {
+                    TunnelMessage::ReqUdpStart(UdpPeerAddr(addr)) => addr,
+                    msg => {
+                        log_and_bail!("unexpected tunnel message: {msg}");
+                    }
+                };
+                let packet_len = TunnelMessage::recv_raw(&mut quic_recv, &mut buf).await?;
+                Ok((peer_addr, packet_len))
+            })
             .await
             {
-                Ok(Ok(len)) => {
-                    udp_socket
-                        .send(&buf[..len as usize])
+                Ok(Ok((peer_addr, packet_len))) => {
+                    let upstream_addr = match peer_addr {
+                        Some(addr) => addr,
+                        None => upstream_addr.clone(),
+                    };
+
+                    let has_valid_socket = match udp_socket {
+                        Some(sock) => match sock.peer_addr() {
+                            Ok(addr) => addr == upstream_addr,
+                            _ => false,
+                        },
+                        None => false,
+                    };
+
+                    if !has_valid_socket {
+                        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+                        let sock = match UdpSocket::bind(local_addr).await {
+                            Ok(sock) => Arc::new(sock),
+                            Err(e) => {
+                                log_and_bail!("failed to bind to localhost, err: {e:?}");
+                            }
+                        };
+
+                        if let Err(e) = sock.connect(upstream_addr).await {
+                            log_and_bail!(
+                                "failed to connect to upstream: {upstream_addr}, err: {e:?}"
+                            );
+                        };
+                    }
+
+                    udp_socket_send
+                        .send(&buf[..packet_len as usize])
                         .await
                         .context("failed to send datagram through udp_socket")?;
                 }
