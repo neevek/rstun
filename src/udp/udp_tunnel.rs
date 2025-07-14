@@ -1,9 +1,7 @@
-use crate::{
-    tunnel_message::{TunnelMessage, UdpLocalAddr, UdpPeerAddr},
-    udp::{self, udp_server::UdpMessage, UdpPacket},
-    util::stream_util::StreamUtil,
-    BUFFER_POOL, UDP_PACKET_SIZE,
-};
+use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
+use crate::udp::{UdpMessage, UdpPacket};
+use crate::BUFFER_POOL;
+use crate::UDP_PACKET_SIZE;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
@@ -14,8 +12,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::oneshot;
+use tokio::{net::UdpSocket, sync::Mutex};
 
 type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
@@ -63,8 +62,6 @@ impl UdpTunnel {
                 .await
                 .ok();
 
-                warn!(">>>>>>>>>>> haha send 1");
-
                 TunnelMessage::send_raw(&mut quic_send, &packet.payload)
                     .await
                     .inspect_err(|e| {
@@ -90,7 +87,7 @@ impl UdpTunnel {
             return Ok((*s).clone());
         }
 
-        let (mut quic_send, mut quic_recv) =
+        let (quic_send, mut quic_recv) =
             conn.open_bi().await.context("open_bi failed for udp out")?;
 
         debug!(
@@ -98,7 +95,7 @@ impl UdpTunnel {
             stream_map.len()
         );
 
-        let quic_send = Arc::new(tokio::sync::Mutex::new(quic_send));
+        let quic_send = Arc::new(Mutex::new(quic_send));
         stream_map.insert(local_addr, quic_send.clone());
 
         let stream_map = stream_map.clone();
@@ -108,39 +105,30 @@ impl UdpTunnel {
                 stream_map.len()
             );
             loop {
-                let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-                match tokio::time::timeout(Duration::from_millis(udp_timeout_ms), async {
-                    warn!(">>>>>> haha read 1");
-                    let peer_addr = match TunnelMessage::recv(&mut quic_recv).await? {
-                        TunnelMessage::ReqUdpPacketStart(UdpPeerAddr(addr)) => addr,
-                        msg => {
-                            log_and_bail!("unexpected tunnel message: {msg}");
-                        }
-                    };
-                    warn!(">>>>>> haha addr:{peer_addr:?}");
-                    let packet_len = TunnelMessage::recv_raw(&mut quic_recv, &mut buf).await?;
-                    Ok((peer_addr, packet_len))
-                })
+                let mut payload = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
+                match tokio::time::timeout(
+                    Duration::from_millis(udp_timeout_ms),
+                    TunnelMessage::recv_raw(&mut quic_recv, &mut payload),
+                )
                 .await
                 {
-                    Ok(Ok((peer_addr, packet_len))) => {
+                    Ok(Ok(packet_len)) => {
                         unsafe {
-                            buf.set_len(packet_len as usize);
+                            payload.set_len(packet_len as usize);
                         }
-                        let packet = UdpPacket::new(buf, local_addr, peer_addr);
-                        udp_sender.send(UdpMessage::Packet(packet)).await.ok();
+                        let packet = UdpPacket {
+                            payload,
+                            local_addr,
+                            peer_addr: None,
+                        };
+                        let _ = udp_sender.send(UdpMessage::Packet(packet)).await;
                     }
-                    e => {
-                        match e {
-                            Ok(Err(e)) => {
-                                warn!("failed to read for udp, err: {e}");
-                            }
-                            Err(_) => {
-                                // timedout
-                                // debug!("timeout on reading udp packet");
-                            }
-                            _ => unreachable!(""),
-                        }
+                    Ok(Err(e)) => {
+                        warn!("failed to read for udp, err: {e}");
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout occurred
                         break;
                     }
                 }
@@ -158,11 +146,11 @@ impl UdpTunnel {
 
     pub async fn start_accepting(
         conn: &quinn::Connection,
-        upstream_addr: SocketAddr,
+        upstream_addr: Option<SocketAddr>,
         udp_timeout_ms: u64,
     ) {
         let remote_addr = &conn.remote_address();
-        info!("start udp streaming, {remote_addr} ↔  {upstream_addr}");
+        info!("start udp streaming, {remote_addr} ↔  {upstream_addr:?}");
 
         loop {
             match conn.accept_bi().await {
@@ -188,133 +176,162 @@ impl UdpTunnel {
     }
 
     async fn process(
-        mut quic_send: SendStream,
+        quic_send: SendStream,
         mut quic_recv: RecvStream,
-        upstream_addr: SocketAddr,
+        upstream_addr: Option<SocketAddr>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
-        let peer_addr = match TunnelMessage::recv(&mut quic_recv).await {
-            Ok(TunnelMessage::ReqUdpStart(peer_addr)) => peer_addr.0,
-            _ => {
-                log_and_bail!("unexpected first udp message");
-            }
-        };
-        debug!("new udp session: {peer_addr:?}");
+        debug!("new udp session");
 
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-        let udp_socket_send = match UdpSocket::bind(local_addr).await {
-            Ok(udp_socket) => Arc::new(udp_socket),
-            Err(e) => {
-                log_and_bail!("failed to bind to localhost, err: {e:?}");
-            }
-        };
+        let quic_send = Arc::new(Mutex::new(quic_send));
+        let mut udp_socket = None;
+        if let Some(upstream_addr) = upstream_addr {
+            // pre-create the udp-socket if upstream is specified
+            udp_socket = Self::create_peer_socket_and_exchange_data(
+                upstream_addr,
+                quic_send.clone(),
+                udp_timeout_ms,
+            )
+            .await?;
+        }
 
-        if let Err(e) = udp_socket_send.connect(upstream_addr).await {
-            log_and_bail!("failed to connect to upstream: {upstream_addr}, err: {e:?}");
-        };
+        debug!("start sending datagrams to upstream");
 
-        let udp_socket_recv = udp_socket_send.clone();
-        tokio::spawn(async move {
-            debug!("start udp stream: {peer_addr:?} ←  {upstream_addr}");
-            let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-            loop {
-                match tokio::time::timeout(
-                    Duration::from_millis(udp_timeout_ms),
-                    udp_socket_recv.recv(&mut buf),
-                )
-                .await
-                {
-                    Ok(Ok(len)) => {
-                        TunnelMessage::send_raw(&mut quic_send, &buf[..len])
-                            .await
-                            .ok();
-                    }
-                    e => {
-                        match e {
-                            Ok(Err(e)) => {
-                                warn!("failed to receive datagrams from upstream: {upstream_addr}, err: {e:?}");
-                            }
-                            Err(_) => {
-                                debug!(
-                                    "timeout on receiving datagrams from upstream: {upstream_addr}"
-                                );
-                            }
-                            _ => unreachable!(""),
-                        }
-                        break;
-                    }
-                }
-            }
-            debug!("drop udp stream: {peer_addr} ←  {upstream_addr}");
-        });
-
-        debug!("start sending datagrams to upstream, {peer_addr} →  {upstream_addr}");
-
-        let udp_socket: Option<Arc<UdpSocket>> = None;
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
             match tokio::time::timeout(Duration::from_millis(udp_timeout_ms), async {
                 let peer_addr = match TunnelMessage::recv(&mut quic_recv).await? {
-                    TunnelMessage::ReqUdpStart(UdpPeerAddr(addr)) => addr,
+                    TunnelMessage::ReqUdpStart(UdpPeerAddr(peer_addr)) => peer_addr,
                     msg => {
                         log_and_bail!("unexpected tunnel message: {msg}");
                     }
                 };
+
                 let packet_len = TunnelMessage::recv_raw(&mut quic_recv, &mut buf).await?;
                 Ok((peer_addr, packet_len))
             })
             .await
             {
                 Ok(Ok((peer_addr, packet_len))) => {
-                    let upstream_addr = match peer_addr {
-                        Some(addr) => addr,
-                        None => upstream_addr.clone(),
-                    };
-
-                    let has_valid_socket = match udp_socket {
-                        Some(sock) => match sock.peer_addr() {
-                            Ok(addr) => addr == upstream_addr,
-                            _ => false,
-                        },
-                        None => false,
-                    };
-
-                    if !has_valid_socket {
-                        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-                        let sock = match UdpSocket::bind(local_addr).await {
-                            Ok(sock) => Arc::new(sock),
-                            Err(e) => {
-                                log_and_bail!("failed to bind to localhost, err: {e:?}");
+                    match peer_addr {
+                        Some(peer_addr) => {
+                            if let Some(upstream_addr) = upstream_addr {
+                                warn!("upstream_addr {upstream_addr:?} is specified for the connection, peer_addr {peer_addr} is ignored");
+                            } else if udp_socket.as_ref().and_then(|sock| sock.0.peer_addr().ok())
+                                != Some(peer_addr)
+                            {
+                                if let Some(udp_socket) = udp_socket {
+                                    // shutdown the old socket
+                                    udp_socket.1.send(()).ok();
+                                }
+                                udp_socket = Self::create_peer_socket_and_exchange_data(
+                                    peer_addr,
+                                    quic_send.clone(),
+                                    udp_timeout_ms,
+                                )
+                                .await?;
                             }
-                        };
+                        }
+                        None => {
+                            if udp_socket.is_none() {
+                                log_and_bail!("no valid upstream_addr to connect");
+                            }
+                        }
+                    };
 
-                        if let Err(e) = sock.connect(upstream_addr).await {
-                            log_and_bail!(
-                                "failed to connect to upstream: {upstream_addr}, err: {e:?}"
-                            );
-                        };
-                    }
-
-                    udp_socket_send
+                    udp_socket
+                        .as_ref()
+                        .unwrap()
+                        .0
                         .send(&buf[..packet_len as usize])
                         .await
                         .context("failed to send datagram through udp_socket")?;
                 }
-                e => {
-                    match e {
-                        Ok(Err(e)) => {
-                            warn!("failed to read from udp packet from tunnel, err: {e:?}");
-                        }
-                        Err(_) => {
-                            debug!("timeout on reading udp packet from tunnel");
-                        }
-                        _ => unreachable!(""),
-                    }
+                Ok(Err(e)) => {
+                    warn!("failed to read from udp packet from tunnel, err: {e}");
+                    break;
+                }
+                Err(_) => {
+                    debug!("timeout on receiving datagrams from upstream");
                     break;
                 }
             }
         }
 
         Ok::<(), anyhow::Error>(())
+    }
+
+    async fn create_peer_socket_and_exchange_data(
+        addr: SocketAddr,
+        quic_send: Arc<Mutex<SendStream>>,
+        udp_timeout_ms: u64,
+    ) -> Result<Option<(Arc<UdpSocket>, oneshot::Sender<()>)>> {
+        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        match UdpSocket::bind(local_addr).await {
+            Ok(udp_socket) => {
+                if let Err(e) = udp_socket.connect(addr).await {
+                    log_and_bail!("failed to connect to upstream: {addr}, err: {e}");
+                };
+
+                let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+                let udp_socket = Arc::new(udp_socket);
+
+                Self::udp_to_quic(
+                    udp_socket.clone(),
+                    quic_send.clone(),
+                    udp_timeout_ms,
+                    shutdown_rx,
+                );
+
+                Ok(Some((udp_socket, shutdown_tx)))
+            }
+            Err(e) => {
+                log_and_bail!("failed to bind to localhost, err: {e}");
+            }
+        }
+    }
+
+    fn udp_to_quic(
+        udp_socket: Arc<UdpSocket>,
+        quic_send: Arc<Mutex<SendStream>>,
+        udp_timeout_ms: u64,
+        mut shutdown_rx: oneshot::Receiver<()>,
+    ) {
+        tokio::spawn(async move {
+            debug!("start udp stream");
+            let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+
+                    result = tokio::time::timeout(
+                        Duration::from_millis(udp_timeout_ms),
+                        udp_socket.recv(&mut buf)
+                    ) => {
+                        match result {
+                            Ok(Ok(len)) => {
+                                let mut quic_send = quic_send.lock().await;
+                                TunnelMessage::send_raw(&mut quic_send, &buf[..len])
+                                    .await
+                                    .ok();
+                            }
+                            Ok(Err(e)) => {
+                                warn!("failed to receive datagrams from upstream, err: {e:?}");
+                                break;
+                            }
+                            Err(_) => {
+                                debug!("timeout on receiving datagrams from upstream");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            debug!("drop udp socket: {:?}", udp_socket.peer_addr());
+        });
     }
 }

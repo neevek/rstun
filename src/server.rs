@@ -176,7 +176,7 @@ impl Server {
                     TunnelType::UdpOut(info) => {
                         UdpTunnel::start_accepting(
                             &info.conn,
-                            info.upstream_addr,
+                            Some(info.upstream_addr),
                             config.udp_timeout_ms,
                         )
                         .await
@@ -232,7 +232,9 @@ impl Server {
                     TunnelType::DynamicUpstreamTcpOut(conn) => {
                         TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;
                     }
-                    TunnelType::DynamicUpstreamUdpOut(conn) => {}
+                    TunnelType::DynamicUpstreamUdpOut(conn) => {
+                        UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms).await
+                    }
                 }
 
                 Ok::<(), anyhow::Error>(())
@@ -358,7 +360,7 @@ impl Server {
         Ok(match tunnel_config.upstream.upstream_addr {
             None => {
                 if tunnel_config.mode == TunnelMode::In {
-                    log_and_bail!("explicit port is required to start TunnelIn mode tunneling");
+                    log_and_bail!("explicit port is required to start inbound tunneling");
                 }
 
                 if default_upstream.is_none() {
@@ -377,7 +379,7 @@ impl Server {
                     && !addr.ip().is_loopback()
                 {
                     log_and_bail!(
-                        "only loopback or unspecified IP is allowed for TunnelIn mode tunelling: {addr}, or simply specify a port without the IP part"
+                        "only loopback or unspecified IP is allowed for inbound tunelling: {addr}, or simply specify a port without the IP part"
                     );
                 }
 

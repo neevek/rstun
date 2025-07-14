@@ -8,7 +8,6 @@ mod udp;
 mod util;
 
 use anyhow::{Context, Result};
-use byte_pool::Block;
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
@@ -27,6 +26,7 @@ pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
 use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
+pub use udp::{UdpMessage, UdpPacket, UdpReceiver, UdpSender};
 
 extern crate bincode;
 extern crate pretty_env_logger;
@@ -38,7 +38,6 @@ pub const UDP_PACKET_SIZE: usize = 1500;
 lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
 }
-type PooledBuffer = Block<'static, Vec<u8>>;
 
 pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[
     "chacha20-poly1305",

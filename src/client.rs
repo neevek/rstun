@@ -3,10 +3,7 @@ use crate::{
     tcp::{tcp_tunnel::TcpTunnel, AsyncStream, StreamReceiver, StreamRequest},
     tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
     tunnel_message::TunnelMessage,
-    udp::{
-        udp_server::{UdpMessage, UdpServer},
-        udp_tunnel::UdpTunnel,
-    },
+    udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel, UdpReceiver, UdpSender},
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
     UpstreamType,
 };
@@ -33,10 +30,7 @@ use std::{
     sync::{Arc, Mutex, Once},
     time::Duration,
 };
-use tokio::{
-    net::TcpStream,
-    sync::mpsc::{Receiver, Sender},
-};
+use tokio::net::TcpStream;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
@@ -184,14 +178,16 @@ impl Client {
         });
     }
 
-    pub fn connect_and_serve_udp_async<S: AsyncStream>(
-        &mut self,
-        ch: Option<(Sender<UdpMessage>, Receiver<UdpMessage>)>,
-    ) {
+    pub fn connect_and_serve_udp_async(&mut self, ch: (UdpSender, UdpReceiver)) {
         let mut this = self.clone();
         tokio::spawn(async move {
-            this.connect_and_serve::<S>(0, Tunnel::ChannelBased(UpstreamType::Udp), None, ch)
-                .await;
+            this.connect_and_serve::<TcpStream>(
+                0,
+                Tunnel::ChannelBased(UpstreamType::Udp),
+                None,
+                Some(ch),
+            )
+            .await;
         });
     }
 
@@ -303,7 +299,7 @@ impl Client {
         index: usize,
         tunnel: Tunnel,
         mut stream_receiver: Option<StreamReceiver<S>>,
-        mut ch: Option<(Sender<UdpMessage>, Receiver<UdpMessage>)>,
+        mut ch: Option<(UdpSender, UdpReceiver)>,
     ) {
         let login_info = LoginInfo {
             password: self.config.password.clone(),
@@ -693,7 +689,8 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        UdpTunnel::start_accepting(&conn, local_server_addr, self.config.udp_timeout_ms).await;
+        UdpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.udp_timeout_ms)
+            .await;
 
         Ok(())
     }

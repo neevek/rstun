@@ -1,4 +1,3 @@
-use super::UdpPacket;
 use crate::BUFFER_POOL;
 use crate::UDP_PACKET_SIZE;
 use anyhow::Result;
@@ -11,16 +10,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
 
-pub enum UdpMessage {
-    Packet(UdpPacket),
-    Quit,
-}
-
-pub type UdpSender = Sender<UdpMessage>;
-pub type UdpReceiver = Receiver<UdpMessage>;
+pub use crate::udp::{UdpMessage, UdpPacket, UdpReceiver, UdpSender};
 
 #[derive(Debug, Clone)]
 pub struct UdpServer(Arc<Mutex<State>>);
@@ -51,21 +42,21 @@ impl UdpServer {
 
         tokio::spawn(async move {
             loop {
-                let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
+                let mut payload = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
                 tokio::select! {
-                    result = udp_socket.recv_from(&mut buf) => {
+                    result = udp_socket.recv_from(&mut payload) => {
                         match result {
-                            Ok((size, addr)) => {
+                            Ok((size, local_addr)) => {
                                 let active = {
                                     state.clone().lock().unwrap().active
                                 };
                                 if !active {
-                                    debug!("drop the packet ({size}) from addr: {addr}");
+                                    debug!("drop the packet ({size}) from addr: {local_addr}");
                                     continue;
                                 }
 
-                                unsafe { buf.set_len(size); }
-                                let msg = UdpMessage::Packet(UdpPacket::new(buf, addr, None));
+                                unsafe { payload.set_len(size); }
+                                let msg = UdpMessage::Packet(UdpPacket{payload, local_addr, peer_addr: None});
                                 match tokio::time::timeout(
                                         Duration::from_millis(300),
                                         out_udp_sender.send(msg)).await {
