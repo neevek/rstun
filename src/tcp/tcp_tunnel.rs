@@ -28,14 +28,13 @@ impl TcpTunnel {
 
             match conn.open_bi().await {
                 Ok((mut quic_send, quic_recv)) => {
-                    if let Some(dst_addr) = request.dst_addr {
-                        if let Err(e) =
-                            StreamUtil::write_socket_addr(&mut quic_send, &dst_addr).await
-                        {
-                            error!("failed to send dst addr: {e}");
-                            *pending_request = Some(request);
-                            continue;
-                        };
+                    if let Err(e) =
+                        StreamUtil::write_socket_addr(&mut quic_send, &request.dst_addr, false)
+                            .await
+                    {
+                        error!("failed to send dst addr: {e}");
+                        *pending_request = Some(request);
+                        continue;
                     }
                     StreamUtil::start_flowing(
                         if tunnel_out { "OUT" } else { "IN" },

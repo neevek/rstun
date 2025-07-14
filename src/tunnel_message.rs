@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
     ReqLogin(LoginInfo),
-    ReqUdpStart(UdpLocalAddr),
+    ReqUdpStart(UdpPeerAddr),
     RespFailure(String),
     RespSuccess,
 }
@@ -64,7 +64,7 @@ impl LoginInfo {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct UdpLocalAddr(pub SocketAddr);
+pub struct UdpPeerAddr(pub Option<SocketAddr>);
 
 impl Display for LoginInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,8 +83,8 @@ impl Display for TunnelMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReqLogin(login_info) => f.write_str(login_info.to_string().as_str()),
-            Self::ReqUdpStart(udp_local_addr) => {
-                f.write_str(format!("udp_start:{udp_local_addr:?}").as_str())
+            Self::ReqUdpStart(udp_peer_addr) => {
+                f.write_str(format!("udp_start:{udp_peer_addr:?}").as_str())
             }
             Self::RespFailure(msg) => f.write_str(format!("fail:{msg}").as_str()),
             Self::RespSuccess => f.write_str("succeeded"),

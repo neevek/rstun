@@ -186,24 +186,32 @@ impl StreamUtil {
         }
     }
 
-    pub async fn write_socket_addr(quic_send: &mut SendStream, addr: &SocketAddr) -> Result<()> {
-        let mut buf = [0u8; 1 + 16 + 2];
-
+    pub async fn write_socket_addr(
+        quic_send: &mut SendStream,
+        addr: &Option<SocketAddr>,
+        mark_none: bool,
+    ) -> Result<()> {
         match addr {
-            SocketAddr::V4(v4) => {
+            Some(SocketAddr::V4(v4)) => {
+                let mut buf = [0u8; 1 + 4 + 2];
                 buf[0] = 4;
                 buf[1..5].copy_from_slice(&v4.ip().octets());
                 buf[5..7].copy_from_slice(&v4.port().to_be_bytes());
                 quic_send.write_all(&buf[..7]).await?;
             }
-            SocketAddr::V6(v6) => {
+            Some(SocketAddr::V6(v6)) => {
+                let mut buf = [0u8; 1 + 16 + 2];
                 buf[0] = 6;
                 buf[1..17].copy_from_slice(&v6.ip().octets());
                 buf[17..19].copy_from_slice(&v6.port().to_be_bytes());
                 quic_send.write_all(&buf[..19]).await?;
             }
+            None => {
+                if mark_none {
+                    quic_send.write_u8(0).await?;
+                }
+            }
         };
-
         Ok(())
     }
 

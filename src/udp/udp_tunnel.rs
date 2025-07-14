@@ -1,6 +1,7 @@
 use crate::{
-    tunnel_message::{TunnelMessage, UdpLocalAddr},
+    tunnel_message::{TunnelMessage, UdpLocalAddr, UdpPeerAddr},
     udp::{udp_server::UdpMessage, UdpPacket},
+    util::stream_util::StreamUtil,
     BUFFER_POOL, UDP_PACKET_SIZE,
 };
 use anyhow::{Context, Result};
@@ -54,6 +55,16 @@ impl UdpTunnel {
             tokio::spawn(async move {
                 let mut quic_send = quic_send.lock().await;
                 let payload_len = packet.payload.len();
+
+                TunnelMessage::send(
+                    &mut quic_send,
+                    &TunnelMessage::ReqUdpStart(UdpPeerAddr(packet.peer_addr)),
+                )
+                .await
+                .ok();
+
+                warn!(">>>>>>>>>>> haha send 1");
+
                 TunnelMessage::send_raw(&mut quic_send, &packet.payload)
                     .await
                     .inspect_err(|e| {
@@ -82,12 +93,6 @@ impl UdpTunnel {
         let (mut quic_send, mut quic_recv) =
             conn.open_bi().await.context("open_bi failed for udp out")?;
 
-        TunnelMessage::send(
-            &mut quic_send,
-            &TunnelMessage::ReqUdpStart(UdpLocalAddr(local_addr)),
-        )
-        .await?;
-
         debug!(
             "new udp session: {local_addr}, streams: {}",
             stream_map.len()
@@ -104,17 +109,25 @@ impl UdpTunnel {
             );
             loop {
                 let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
-                match tokio::time::timeout(
-                    Duration::from_millis(udp_timeout_ms),
-                    TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
-                )
+                match tokio::time::timeout(Duration::from_millis(udp_timeout_ms), async {
+                    warn!(">>>>>> haha read 1");
+                    let peer_addr = match TunnelMessage::recv(&mut quic_recv).await? {
+                        TunnelMessage::ReqUdpPacketStart(UdpPeerAddr(addr)) => addr,
+                        msg => {
+                            log_and_bail!("unexpected tunnel message: {msg}");
+                        }
+                    };
+                    warn!(">>>>>> haha addr:{peer_addr:?}");
+                    let packet_len = TunnelMessage::recv_raw(&mut quic_recv, &mut buf).await?;
+                    Ok((peer_addr, packet_len))
+                })
                 .await
                 {
-                    Ok(Ok(len)) => {
+                    Ok(Ok((peer_addr, packet_len))) => {
                         unsafe {
-                            buf.set_len(len as usize);
+                            buf.set_len(packet_len as usize);
                         }
-                        let packet = UdpPacket::new(buf, local_addr, None);
+                        let packet = UdpPacket::new(buf, local_addr, peer_addr);
                         udp_sender.send(UdpMessage::Packet(packet)).await.ok();
                     }
                     e => {
@@ -186,7 +199,7 @@ impl UdpTunnel {
                 log_and_bail!("unexpected first udp message");
             }
         };
-        debug!("new udp session: {peer_addr}");
+        debug!("new udp session: {peer_addr:?}");
 
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let udp_socket = match UdpSocket::bind(local_addr).await {
@@ -202,7 +215,7 @@ impl UdpTunnel {
 
         let udp_socket_clone = udp_socket.clone();
         tokio::spawn(async move {
-            debug!("start udp stream: {peer_addr} ←  {upstream_addr}");
+            debug!("start udp stream: {peer_addr:?} ←  {upstream_addr}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 match tokio::time::timeout(
