@@ -23,6 +23,7 @@ use rustls::{
 use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     fmt::Display,
     net::{IpAddr, SocketAddr},
@@ -32,20 +33,24 @@ use std::{
 };
 use tokio::net::TcpStream;
 
+// Time format for logging timestamps
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
+// Default server port for QUIC connections
 const DEFAULT_SERVER_PORT: u16 = 3515;
+// Interval for reporting traffic statistics (30 seconds)
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 30;
 static INIT: Once = Once::new();
 
+// Client connection states during tunnel lifecycle
 #[derive(Clone, Serialize, PartialEq)]
 pub enum ClientState {
-    Idle = 0,
-    Connecting,
-    Connected,
-    LoggingIn,
-    Tunneling,
-    Stopping,
-    Terminated,
+    Idle = 0,   // Initial state, no connections
+    Connecting, // Attempting to establish QUIC connection
+    Connected,  // QUIC connection established
+    LoggingIn,  // Authenticating with server
+    Tunneling,  // Active tunneling mode
+    Stopping,   // Graceful shutdown in progress
+    Terminated, // Completely stopped
 }
 
 impl Display for ClientState {
@@ -62,14 +67,18 @@ impl Display for ClientState {
     }
 }
 
+// Internal state maintaining all active connections and servers
 struct State {
-    tcp_servers: HashMap<SocketAddr, TcpServer>,
-    udp_servers: HashMap<SocketAddr, UdpServer>,
-    connections: HashMap<SocketAddr, Connection>,
-    client_state: ClientState,
-    total_traffic_data: TunnelTraffic,
-    tunnel_info_bridge: TunnelInfoBridge,
-    on_info_report_enabled: bool,
+    tcp_servers: HashMap<SocketAddr, TcpServer>, // TCP proxy servers
+    udp_servers: HashMap<SocketAddr, UdpServer>, // UDP proxy servers
+    endpoints: HashMap<SocketAddr, Endpoint>,    // QUIC endpoints
+    connections: HashMap<SocketAddr, Connection>, // Active QUIC connections
+    client_state: ClientState,                   // Current client state
+    total_traffic_data: TunnelTraffic,           // Accumulated traffic stats
+    tunnel_info_bridge: TunnelInfoBridge,        // Event reporting bridge
+    on_info_report_enabled: bool,                // Enable/disable reporting
+    migration_stop_sender: Option<tokio::sync::oneshot::Sender<()>>, // Stop migration task
+    migration_handle: Option<tokio::task::JoinHandle<()>>, // Migration task handle
 }
 
 impl State {
@@ -77,11 +86,14 @@ impl State {
         Self {
             tcp_servers: HashMap::new(),
             udp_servers: HashMap::new(),
+            endpoints: HashMap::new(),
             connections: HashMap::new(),
             client_state: ClientState::Idle,
             total_traffic_data: TunnelTraffic::default(),
             tunnel_info_bridge: TunnelInfoBridge::new(),
             on_info_report_enabled: false,
+            migration_stop_sender: None,
+            migration_handle: None,
         }
     }
 
@@ -108,14 +120,30 @@ pub struct Client {
     inner_state: Arc<Mutex<State>>,
 }
 
-macro_rules! inner_state {
-    ($self:ident, $field:ident) => {
-        (*$self.inner_state.lock().unwrap()).$field
-    };
-}
-
 impl Client {
+    fn with_state<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut State) -> R,
+    {
+        let mut guard = self.inner_state.lock().expect("Failed to lock state");
+        f(&mut *guard)
+    }
+
+    fn with_state_read<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&State) -> R,
+    {
+        let guard = self.inner_state.lock().expect("Failed to lock state");
+        f(&*guard)
+    }
+
+    pub fn get_client_state(&self) -> ClientState {
+        self.with_state_read(|state| state.client_state.clone())
+    }
+
+    // Initialize client with configuration and set up crypto provider
     pub fn new(config: ClientConfig) -> Self {
+        // Ensure ring crypto provider is installed globally (once)
         INIT.call_once(|| {
             rustls::crypto::ring::default_provider()
                 .install_default()
@@ -128,25 +156,33 @@ impl Client {
         }
     }
 
+    // Start tunneling in blocking mode with signal handling
     pub fn start_tunneling(&mut self) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
-            .expect("Error setting Ctrl-C handler");
-
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(self.config.workers)
             .build()
             .unwrap()
             .block_on(async {
-                self.connect_and_serve_async();
-                rx.recv().expect("Could not receive from channel.");
-                self.stop_async().await;
+                let mut this = self.clone();
+                this.connect_and_serve_async();
+
+                match tokio::signal::ctrl_c().await {
+                    Ok(()) => {
+                        info!("Received Ctrl+C, initiating shutdown...");
+                        this.stop_async().await;
+                    }
+                    Err(e) => {
+                        error!("Failed to listen for Ctrl+C: {}", e);
+                    }
+                }
             });
     }
 
+    // Start TCP server with exponential backoff retry logic
     pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
         let bind_tcp_server = || async { TcpServer::bind_and_start(addr).await };
+        // Retry binding with exponential backoff (max 10 times, max 10s delay)
         let tcp_server = bind_tcp_server
             .retry(
                 ExponentialBuilder::default()
@@ -159,8 +195,10 @@ impl Client {
             })
             .await?;
 
-        inner_state!(self, tcp_servers).insert(addr, tcp_server.clone());
-
+        // Store server reference in state
+        self.with_state(|state| {
+            state.tcp_servers.insert(addr, tcp_server.clone());
+        });
         Ok(tcp_server)
     }
 
@@ -178,8 +216,9 @@ impl Client {
                 warn!("will start udp server ({addr}) after {dur:?}, err: {err:?}");
             })
             .await?;
-
-        inner_state!(self, udp_servers).insert(addr, udp_server.clone());
+        self.with_state(|state| {
+            state.udp_servers.insert(addr, udp_server.clone());
+        });
         Ok(udp_server)
     }
 
@@ -192,6 +231,10 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Stopping);
 
         if let Ok(mut state) = self.inner_state.lock() {
+            if let Some(sender) = state.migration_stop_sender.take() {
+                let _ = sender.send(());
+            }
+
             for mut s in state.tcp_servers.values().cloned() {
                 tokio::spawn(async move {
                     s.shutdown().await.ok();
@@ -212,6 +255,7 @@ impl Client {
             state.tcp_servers.clear();
             state.udp_servers.clear();
             state.connections.clear();
+            state.migration_handle = None;
         }
 
         std::thread::sleep(Duration::from_secs(3));
@@ -222,6 +266,33 @@ impl Client {
         self.set_and_post_tunnel_state(ClientState::Stopping);
 
         let mut tasks = tokio::task::JoinSet::new();
+
+        if let Ok(mut state) = self.inner_state.lock() {
+            if let Some(sender) = state.migration_stop_sender.take() {
+                info!("Sending stop signal to migration task");
+                let _ = sender.send(());
+            }
+        }
+
+        if let Ok(mut state) = self.inner_state.lock() {
+            if let Some(handle) = state.migration_handle.take() {
+                info!("Waiting for migration task to complete");
+                match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                    Ok(Ok(())) => {
+                        info!("Migration task completed successfully");
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Migration task completed with error: {}", e);
+                    }
+                    Err(_) => {
+                        warn!(
+                            "Migration task did not complete within timeout, continuing shutdown"
+                        );
+                    }
+                }
+            }
+        }
+
         if let Ok(mut state) = self.inner_state.lock() {
             for mut s in state.tcp_servers.values().cloned() {
                 tasks.spawn(async move {
@@ -243,9 +314,35 @@ impl Client {
             state.tcp_servers.clear();
             state.udp_servers.clear();
             state.connections.clear();
+            state.migration_handle = None;
+            state.migration_stop_sender = None;
         }
 
-        while tasks.join_next().await.is_some() {}
+        let mut completed_tasks = 0;
+        let total_tasks = tasks.len();
+
+        while !tasks.is_empty() {
+            match tokio::time::timeout(Duration::from_secs(2), tasks.join_next()).await {
+                Ok(Some(_)) => {
+                    completed_tasks += 1;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    warn!(
+                        "Task join timed out, aborting remaining {} tasks",
+                        tasks.len()
+                    );
+                    break;
+                }
+            }
+        }
+
+        info!(
+            "Completed {}/{} shutdown tasks",
+            completed_tasks, total_tasks
+        );
+
+        self.set_and_post_tunnel_state(ClientState::Terminated);
     }
 
     #[allow(clippy::unnecessary_to_owned)]
@@ -260,6 +357,7 @@ impl Client {
         self.report_traffic_data_in_background();
     }
 
+    // Main connection and serving loop for each tunnel
     async fn connect_and_serve(&mut self, index: usize, tunnel_config: TunnelConfig) {
         let login_info = LoginInfo {
             password: self.config.password.clone(),
@@ -268,11 +366,13 @@ impl Client {
 
         let mut pending_tcp_stream = None;
         loop {
+            // Define connection establishment logic with retry
             let connect = || async {
                 let login_cfg = self.prepare_login_config().await?;
-                let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
+                let mut endpoint = Endpoint::client(login_cfg.local_addr)?;
                 endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
 
+                // Perform login handshake
                 let conn = self
                     .login(
                         index,
@@ -283,8 +383,10 @@ impl Client {
                     )
                     .await?;
 
-                Ok(conn)
+                Ok((conn, endpoint))
             };
+
+            // Retry connection with unlimited attempts until shutdown
             let result = connect
                 .retry(
                     ExponentialBuilder::default()
@@ -303,11 +405,23 @@ impl Client {
             }
 
             match result {
-                Ok(conn) => {
+                Ok((conn, endpoint)) => {
                     let upstream_type = &tunnel_config.upstream.upstream_type;
                     let local_server_addr = tunnel_config.local_server_addr.unwrap();
+                    let should_start_migration = {
+                        let mut state = self.inner_state.lock().unwrap();
+                        state.connections.insert(local_server_addr, conn.clone());
+                        state.endpoints.insert(local_server_addr, endpoint);
 
-                    inner_state!(self, connections).insert(local_server_addr, conn.clone());
+                        self.config.hop_interval_seconds > 0 && state.migration_handle.is_none()
+                    };
+                    if should_start_migration {
+                        info!(
+                            "Starting migration task for tunnel {} with hop interval: {}s",
+                            index, self.config.hop_interval_seconds
+                        );
+                        self.start_unified_migration_task();
+                    }
 
                     if tunnel_config.mode == TunnelMode::Out {
                         match upstream_type {
@@ -342,14 +456,11 @@ impl Client {
                         }
                     }
 
-                    inner_state!(self, connections).remove(&local_server_addr);
-
-                    let stats = conn.stats();
-                    let data = &mut inner_state!(self, total_traffic_data);
-                    data.rx_bytes += stats.udp_rx.bytes;
-                    data.tx_bytes += stats.udp_tx.bytes;
-                    data.rx_dgrams += stats.udp_rx.datagrams;
-                    data.tx_dgrams += stats.udp_tx.datagrams;
+                    {
+                        let mut state = self.inner_state.lock().unwrap();
+                        state.connections.remove(&local_server_addr);
+                        state.endpoints.remove(&local_server_addr);
+                    }
                 }
 
                 Err(e) => {
@@ -369,17 +480,138 @@ impl Client {
         self.post_tunnel_log(format!("[{login_info}] quit").as_str());
     }
 
-    async fn prepare_login_config(&self) -> Result<LoginConfig> {
-        let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
-        transport_cfg.send_window(1024 * 1024 * 2);
-        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+    // Start unified connection migration task for all endpoints
+    fn start_unified_migration_task(&self) {
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
 
+        {
+            let mut state = self.inner_state.lock().unwrap();
+            state.migration_stop_sender = Some(stop_tx);
+        }
+
+        let state = self.inner_state.clone();
+        let hop_interval_seconds = self.config.hop_interval_seconds;
+
+        let handle = tokio::spawn(async move {
+            info!("✅ migration task actually started");
+
+            let mut interval = tokio::time::interval(Duration::from_secs(hop_interval_seconds));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let endpoints_to_migrate = match state.try_lock() {
+                            Ok(guard) => {
+                                guard.endpoints.iter()
+                                    .filter_map(|(addr, endpoint)| {
+                                        if let Some(conn) = guard.connections.get(addr) {
+                                            if conn.close_reason().is_none() {
+                                                Some((*addr, endpoint.clone()))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                            Err(_) => {
+                                warn!("Could not acquire lock during migration tick");
+                                continue;
+                            }
+                        };
+
+                        for (addr, endpoint) in endpoints_to_migrate {
+                            info!("⛓ migrating connection: {}", addr);
+                            let _ = Self::perform_connection_migration(&endpoint).await;
+                        }
+                    }
+                    _ = &mut stop_rx => {
+                        info!("🛑 migration task received stop signal");
+                        break;
+                    }
+                }
+            }
+
+            info!("✅ Unified migration task exited");
+        });
+
+        {
+            let mut state = self.inner_state.lock().unwrap();
+            state.migration_handle = Some(handle);
+        }
+    }
+
+    // Perform actual connection migration by rebinding to new local address
+    async fn perform_connection_migration(endpoint: &Endpoint) -> Result<()> {
+        let current_local_addr = endpoint.local_addr().map_err(|e| {
+            error!("Failed to get current local address: {}", e);
+            e
+        })?;
+
+        info!("Starting connection migration from: {}", current_local_addr);
+
+        // Create new unspecified address with same IP version
+        let new_local_addr = if current_local_addr.is_ipv4() {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
+        } else {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0)
+        };
+
+        let new_socket = match std::net::UdpSocket::bind(new_local_addr) {
+            Ok(socket) => socket,
+            Err(e) => {
+                error!(
+                    "Failed to bind new socket for migration from {}: {}",
+                    current_local_addr, e
+                );
+                return Err(anyhow::Error::new(e));
+            }
+        };
+
+        let actual_new_addr = new_socket.local_addr().map_err(|e| {
+            error!("Failed to get new socket address: {}", e);
+            e
+        })?;
+
+        info!(
+            "Connection migration: {} -> {}",
+            current_local_addr, actual_new_addr
+        );
+
+        endpoint.rebind(new_socket).map_err(|e| {
+            error!(
+                "Failed to rebind endpoint during migration: {} -> {}: {}",
+                current_local_addr, actual_new_addr, e
+            );
+            anyhow::Error::new(e)
+        })?;
+
+        info!(
+            "Connection migration successful: {} -> {}",
+            current_local_addr, actual_new_addr
+        );
+        Ok(())
+    }
+
+    // Prepare QUIC transport and TLS configuration for connection
+    async fn prepare_login_config(&self) -> Result<LoginConfig> {
+        // Configure QUIC transport parameters
+        let mut transport_cfg = TransportConfig::default();
+        transport_cfg.stream_receive_window(VarInt::from_u32(1024 * 1024)); // 1MB stream window
+        transport_cfg.receive_window(VarInt::from_u32(1024 * 1024 * 2)); // 2MB connection window
+        transport_cfg.send_window(1024 * 1024 * 2); // 2MB send window
+        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default())); // Use BBR
+        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024)); // Max 1024 streams
+
+        // Configure idle timeout if specified
         if self.config.quic_timeout_ms > 0 {
             let timeout = IdleTimeout::from(VarInt::from_u32(self.config.quic_timeout_ms as u32));
             transport_cfg.max_idle_timeout(Some(timeout));
+            // Keep-alive at 2/3 of timeout interval
             transport_cfg.keep_alive_interval(Some(Duration::from_millis(
                 self.config.quic_timeout_ms * 2 / 3,
             )));
@@ -400,6 +632,7 @@ impl Client {
         })
     }
 
+    // Perform login handshake with remote server
     async fn login(
         &self,
         index: usize,
@@ -409,6 +642,7 @@ impl Client {
         domain: &str,
     ) -> Result<Connection> {
         self.set_and_post_tunnel_state(ClientState::Connecting);
+        // Log connection attempt with configuration details
         self.post_tunnel_log(
             format!(
                 "{index}:{} connecting, idle_timeout:{}, retry_timeout:{}, cipher:{}, threads:{}",
@@ -421,7 +655,9 @@ impl Client {
             .as_str(),
         );
 
+        // Establish QUIC connection
         let conn = endpoint.connect(*remote_addr, domain)?.await?;
+        // Open bidirectional stream for login
         let (mut quic_send, mut quic_recv) = conn
             .open_bi()
             .await
@@ -429,18 +665,12 @@ impl Client {
 
         self.set_and_post_tunnel_state(ClientState::Connected);
 
-        self.post_tunnel_log(
-            format!(
-                "{index}:{} logging in...",
-                login_info.format_with_remote_addr(remote_addr)
-            )
-            .as_str(),
-        );
-
+        // Send login request and wait for response
         let login_msg = TunnelMessage::ReqLogin(login_info.clone());
         TunnelMessage::send(&mut quic_send, &login_msg).await?;
 
         let resp = TunnelMessage::recv(&mut quic_recv).await?;
+        // Handle login response
         if let TunnelMessage::RespFailure(msg) = resp {
             bail!(
                 "{index}:{} failed to login: {msg}",
@@ -464,6 +694,14 @@ impl Client {
         Ok(conn)
     }
 
+    async fn get_or_create_tcp_server(&mut self, addr: SocketAddr) -> Result<TcpServer> {
+        let existing_server = self.with_state(|state| state.tcp_servers.get(&addr).cloned());
+        match existing_server {
+            Some(server) => Ok(server),
+            None => self.start_tcp_server(addr).await,
+        }
+    }
+
     async fn serve_outbound_tcp(
         &mut self,
         index: usize,
@@ -471,16 +709,7 @@ impl Client {
         local_server_addr: SocketAddr,
         pending_tcp_stream: &mut Option<TcpStream>,
     ) -> Result<()> {
-        let tcp_server = {
-            inner_state!(self, tcp_servers)
-                .get(&local_server_addr)
-                .cloned()
-        };
-
-        let mut tcp_server = match tcp_server {
-            Some(server) => server.clone(),
-            None => self.start_tcp_server(local_server_addr).await?,
-        };
+        let mut tcp_server = self.get_or_create_tcp_server(local_server_addr).await?;
 
         self.post_tunnel_log(
             format!(
@@ -505,22 +734,21 @@ impl Client {
         Ok(())
     }
 
+    async fn get_or_create_udp_server(&mut self, addr: SocketAddr) -> Result<UdpServer> {
+        let existing_server = self.with_state(|state| state.udp_servers.get(&addr).cloned());
+        match existing_server {
+            Some(server) => Ok(server),
+            None => self.start_udp_server(addr).await,
+        }
+    }
+
     async fn serve_outbound_udp(
         &mut self,
         index: usize,
         conn: Connection,
         local_server_addr: SocketAddr,
     ) -> Result<()> {
-        let udp_server = {
-            inner_state!(self, udp_servers)
-                .get(&local_server_addr)
-                .cloned()
-        };
-
-        let udp_server = match udp_server {
-            Some(server) => server.clone(),
-            None => self.start_udp_server(local_server_addr).await?,
-        };
+        let udp_server = self.get_or_create_udp_server(local_server_addr).await?;
 
         self.post_tunnel_log(
             format!(
@@ -585,9 +813,11 @@ impl Client {
         state == ClientState::Stopping || state == ClientState::Terminated
     }
 
+    // Background task for reporting traffic statistics
     fn report_traffic_data_in_background(&self) {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
+            // Create 30-second interval timer
             let mut interval =
                 tokio::time::interval(Duration::from_secs(POST_TRAFFIC_DATA_INTERVAL_SECS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -595,6 +825,7 @@ impl Client {
             loop {
                 interval.tick().await;
 
+                // Collect traffic statistics from all connections
                 let mut rx_bytes = 0;
                 let mut tx_bytes = 0;
                 let mut rx_dgrams = 0;
@@ -611,6 +842,7 @@ impl Client {
                     }
                 }
 
+                // Add accumulated traffic data
                 {
                     let total_traffic_data = &&state.lock().unwrap().total_traffic_data;
                     rx_bytes += total_traffic_data.rx_bytes;
@@ -619,6 +851,7 @@ impl Client {
                     tx_dgrams += total_traffic_data.tx_dgrams;
                 }
 
+                // Report traffic statistics
                 let state = state.lock().unwrap();
                 let client_state = state.client_state.clone();
                 let data = TunnelTraffic {
@@ -634,6 +867,7 @@ impl Client {
                     Box::new(data),
                 ));
 
+                // Exit if client is stopping
                 if client_state == ClientState::Stopping || client_state == ClientState::Terminated
                 {
                     break;
@@ -643,50 +877,53 @@ impl Client {
     }
 
     fn get_crypto_provider(&self, cipher: &SupportedCipherSuite) -> Arc<CryptoProvider> {
-        let default_provider = rustls::crypto::ring::default_provider();
+        let base_provider = rustls::crypto::ring::default_provider();
         let mut cipher_suites = vec![*cipher];
         // Quinn assumes that the cipher suites contain this one
         cipher_suites.push(cipher_suite::TLS13_AES_128_GCM_SHA256);
-        Arc::new(rustls::crypto::CryptoProvider {
+        Arc::new(CryptoProvider {
             cipher_suites,
-            ..default_provider
+            ..base_provider
         })
     }
 
     fn create_client_config_builder(
         &self,
         cipher: &SupportedCipherSuite,
-    ) -> std::result::Result<
-        rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
-        rustls::Error,
-    > {
+    ) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>, rustls::Error>
+    {
         let cfg_builder =
             rustls::ClientConfig::builder_with_provider(self.get_crypto_provider(cipher))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .unwrap();
+                .with_protocol_versions(&[&rustls::version::TLS13])?;
         Ok(cfg_builder)
     }
 
+    fn extract_domain_or_ip(&self) -> String {
+        match self.config.server_addr.rfind(':') {
+            Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
+            None => self.config.server_addr.to_string(),
+        }
+    }
+
+    // Parse and create TLS client configuration based on certificate settings
     fn parse_client_config_and_domain(&self) -> Result<(rustls::ClientConfig, String)> {
         let cipher = *SelectedCipherSuite::from_str(&self.config.cipher).map_err(|_| {
             rustls::Error::General(format!("invalid cipher: {}", self.config.cipher))
         })?;
 
+        // No certificate provided - use different verification strategies
         if self.config.cert_path.is_empty() {
+            // Use platform verifier for domain names
             if !Self::is_ip_addr(&self.config.server_addr) {
-                let domain = match self.config.server_addr.rfind(':') {
-                    Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
-                    None => self.config.server_addr.to_string(),
-                };
-
+                let domain = self.extract_domain_or_ip();
                 let client_config = self
                     .create_client_config_builder(&cipher)?
                     .with_platform_verifier()?
                     .with_no_client_auth();
-
                 return Ok((client_config, domain));
             }
 
+            // Use insecure verifier for IP addresses (testing only)
             let client_config = self
                 .create_client_config_builder(&cipher)?
                 .dangerous()
@@ -704,7 +941,7 @@ impl Client {
             return Ok((client_config, "localhost".to_string()));
         }
 
-        // when client config provides a certificate
+        // Certificate provided - load and use for verification
         let certs = pem_util::load_certificates_from_pem(self.config.cert_path.as_str())
             .context("failed to read from cert file")?;
         if certs.is_empty() {
@@ -713,8 +950,9 @@ impl Client {
                 self.config.cert_path
             );
         }
+
+        // Add all certificates to root certificate store
         let mut roots = RootCertStore::empty();
-        // save all certificates in the certificate chain to the trust list
         for cert in &certs {
             roots.add(cert.clone()).context(format!(
                 "failed to add certificate from file: {}",
@@ -723,10 +961,7 @@ impl Client {
         }
 
         // for self-signed certificates, generating IP-based TLS certificates is not difficult
-        let domain_or_ip = match self.config.server_addr.rfind(':') {
-            Some(colon_index) => self.config.server_addr[0..colon_index].to_string(),
-            None => self.config.server_addr.to_string(),
-        };
+        let domain_or_ip = self.extract_domain_or_ip();
 
         Ok((
             self.create_client_config_builder(&cipher)?
@@ -737,21 +972,23 @@ impl Client {
     }
 
     pub fn get_state(&self) -> ClientState {
-        inner_state!(self, client_state).clone()
+        self.get_client_state()
     }
 
     fn is_ip_addr(addr: &str) -> bool {
         addr.parse::<SocketAddr>().is_ok()
     }
 
+    // Resolve server address using multiple DNS strategies
     async fn parse_server_addr(&self) -> Result<SocketAddr> {
         let addr = self.config.server_addr.as_str();
+        // Try parsing as direct socket address first
         let sock_addr: Result<SocketAddr> = addr.parse().context("error will be ignored");
-
         if sock_addr.is_ok() {
             return sock_addr;
         }
 
+        // Extract domain and port from address string
         let mut domain = addr;
         let mut port = DEFAULT_SERVER_PORT;
         let pos = addr.rfind(':');
@@ -762,16 +999,19 @@ impl Client {
             domain = &addr[..pos];
         }
 
+        // Try DNS-over-TLS servers first
         for dot in &self.config.dot_servers {
             if let Ok(ip) = Self::lookup_server_ip(domain, dot, vec![]).await {
                 return Ok(SocketAddr::new(ip, port));
             }
         }
 
+        // Try configured DNS servers
         if let Ok(ip) = Self::lookup_server_ip(domain, "", self.config.dns_servers.clone()).await {
             return Ok(SocketAddr::new(ip, port));
         }
 
+        // Fall back to system DNS
         if let Ok(ip) = Self::lookup_server_ip(domain, "", vec![]).await {
             return Ok(SocketAddr::new(ip, port));
         }
@@ -825,21 +1065,26 @@ impl Client {
     }
 
     pub fn set_on_info_listener(&self, callback: impl FnMut(&str) + 'static + Send + Sync) {
-        inner_state!(self, tunnel_info_bridge).set_listener(callback);
+        self.with_state(|state| {
+            state.tunnel_info_bridge.set_listener(callback);
+        });
     }
 
     pub fn has_on_info_listener(&self) -> bool {
-        inner_state!(self, tunnel_info_bridge).has_listener()
+        self.with_state(|state| state.tunnel_info_bridge.has_listener())
     }
 
     pub fn set_enable_on_info_report(&self, enable: bool) {
         info!("set_enable_on_info_report, enable:{enable}");
-        inner_state!(self, on_info_report_enabled) = enable;
+        self.with_state(|state| {
+            state.on_info_report_enabled = enable;
+        });
     }
 }
 
+// Insecure certificate verifier for testing purposes
 #[derive(Debug)]
-struct InsecureCertVerifier(Arc<rustls::crypto::CryptoProvider>);
+struct InsecureCertVerifier(Arc<CryptoProvider>);
 
 impl InsecureCertVerifier {
     pub fn new(crypto: Arc<CryptoProvider>) -> Self {
@@ -848,6 +1093,26 @@ impl InsecureCertVerifier {
 }
 
 impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
+    // Always accept any certificate (DANGEROUS - testing only)
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
+        static ONCE: Once = Once::new();
+        // Show warning only once
+        ONCE.call_once(|| {
+            warn!("======================================= WARNING ======================================");
+            warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
+            warn!("Provide the self-signed certificate for verification or connect with a domain name");
+            warn!("======================= Be cautious, this is for TEST only!!! ========================");
+        });
+        Ok(ServerCertVerified::assertion())
+    }
+
     fn verify_tls12_signature(
         &self,
         message: &[u8],
@@ -880,23 +1145,5 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
-    }
-
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            warn!("======================================= WARNING ======================================");
-            warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
-            warn!("Provide the self-signed certificate for verification or connect with a domain name");
-            warn!("======================= Be cautious, this is for TEST only!!! ========================");
-        });
-        Ok(ServerCertVerified::assertion())
     }
 }
