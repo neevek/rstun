@@ -116,12 +116,14 @@ impl UdpTunnel {
                         unsafe {
                             payload.set_len(packet_len as usize);
                         }
+                        info!(">>>>>>> haha 2 recv from server udp:{packet_len}");
                         let packet = UdpPacket {
                             payload,
                             local_addr,
                             peer_addr: None,
                         };
                         let _ = udp_sender.send(UdpMessage::Packet(packet)).await;
+                        info!(">>>>>>> haha 2 sent to client udp:{packet_len}");
                     }
                     Ok(Err(e)) => {
                         warn!("failed to read for udp, err: {e}");
@@ -208,6 +210,7 @@ impl UdpTunnel {
                 };
 
                 let packet_len = TunnelMessage::recv_raw(&mut quic_recv, &mut buf).await?;
+                debug!(">>>>>>> haha 1 recv from downstream udp:{packet_len}");
                 Ok((peer_addr, packet_len))
             })
             .await
@@ -246,6 +249,8 @@ impl UdpTunnel {
                         .send(&buf[..packet_len as usize])
                         .await
                         .context("failed to send datagram through udp_socket")?;
+
+                    info!(">>>>>>> haha 2 sent to upstream udp:{packet_len}");
                 }
                 Ok(Err(e)) => {
                     warn!("failed to read from udp packet from tunnel, err: {e}");
@@ -314,10 +319,12 @@ impl UdpTunnel {
                     ) => {
                         match result {
                             Ok(Ok(len)) => {
+                                info!(">>>>>>> haha 2 recv from upstream udp:{len}");
                                 let mut quic_send = quic_send.lock().await;
                                 TunnelMessage::send_raw(&mut quic_send, &buf[..len])
                                     .await
                                     .ok();
+                                debug!(">>>>>>> haha 2 sent to downstream udp:{len}");
                             }
                             Ok(Err(e)) => {
                                 warn!("failed to receive datagrams from upstream, err: {e:?}");
