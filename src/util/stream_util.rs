@@ -5,10 +5,9 @@ use log::debug;
 use quinn::{RecvStream, SendStream};
 use std::fmt::Display;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::sync::oneshot;
 use tokio::time::error::Elapsed;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -53,15 +52,14 @@ impl StreamUtil {
 
         debug!("[{tag}] START {index:<3} →  {peer_addr:<20}");
 
-        let loop_count = Arc::new(AtomicI32::new(0));
-        let loop_count_clone = loop_count.clone();
+        let (quic_to_stream_tx, quic_to_stream_rx) = oneshot::channel::<()>();
+        let (stream_to_quic_tx, stream_to_quic_rx) = oneshot::channel::<()>();
         const BUFFER_SIZE: usize = 8192;
 
         tokio::spawn(async move {
             let mut transfer_bytes = 0u64;
             let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
             loop {
-                let c_start = loop_count.load(Ordering::Relaxed);
                 let result = Self::quic_to_stream(
                     &mut quic_recv,
                     &mut stream_write,
@@ -70,20 +68,23 @@ impl StreamUtil {
                     stream_timeout_ms,
                 )
                 .await;
-                let c_end = loop_count.fetch_add(1, Ordering::Relaxed);
 
                 match result {
                     Err(TransferError::TimeoutError) => {
-                        if c_start == c_end {
-                            log::warn!("quic to tcp timeout");
-                            break;
+                        let _ = quic_to_stream_tx.send(());
+                        match stream_to_quic_rx.await {
+                            _ => {
+                                // either the sender is dropped or the task times out
+                                break;
+                            }
                         }
                     }
                     Ok(0) | Err(_) => {
+                        let _ = quic_to_stream_tx.send(());
                         break;
                     }
                     _ => {
-                        // ok
+                        // ok, continue
                     }
                 }
             }
@@ -95,7 +96,6 @@ impl StreamUtil {
             let mut transfer_bytes = 0u64;
             let mut buffer = BUFFER_POOL.alloc_and_fill(BUFFER_SIZE);
             loop {
-                let c_start = loop_count_clone.load(Ordering::Relaxed);
                 let result = Self::stream_to_quic(
                     &mut stream_read,
                     &mut quic_send,
@@ -104,20 +104,23 @@ impl StreamUtil {
                     stream_timeout_ms,
                 )
                 .await;
-                let c_end = loop_count_clone.fetch_add(1, Ordering::Relaxed);
 
                 match result {
                     Err(TransferError::TimeoutError) => {
-                        if c_start == c_end {
-                            log::warn!("tcp to quic timeout");
-                            break;
+                        let _ = stream_to_quic_tx.send(());
+                        match quic_to_stream_rx.await {
+                            _ => {
+                                // either the sender is dropped or the task times out
+                                break;
+                            }
                         }
                     }
                     Ok(0) | Err(_) => {
+                        let _ = stream_to_quic_tx.send(());
                         break;
                     }
                     _ => {
-                        // ok
+                        // ok, continue
                     }
                 }
             }
