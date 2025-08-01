@@ -23,6 +23,7 @@ fn main() {
         args.quic_timeout_ms,
         args.tcp_timeout_ms,
         args.udp_timeout_ms,
+        args.hop_interval_ms,
     )
     .map_err(|e| {
         error!("{e}");
@@ -93,6 +94,9 @@ struct RstuncArgs {
     /// UDP idle timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     udp_timeout_ms: u64,
+
+    #[arg(long, default_value_t = 0)]
+    hop_interval_ms: u64,
 
     /// Comma-separated DoT servers (domains) for DNS resolution, e.g. "dns.google,one.one.one.one". Takes precedence over --dns if set.
     #[arg(long, verbatim_doc_comment, default_value = "")]
