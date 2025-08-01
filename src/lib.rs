@@ -12,6 +12,7 @@ use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
 use lazy_static::lazy_static;
+use log::warn;
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;
@@ -204,6 +205,7 @@ pub struct ClientConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
+    pub hop_interval_ms: u64,
     pub tunnels: Vec<TunnelConfig>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
@@ -246,6 +248,7 @@ impl ClientConfig {
         mut quic_timeout_ms: u64,
         mut tcp_timeout_ms: u64,
         mut udp_timeout_ms: u64,
+        hop_interval_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mappings.is_empty() && udp_addr_mappings.is_empty() {
             log_and_bail!("must specify either --tcp-mappings or --udp-mappings, or both");
@@ -279,6 +282,17 @@ impl ClientConfig {
             quic_timeout_ms,
             tcp_timeout_ms,
             udp_timeout_ms,
+            hop_interval_ms: if hop_interval_ms == 0 {
+                0
+            } else {
+                if hop_interval_ms < 5000 {
+                    warn!("Endpoint migration interval: {} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion.",
+                        hop_interval_ms
+                    );
+                }
+                // To prevent misoperation, connection migration intervals should not be set below 5000 ms to avoid network failures caused by NAT resource exhaustion
+                5000.max(hop_interval_ms)
+            },
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
             ..ClientConfig::default()
