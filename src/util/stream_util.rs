@@ -75,12 +75,19 @@ impl StreamUtil {
                         match stream_to_quic_rx.await {
                             _ => {
                                 // either the sender is dropped or the task times out
+                                debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, timeout");
                                 break;
                             }
                         }
                     }
-                    Ok(0) | Err(_) => {
+                    Ok(0) => {
                         let _ = quic_to_stream_tx.send(());
+                        debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, zero recv");
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = quic_to_stream_tx.send(());
+                        debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, with error:{e}");
                         break;
                     }
                     _ => {
@@ -110,13 +117,19 @@ impl StreamUtil {
                         let _ = stream_to_quic_tx.send(());
                         match quic_to_stream_rx.await {
                             _ => {
-                                // either the sender is dropped or the task times out
+                                debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, timeout");
                                 break;
                             }
                         }
                     }
-                    Ok(0) | Err(_) => {
+                    Ok(0) => {
                         let _ = stream_to_quic_tx.send(());
+                        debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, zero recv");
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = stream_to_quic_tx.send(());
+                        debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes, with error:{e}");
                         break;
                     }
                     _ => {
