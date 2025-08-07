@@ -23,7 +23,6 @@ use rustls::{
 use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     fmt::Display,
     net::{IpAddr, SocketAddr},
@@ -66,7 +65,7 @@ impl Display for ClientState {
 struct State {
     tcp_servers: HashMap<SocketAddr, TcpServer>,
     udp_servers: HashMap<SocketAddr, UdpServer>,
-    endpoints: HashMap<SocketAddr, Endpoint>,
+    endpoint: Option<Endpoint>,
     connections: HashMap<SocketAddr, Connection>,
     client_state: ClientState,
     total_traffic_data: TunnelTraffic,
@@ -79,7 +78,7 @@ impl State {
         Self {
             tcp_servers: HashMap::new(),
             udp_servers: HashMap::new(),
-            endpoints: HashMap::new(),
+            endpoint: None,
             connections: HashMap::new(),
             client_state: ClientState::Idle,
             total_traffic_data: TunnelTraffic::default(),
@@ -209,13 +208,9 @@ impl Client {
             loop {
                 interval.tick().await;
 
-                let endpoints = {
-                    let guard = state.lock().unwrap();
-                    guard.endpoints.values().cloned().collect::<Vec<_>>()
-                };
-
-                for endpoint in endpoints {
-                    let _ = Self::migrate_endpoint(&endpoint).await;
+                let endpoint = { state.lock().unwrap().endpoint.clone() };
+                if let Some(endpoint) = endpoint {
+                    Self::migrate_endpoint(&endpoint).await.ok();
                 }
             }
         });
@@ -223,14 +218,10 @@ impl Client {
 
     async fn migrate_endpoint(endpoint: &Endpoint) -> Result<()> {
         let current_addr = endpoint.local_addr()?;
-        let new_addr = if current_addr.is_ipv4() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)
-        } else {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0)
-        };
+        let new_addr = socket_addr_with_unspecified_ip_port(current_addr.is_ipv6());
         let socket = std::net::UdpSocket::bind(new_addr)?;
         debug!(
-            "Endpoint migration: from {} to {}",
+            "endpoint migration: from {} to {}",
             current_addr,
             socket.local_addr()?
         );
@@ -358,8 +349,16 @@ impl Client {
         loop {
             let connect = || async {
                 let login_cfg = self.prepare_login_config().await?;
-                let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
-                endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
+                let endpoint = { self.inner_state.lock().unwrap().endpoint.clone() };
+                let endpoint = if let Some(endpoint) = endpoint {
+                    Self::migrate_endpoint(&endpoint).await?;
+                    endpoint
+                } else {
+                    let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
+                    endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
+                    inner_state!(self, endpoint) = Some(endpoint.clone());
+                    endpoint
+                };
 
                 let conn = self
                     .login(
@@ -371,7 +370,7 @@ impl Client {
                     )
                     .await?;
 
-                Ok((conn, endpoint))
+                Ok(conn)
             };
             let result = connect
                 .retry(
@@ -391,22 +390,20 @@ impl Client {
             }
 
             match result {
-                Ok((conn, endpoint)) => match &tunnel {
+                Ok(conn) => match &tunnel {
                     Tunnel::NetworkBased(tunnel_config) => {
                         let local_server_addr = tunnel_config.local_server_addr.unwrap();
                         inner_state!(self, connections).insert(local_server_addr, conn.clone());
-                        inner_state!(self, endpoints).insert(local_server_addr, endpoint);
 
                         self.handle_network_based_tunnel(
                             index,
-                            conn,
+                            conn.clone(),
                             tunnel_config,
                             &mut pending_network_based_stream,
                         )
                         .await;
 
                         inner_state!(self, connections).remove(&local_server_addr);
-                        inner_state!(self, endpoints).remove(&local_server_addr);
                     }
                     Tunnel::ChannelBased(upstream_type) => match upstream_type {
                         UpstreamType::Tcp => {
@@ -572,7 +569,13 @@ impl Client {
             .as_str(),
         );
 
-        let conn = endpoint.connect(*remote_addr, domain)?.await?;
+        let conn = endpoint.connect(*remote_addr, domain)?.await;
+        if let Err(e) = conn {
+            bail!("!!! connect error: {e}");
+        }
+        let conn = conn.unwrap();
+
+        // let conn = endpoint.connect(*remote_addr, domain)?.await?;
         let (mut quic_send, mut quic_recv) = conn
             .open_bi()
             .await
