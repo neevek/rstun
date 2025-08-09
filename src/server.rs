@@ -433,7 +433,7 @@ impl Server {
             });
 
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-            let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+            let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
             let cert = CertificateDer::from(cert.cert);
             (vec![cert], PrivateKeyDer::Pkcs8(key))
         } else {
