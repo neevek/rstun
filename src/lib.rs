@@ -248,7 +248,7 @@ impl ClientConfig {
         mut quic_timeout_ms: u64,
         mut tcp_timeout_ms: u64,
         mut udp_timeout_ms: u64,
-        hop_interval_ms: u64,
+        mut hop_interval_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mappings.is_empty() && udp_addr_mappings.is_empty() {
             log_and_bail!("must specify either --tcp-mappings or --udp-mappings, or both");
@@ -262,6 +262,11 @@ impl ClientConfig {
         }
         if udp_timeout_ms == 0 {
             udp_timeout_ms = 5000;
+        }
+        if hop_interval_ms != 0 && hop_interval_ms < 5000 {
+            warn!("Endpoint migration interval: {hop_interval_ms} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion."
+                    );
+            hop_interval_ms = 5000;
         }
 
         let mut config = ClientConfig {
@@ -282,17 +287,7 @@ impl ClientConfig {
             quic_timeout_ms,
             tcp_timeout_ms,
             udp_timeout_ms,
-            hop_interval_ms: if hop_interval_ms == 0 {
-                0
-            } else {
-                if hop_interval_ms < 5000 {
-                    warn!("Endpoint migration interval: {} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion.",
-                        hop_interval_ms
-                    );
-                }
-                // To prevent misoperation, connection migration intervals should not be set below 5000 ms to avoid network failures caused by NAT resource exhaustion
-                5000.max(hop_interval_ms)
-            },
+            hop_interval_ms,
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
             ..ClientConfig::default()
@@ -447,6 +442,7 @@ pub mod android {
         jworkers: jint,
         jwaitBeforeRetryMs: jint,
         jquicTimeoutMs: jint,
+        jhopTimeoutMs: jint,
     ) -> jlong {
         let server_addr = convert_jstring(&mut env, jserverAddr);
         let tcp_mappings = convert_jstring(&mut env, jtcpMappings);
@@ -471,6 +467,7 @@ pub mod android {
             jquicTimeoutMs as u64,
             0, // tcp_timeout_ms - use default
             0, // udp_timeout_ms - use default
+            jhopTimeoutMs as u64,
         ) {
             Ok(client_config) => {
                 let client = Client::new(client_config);

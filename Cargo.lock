@@ -1148,13 +1148,12 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "626214629cda6781b6dc1d316ba307189c85ba657213ce642d9c77670f8202c8"
+source = "git+https://github.com/neevek/quinn?branch=fix-rebind#4bfeba1740df48b460ce36ac35a8a2d5f0334374"
 dependencies = [
  "bytes",
  "cfg_aliases",
  "pin-project-lite",
- "quinn-proto",
+ "quinn-proto 0.11.12 (git+https://github.com/neevek/quinn?branch=fix-rebind)",
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.27",
@@ -1180,6 +1179,27 @@ dependencies = [
  "rustc-hash",
  "rustls 0.23.27",
  "rustls-pki-types",
+ "slab",
+ "thiserror 2.0.12",
+ "tinyvec",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
+name = "quinn-proto"
+version = "0.11.12"
+source = "git+https://github.com/neevek/quinn?branch=fix-rebind#4bfeba1740df48b460ce36ac35a8a2d5f0334374"
+dependencies = [
+ "bytes",
+ "fastbloom",
+ "getrandom 0.3.3",
+ "lru-slab",
+ "rand 0.9.1",
+ "ring",
+ "rustc-hash",
+ "rustls 0.23.27",
+ "rustls-pki-types",
  "rustls-platform-verifier 0.5.3",
  "slab",
  "thiserror 2.0.12",
@@ -1191,8 +1211,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee4e529991f949c5e25755532370b8af5d114acae52326361d68d47af64aa842"
+source = "git+https://github.com/neevek/quinn?branch=fix-rebind#4bfeba1740df48b460ce36ac35a8a2d5f0334374"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -1388,7 +1407,7 @@ dependencies = [
  "pin-utils",
  "pretty_env_logger",
  "quinn",
- "quinn-proto",
+ "quinn-proto 0.11.12 (registry+https://github.com/rust-lang/crates.io-index)",
  "rcgen",
  "ring",
  "rs-utilities",
@@ -2183,7 +2202,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

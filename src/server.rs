@@ -11,8 +11,9 @@ use crate::{
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use quinn::crypto::rustls::QuicServerConfig;
+use quinn::IdleTimeout;
+use quinn::VarInt;
 use quinn::{congestion, Connection, Endpoint, SendStream, TransportConfig};
-use quinn_proto::{IdleTimeout, VarInt};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
@@ -127,8 +128,8 @@ impl Server {
             .unwrap();
 
         let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
+        transport_cfg.stream_receive_window(VarInt::from_u32(1024 * 1024));
+        transport_cfg.receive_window(VarInt::from_u32(1024 * 1024 * 2));
         transport_cfg.send_window(1024 * 1024 * 2);
         transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         if config.quic_timeout_ms > 0 {
