@@ -17,8 +17,10 @@ log = "0.4"
 chrono = "0.4"
 anyhow = "1.0"
 # quinn = "0.11.8"
-quinn = { git = "https://github.com/neevek/quinn", branch = "fix-rebind" } # based on 0.11.8
-quinn-proto = "0.11.12"
+# quinn = { git = "https://github.com/neevek/quinn", branch = "fix-rebind" } # based on 0.11.8
+# quinn-proto = "0.11.12"
+quinn = { path = "../quinn/quinn" }
+quinn-proto = { path = "../quinn/quinn-proto" }
 futures-util = "0.3"
 bincode = { version = "2", features = ["serde"] }
 pin-utils = "0.1.0"
