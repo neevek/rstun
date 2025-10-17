@@ -41,6 +41,10 @@ impl TcpServer {
             loop {
                 match tcp_listener.accept().await {
                     Ok((stream, addr)) => {
+                        if let Err(e) = stream.set_nodelay(true) {
+                            error!("failed to set nodelay for {addr}, err: {e}");
+                        }
+
                         {
                             let (terminated, active) = {
                                 let state = state.lock().unwrap();

@@ -97,12 +97,18 @@ impl TcpTunnel {
                     )
                     .await
                     {
-                        Ok(Ok(request)) => StreamUtil::start_flowing(
-                            "OUT",
-                            request,
-                            (quic_send, quic_recv),
-                            stream_timeout_ms,
-                        ),
+                        Ok(Ok(request)) => {
+                            if let Err(e) = request.set_nodelay(true) {
+                                error!("failed to set_nodelay for {dst_addr}, err: {e}");
+                            }
+
+                            StreamUtil::start_flowing(
+                                "OUT",
+                                request,
+                                (quic_send, quic_recv),
+                                stream_timeout_ms,
+                            )
+                        }
                         Ok(Err(e)) => error!("failed to connect to {dst_addr}, err: {e}"),
                         Err(_) => error!("timeout connecting to {dst_addr}"),
                     }
