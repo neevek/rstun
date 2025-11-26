@@ -1,0 +1,68 @@
+# MQTT 心跳监控配置文件
+
+# 全局默认配置
+[default]
+keepalive = "5s"           # 默认心跳间隔 (支持: s, m, h)
+clean_session = true       # 默认 Clean Session
+# username = "default_user" # 全局默认用户名（可选）
+# password = "default_pass" # 全局默认密码（可选）
+
+# 统计报告间隔
+stats_interval = "30s"      # 每30秒输出一次统计报告
+
+# ═══════════════════════════════════════════════════════════════
+# Broker 列表
+# ═══════════════════════════════════════════════════════════════
+
+# 本地 Broker（无认证）
+#[[brokers]]
+#host = "localhost:1883"
+#name = "Local Dev Broker"
+#keepalive = "30s"
+
+# Mosquitto 测试服务器
+[[brokers]]
+host = "test.mosquitto.org:1883"
+name = "Mosquitto Test"
+keepalive = "30s"
+
+# Mosquitto 测试服务器
+[[brokers]]
+host = "broker.hivemq.com:1883"
+name = "Hivemq Test"
+keepalive = "30s"
+
+# EMQX CN测试服务器
+[[brokers]]
+host = "broker-cn.emqx.io:1883"
+name = "EMQX China Test"
+keepalive = "30s"
+
+[[brokers]]
+host = "broker.mqttdashboard.com"
+name = "Mqttdashboard Test"
+keepalive = "30s"
+
+# EMQX 公共测试服务器
+[[brokers]]
+host = "broker.emqx.io:1883"
+name = "EMQX Public"
+keepalive = "30s"
+
+# ═══════════════════════════════════════════════════════════════
+# 配置说明
+# ═══════════════════════════════════════════════════════════════
+#
+# 每个 broker 支持的参数：
+# - host (必填): Broker 地址，格式 "host:port"
+# - name (可选): 显示名称，便于识别
+# - keepalive (可选): 心跳间隔，不设置则使用 default.keepalive
+# - username (可选): MQTT 用户名，用于认证
+# - password (可选): MQTT 密码，用于认证
+# - clean_session (可选): 是否使用 Clean Session，默认 true
+#
+# 时间格式支持：
+# - "5s" = 5 秒
+# - "1m" = 1 分钟
+# - "1h" = 1 小时
+# - "30s" = 30 秒
