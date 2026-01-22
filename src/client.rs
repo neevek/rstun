@@ -451,7 +451,6 @@ impl Client {
         let login_cfg = self.prepare_login_config().await?;
         let endpoint = { self.inner_state.lock().unwrap().endpoint.clone() };
         let endpoint = if let Some(endpoint) = endpoint {
-            Self::migrate_endpoint(&endpoint).await?;
             endpoint
         } else {
             let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
