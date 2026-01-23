@@ -1,6 +1,6 @@
 use crate::tcp::{StreamMessage, StreamReceiver, StreamRequest, StreamSender};
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,6 +41,10 @@ impl TcpServer {
             loop {
                 match tcp_listener.accept().await {
                     Ok((stream, addr)) => {
+                        if let Err(e) = stream.set_nodelay(true) {
+                            warn!("could not set TCP_NODELAY on socket {addr}: {e} — this may increase latency");
+                        }
+
                         {
                             let (terminated, active) = {
                                 let state = state.lock().unwrap();
