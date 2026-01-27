@@ -18,6 +18,12 @@ use tokio::{net::UdpSocket, sync::Mutex};
 
 type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct UdpStreamKey {
+    local_addr: SocketAddr,
+    peer_addr: Option<SocketAddr>,
+}
+
 pub struct UdpTunnel;
 
 impl UdpTunnel {
@@ -30,10 +36,14 @@ impl UdpTunnel {
         debug!("start serving udp via: {}", conn.remote_address());
         let stream_map = Arc::new(DashMap::new());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
+            let stream_key = UdpStreamKey {
+                local_addr: packet.local_addr,
+                peer_addr: packet.peer_addr,
+            };
             let quic_send = match UdpTunnel::open_stream(
                 conn.clone(),
                 udp_sender.clone(),
-                packet.local_addr,
+                stream_key,
                 stream_map.clone(),
                 udp_timeout_ms,
             )
@@ -79,11 +89,11 @@ impl UdpTunnel {
     async fn open_stream(
         conn: Connection,
         udp_sender: Sender<UdpMessage>,
-        local_addr: SocketAddr,
-        stream_map: Arc<DashMap<SocketAddr, TSafe<SendStream>>>,
+        stream_key: UdpStreamKey,
+        stream_map: Arc<DashMap<UdpStreamKey, TSafe<SendStream>>>,
         udp_timeout_ms: u64,
     ) -> Result<TSafe<SendStream>> {
-        if let Some(s) = stream_map.get(&local_addr) {
+        if let Some(s) = stream_map.get(&stream_key) {
             return Ok((*s).clone());
         }
 
@@ -91,13 +101,14 @@ impl UdpTunnel {
             conn.open_bi().await.context("open_bi failed for udp out")?;
 
         let quic_send = Arc::new(Mutex::new(quic_send));
-        stream_map.insert(local_addr, quic_send.clone());
+        stream_map.insert(stream_key, quic_send.clone());
 
         let stream_map = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream: {local_addr}, streams: {}",
-                stream_map.len()
+                "start udp stream: {:?}, streams: {}",
+                stream_key,
+                stream_map.len(),
             );
             loop {
                 let mut payload = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
@@ -113,8 +124,8 @@ impl UdpTunnel {
                         }
                         let packet = UdpPacket {
                             payload,
-                            local_addr,
-                            peer_addr: None,
+                            local_addr: stream_key.local_addr,
+                            peer_addr: stream_key.peer_addr,
                         };
                         let _ = udp_sender.send(UdpMessage::Packet(packet)).await;
                     }
@@ -129,10 +140,11 @@ impl UdpTunnel {
                 }
             }
 
-            stream_map.remove(&local_addr);
+            stream_map.remove(&stream_key);
             debug!(
-                "dropped udp stream: {local_addr}, streams: {}",
-                stream_map.len()
+                "dropped udp stream: {:?}, streams: {}",
+                stream_key,
+                stream_map.len(),
             );
         });
 
