@@ -29,7 +29,6 @@ use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
 pub use udp::{UdpMessage, UdpPacket, UdpReceiver, UdpSender};
 
-extern crate bincode;
 extern crate pretty_env_logger;
 
 pub const TUNNEL_MODE_IN: &str = "IN";

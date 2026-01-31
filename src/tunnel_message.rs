@@ -1,6 +1,6 @@
 use crate::{Tunnel, TunnelMode};
 use anyhow::Result;
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use bincode::config::{self, Configuration};
 use enum_as_inner::EnumAsInner;
 use quinn::{RecvStream, SendStream};
@@ -19,9 +19,9 @@ pub enum TunnelMessage {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoginInfo {
+pub struct LoginInfo {
     pub password: String,
-    pub tunnel: Tunnel,
+    pub(crate) tunnel: Tunnel,
 }
 
 impl LoginInfo {
@@ -100,7 +100,6 @@ impl TunnelMessage {
             .read_exact(&mut msg)
             .await
             .context("read message failed")?;
-
         let tun_msg = bincode::serde::decode_from_slice::<TunnelMessage, Configuration>(
             &msg,
             config::standard(),

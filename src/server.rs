@@ -161,84 +161,91 @@ impl Server {
             let state = self.inner_state.clone();
             let config = inner_state!(self, config).clone();
             tokio::spawn(async move {
-                let client_conn = client_conn.await?;
-                let tun_type = Self::authenticate_connection(&config, client_conn).await?;
+                let result = async {
+                    let client_conn = client_conn.await?;
+                    let tun_type = Self::authenticate_connection(&config, client_conn).await?;
 
-                match tun_type {
-                    TunnelType::TcpOut(info) => {
-                        TcpTunnel::start_accepting(
-                            &info.conn,
-                            Some(info.upstream_addr),
-                            config.tcp_timeout_ms,
-                        )
-                        .await;
+                    match tun_type {
+                        TunnelType::TcpOut(info) => {
+                            TcpTunnel::start_accepting(
+                                &info.conn,
+                                Some(info.upstream_addr),
+                                config.tcp_timeout_ms,
+                            )
+                            .await;
+                        }
+
+                        TunnelType::UdpOut(info) => {
+                            UdpTunnel::start_accepting(
+                                &info.conn,
+                                Some(info.upstream_addr),
+                                config.udp_timeout_ms,
+                            )
+                            .await
+                        }
+
+                        TunnelType::TcpIn(mut info) => {
+                            state
+                                .lock()
+                                .unwrap()
+                                .tcp_sessions
+                                .push(ConnectedTcpInSession {
+                                    conn: info.conn.clone(),
+                                    sender: info.tcp_server.clone_sender(),
+                                });
+
+                            let mut tcp_receiver = info.tcp_server.take_receiver();
+
+                            TcpTunnel::start_serving(
+                                false,
+                                &info.conn,
+                                &mut tcp_receiver,
+                                &mut None,
+                                config.tcp_timeout_ms,
+                            )
+                            .await;
+
+                            info.tcp_server.shutdown().await.ok();
+                        }
+
+                        TunnelType::UdpIn(mut info) => {
+                            state
+                                .lock()
+                                .unwrap()
+                                .udp_sessions
+                                .push(ConnectedUdpInSession {
+                                    conn: info.conn.clone(),
+                                    sender: info.udp_server.clone_sender(),
+                                });
+
+                            let mut udp_receiver = info.udp_server.take_receiver();
+                            let udp_sender = info.udp_server.clone_sender();
+
+                            UdpTunnel::start_serving(
+                                &info.conn,
+                                &udp_sender,
+                                &mut udp_receiver,
+                                config.udp_timeout_ms,
+                            )
+                            .await;
+
+                            info.udp_server.shutdown().await.ok();
+                        }
+                        TunnelType::DynamicUpstreamTcpOut(conn) => {
+                            TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;
+                        }
+                        TunnelType::DynamicUpstreamUdpOut(conn) => {
+                            UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms).await
+                        }
                     }
 
-                    TunnelType::UdpOut(info) => {
-                        UdpTunnel::start_accepting(
-                            &info.conn,
-                            Some(info.upstream_addr),
-                            config.udp_timeout_ms,
-                        )
-                        .await
-                    }
-
-                    TunnelType::TcpIn(mut info) => {
-                        state
-                            .lock()
-                            .unwrap()
-                            .tcp_sessions
-                            .push(ConnectedTcpInSession {
-                                conn: info.conn.clone(),
-                                sender: info.tcp_server.clone_sender(),
-                            });
-
-                        let mut tcp_receiver = info.tcp_server.take_receiver();
-
-                        TcpTunnel::start_serving(
-                            false,
-                            &info.conn,
-                            &mut tcp_receiver,
-                            &mut None,
-                            config.tcp_timeout_ms,
-                        )
-                        .await;
-
-                        info.tcp_server.shutdown().await.ok();
-                    }
-
-                    TunnelType::UdpIn(mut info) => {
-                        state
-                            .lock()
-                            .unwrap()
-                            .udp_sessions
-                            .push(ConnectedUdpInSession {
-                                conn: info.conn.clone(),
-                                sender: info.udp_server.clone_sender(),
-                            });
-
-                        let mut udp_receiver = info.udp_server.take_receiver();
-                        let udp_sender = info.udp_server.clone_sender();
-
-                        UdpTunnel::start_serving(
-                            &info.conn,
-                            &udp_sender,
-                            &mut udp_receiver,
-                            config.udp_timeout_ms,
-                        )
-                        .await;
-
-                        info.udp_server.shutdown().await.ok();
-                    }
-                    TunnelType::DynamicUpstreamTcpOut(conn) => {
-                        TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;
-                    }
-                    TunnelType::DynamicUpstreamUdpOut(conn) => {
-                        UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms).await
-                    }
+                    Ok::<(), anyhow::Error>(())
                 }
+                .await;
 
-                Ok::<(), anyhow::Error>(())
+                if let Err(err) = result {
+                    error!("connection handling failed: {err:?}");
+                }
             });
         }
         info!("quit!");

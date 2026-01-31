@@ -144,9 +144,9 @@ macro_rules! inner_state {
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
         INIT.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .unwrap();
+            if let Err(err) = rustls::crypto::ring::default_provider().install_default() {
+                warn!("failed to install rustls ring crypto provider: {err:?}");
+            }
         });
 
         Client {
