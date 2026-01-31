@@ -1,7 +1,7 @@
 use crate::tcp::StreamMessage;
 use crate::tcp::{AsyncStream, StreamReceiver, StreamRequest};
 use crate::util::stream_util::StreamUtil;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -97,12 +97,18 @@ impl TcpTunnel {
                     )
                     .await
                     {
-                        Ok(Ok(request)) => StreamUtil::start_flowing(
-                            "OUT",
-                            request,
-                            (quic_send, quic_recv),
-                            stream_timeout_ms,
-                        ),
+                        Ok(Ok(request)) => {
+                            if let Err(e) = request.set_nodelay(true) {
+                                warn!("could not set TCP_NODELAY on socket {dst_addr}: {e} — this may increase latency");
+                            }
+
+                            StreamUtil::start_flowing(
+                                "OUT",
+                                request,
+                                (quic_send, quic_recv),
+                                stream_timeout_ms,
+                            )
+                        }
                         Ok(Err(e)) => error!("failed to connect to {dst_addr}, err: {e}"),
                         Err(_) => error!("timeout connecting to {dst_addr}"),
                     }
