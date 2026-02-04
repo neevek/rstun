@@ -106,7 +106,8 @@ Options:
   -w, --workers <N>            Number of async worker threads [default: 0]
       --quic-timeout-ms <MS>   QUIC idle timeout (ms) [default: 40000]
       --tcp-timeout-ms <MS>    TCP idle timeout (ms) [default: 30000]
-      --udp-timeout-ms <MS>    UDP idle timeout (ms) [default: 30000]
+      --udp-timeout-ms <MS>    UDP idle timeout (ms) [default: 5000]
+      --heartbeat-timeout-ms <MS>  Heartbeat timeout (ms) [default: 15000]
   -l, --loglevel <LEVEL>       Log level [default: I] [T, D, I, W, E]
   -h, --help                   Print help
   -V, --version                Print version
@@ -129,6 +130,8 @@ Options:
       --quic-timeout-ms <MS>       QUIC idle timeout (ms) [default: 30000]
       --tcp-timeout-ms <MS>        TCP idle timeout (ms) [default: 30000]
       --udp-timeout-ms <MS>        UDP idle timeout (ms) [default: 5000]
+      --heartbeat-interval-ms <MS> Heartbeat interval (ms) [default: 5000]
+      --heartbeat-timeout-ms <MS>  Heartbeat timeout (ms) [default: 15000]
       --hop-interval-ms <MS> Interval in millseconds for connection migration to new random local UDP port (optional,default:0 means disabled)
       --dot <DOT>                  Comma-separated DoT servers for DNS resolution
       --dns <DNS>                  Comma-separated DNS servers for resolution

@@ -1,6 +1,7 @@
 use crate::tcp::StreamMessage;
 use crate::tcp::{AsyncStream, StreamReceiver, StreamRequest};
 use crate::util::stream_util::StreamUtil;
+use anyhow::Result;
 use log::{debug, error, info};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
@@ -16,7 +17,7 @@ impl TcpTunnel {
         stream_receiver: &mut StreamReceiver<S>,
         pending_request: &mut Option<StreamRequest<S>>,
         stream_timeout_ms: u64,
-    ) {
+    ) -> Result<()> {
         loop {
             let request = match pending_request.take() {
                 Some(request) => request,
@@ -51,13 +52,14 @@ impl TcpTunnel {
             }
         }
         // the tcp server will be reused when tunnel reconnects
+        Ok(())
     }
 
     pub async fn start_accepting(
         conn: &quinn::Connection,
         upstream_addr: Option<SocketAddr>,
         stream_timeout_ms: u64,
-    ) {
+    ) -> Result<()> {
         let remote_addr = &conn.remote_address();
         info!("start tcp streaming, {remote_addr} ↔  {upstream_addr:?}");
 
@@ -109,5 +111,7 @@ impl TcpTunnel {
                 }),
             };
         }
+
+        Ok(())
     }
 }

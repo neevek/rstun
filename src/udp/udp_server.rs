@@ -4,9 +4,11 @@ use anyhow::Result;
 use log::debug;
 use log::error;
 use log::info;
+use log::warn;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::channel;
@@ -25,6 +27,16 @@ struct State {
 }
 
 impl UdpServer {
+    fn lock_state(&self) -> MutexGuard<'_, State> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("udp server state lock poisoned, recovering");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub async fn bind_and_start(addr: SocketAddr) -> Result<Self> {
         let udp_socket = UdpSocket::bind(addr).await?;
         let addr = udp_socket.local_addr().unwrap();
@@ -48,7 +60,13 @@ impl UdpServer {
                         match result {
                             Ok((size, local_addr)) => {
                                 let active = {
-                                    state.clone().lock().unwrap().active
+                                    match state.lock() {
+                                        Ok(guard) => guard.active,
+                                        Err(poisoned) => {
+                                            warn!("udp server state lock poisoned in recv loop, recovering");
+                                            poisoned.into_inner().active
+                                        }
+                                    }
                                 };
                                 if !active {
                                     debug!("drop the packet ({size}) from addr: {local_addr}");
@@ -111,32 +129,60 @@ impl UdpServer {
     }
 
     pub fn addr(&self) -> SocketAddr {
-        self.0.lock().unwrap().addr
+        self.lock_state().addr
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
-        let udp_sender = self.0.lock().unwrap().in_udp_sender.clone();
+        let udp_sender = self.lock_state().in_udp_sender.clone();
         udp_sender.send(UdpMessage::Quit).await?;
         Ok(())
     }
 
     pub fn set_active(&mut self, active: bool) {
-        self.0.lock().unwrap().active = active
+        self.lock_state().active = active
     }
 
-    pub fn take_receiver(&mut self) -> UdpReceiver {
-        let mut state = self.0.lock().unwrap();
+    pub fn take_receiver(&mut self) -> Result<UdpReceiver> {
+        let mut state = self.lock_state();
         state.active = true;
-        state.udp_receiver.take().unwrap()
+        match state.udp_receiver.take() {
+            Some(receiver) => Ok(receiver),
+            None => {
+                state.active = false;
+                Err(anyhow::anyhow!("udp receiver already taken"))
+            }
+        }
     }
 
     pub fn put_receiver(&mut self, udp_receiver: UdpReceiver) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.lock_state();
         state.active = false;
         state.udp_receiver = Some(udp_receiver);
     }
 
     pub fn clone_sender(&self) -> UdpSender {
-        self.0.lock().unwrap().in_udp_sender.clone()
+        self.lock_state().in_udp_sender.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn take_receiver_is_exclusive_and_recoverable() {
+        let mut server = match UdpServer::bind_and_start("127.0.0.1:0".parse().unwrap()).await {
+            Ok(server) => server,
+            Err(e) => {
+                eprintln!("udp bind not permitted in test environment: {e}");
+                return;
+            }
+        };
+
+        let receiver = server.take_receiver().unwrap();
+        assert!(server.take_receiver().is_err());
+
+        server.put_receiver(receiver);
+        assert!(server.take_receiver().is_ok());
     }
 }

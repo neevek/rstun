@@ -1,5 +1,5 @@
-use crate::tcp::AsyncStream;
 use crate::BUFFER_POOL;
+use crate::tcp::AsyncStream;
 use anyhow::Result;
 use log::debug;
 use quinn::{RecvStream, SendStream};

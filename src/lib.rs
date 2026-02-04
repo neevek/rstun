@@ -1,4 +1,5 @@
 mod client;
+mod heartbeat;
 mod pem_util;
 mod server;
 mod tcp;
@@ -204,6 +205,8 @@ pub struct ClientConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
+    pub heartbeat_interval_ms: u64,
+    pub heartbeat_timeout_ms: u64,
     pub hop_interval_ms: u64,
     pub tunnels: Vec<TunnelConfig>,
     pub dot_servers: Vec<String>,
@@ -220,6 +223,7 @@ pub struct ServerConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
+    pub heartbeat_timeout_ms: u64,
 
     /// for TunnelOut only
     pub default_tcp_upstream: Option<SocketAddr>,
@@ -247,6 +251,8 @@ impl ClientConfig {
         mut quic_timeout_ms: u64,
         mut tcp_timeout_ms: u64,
         mut udp_timeout_ms: u64,
+        mut heartbeat_interval_ms: u64,
+        mut heartbeat_timeout_ms: u64,
         mut hop_interval_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_addr_mappings.is_empty() && udp_addr_mappings.is_empty() {
@@ -262,9 +268,24 @@ impl ClientConfig {
         if udp_timeout_ms == 0 {
             udp_timeout_ms = 5000;
         }
+        if heartbeat_interval_ms == 0 && heartbeat_timeout_ms == 0 {
+            heartbeat_interval_ms = 5000;
+            heartbeat_timeout_ms = 15000;
+        } else if heartbeat_interval_ms == 0 || heartbeat_timeout_ms == 0 {
+            warn!("heartbeat disabled because interval or timeout is 0");
+            heartbeat_interval_ms = 0;
+            heartbeat_timeout_ms = 0;
+        } else if heartbeat_timeout_ms < heartbeat_interval_ms {
+            warn!(
+                "heartbeat timeout: {heartbeat_timeout_ms} ms is lower than interval: {heartbeat_interval_ms} ms, forcing timeout to {} ms",
+                heartbeat_interval_ms.saturating_mul(2)
+            );
+            heartbeat_timeout_ms = heartbeat_interval_ms.saturating_mul(2);
+        }
         if hop_interval_ms != 0 && hop_interval_ms < 5000 {
-            warn!("Endpoint migration interval: {hop_interval_ms} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion."
-                    );
+            warn!(
+                "Endpoint migration interval: {hop_interval_ms} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion."
+            );
             hop_interval_ms = 5000;
         }
 
@@ -286,6 +307,8 @@ impl ClientConfig {
             quic_timeout_ms,
             tcp_timeout_ms,
             udp_timeout_ms,
+            heartbeat_interval_ms,
+            heartbeat_timeout_ms,
             hop_interval_ms,
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
@@ -379,7 +402,7 @@ pub mod android {
     use log::{error, info};
 
     use self::jni::objects::{JClass, JObject, JString};
-    use self::jni::sys::{jboolean, jint, JNI_TRUE, JNI_VERSION_1_6};
+    use self::jni::sys::{JNI_TRUE, JNI_VERSION_1_6, jboolean, jint};
     use self::jni::{JNIEnv, JavaVM};
     use super::*;
     use std::os::raw::c_void;
@@ -466,6 +489,8 @@ pub mod android {
             jquicTimeoutMs as u64,
             0, // tcp_timeout_ms - use default
             0, // udp_timeout_ms - use default
+            0, // heartbeat_interval_ms - use default
+            0, // heartbeat_timeout_ms - use default
             jhopTimeoutMs as u64,
         ) {
             Ok(client_config) => {

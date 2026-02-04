@@ -1,7 +1,7 @@
-use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
-use crate::udp::{UdpMessage, UdpPacket};
 use crate::BUFFER_POOL;
 use crate::UDP_PACKET_SIZE;
+use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
+use crate::udp::{UdpMessage, UdpPacket};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use log::{debug, error, info, warn};
@@ -32,7 +32,7 @@ impl UdpTunnel {
         udp_sender: &Sender<UdpMessage>,
         udp_receiver: &mut Receiver<UdpMessage>,
         udp_timeout_ms: u64,
-    ) {
+    ) -> Result<()> {
         debug!("start serving udp via: {}", conn.remote_address());
         let stream_map = Arc::new(DashMap::new());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
@@ -84,6 +84,8 @@ impl UdpTunnel {
         }
 
         info!("udp server quit");
+
+        Ok(())
     }
 
     async fn open_stream(
@@ -155,7 +157,7 @@ impl UdpTunnel {
         conn: &quinn::Connection,
         upstream_addr: Option<SocketAddr>,
         udp_timeout_ms: u64,
-    ) {
+    ) -> Result<()> {
         let remote_addr = &conn.remote_address();
         info!("start udp stream, {remote_addr} ↔  {upstream_addr:?}");
 
@@ -180,6 +182,8 @@ impl UdpTunnel {
         }
 
         info!("connection for udp out is dropped");
+
+        Ok(())
     }
 
     async fn process(
@@ -219,7 +223,9 @@ impl UdpTunnel {
                     match peer_addr {
                         Some(peer_addr) => {
                             if let Some(upstream_addr) = upstream_addr {
-                                warn!("upstream_addr {upstream_addr:?} is specified for the connection, peer_addr {peer_addr} is ignored");
+                                warn!(
+                                    "upstream_addr {upstream_addr:?} is specified for the connection, peer_addr {peer_addr} is ignored"
+                                );
                             } else if udp_socket.as_ref().and_then(|sock| sock.0.peer_addr().ok())
                                 != Some(peer_addr)
                             {

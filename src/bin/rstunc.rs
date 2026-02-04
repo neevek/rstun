@@ -1,6 +1,6 @@
+use clap::Parser;
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
-use clap::Parser;
 use log::error;
 use rstun::*;
 
@@ -23,6 +23,8 @@ fn main() {
         args.quic_timeout_ms,
         args.tcp_timeout_ms,
         args.udp_timeout_ms,
+        args.heartbeat_interval_ms,
+        args.heartbeat_timeout_ms,
         args.hop_interval_ms,
     )
     .map_err(|e| {
@@ -94,6 +96,14 @@ struct RstuncArgs {
     /// UDP idle timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     udp_timeout_ms: u64,
+
+    /// Heartbeat interval in milliseconds (0 to disable)
+    #[arg(long, default_value_t = 5000)]
+    heartbeat_interval_ms: u64,
+
+    /// Heartbeat timeout in milliseconds (0 to disable)
+    #[arg(long, default_value_t = 10000)]
+    heartbeat_timeout_ms: u64,
 
     #[arg(long, default_value_t = 0)]
     hop_interval_ms: u64,
