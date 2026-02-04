@@ -1,33 +1,35 @@
 use crate::{
-    pem_util, socket_addr_with_unspecified_ip_port,
-    tcp::{tcp_tunnel::TcpTunnel, AsyncStream, StreamReceiver, StreamRequest},
-    tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
-    tunnel_message::TunnelMessage,
-    udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel, UdpReceiver, UdpSender},
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
     UpstreamType,
+    heartbeat::{HeartbeatConfig, client_heartbeat},
+    pem_util, socket_addr_with_unspecified_ip_port,
+    tcp::{AsyncStream, StreamReceiver, StreamRequest, tcp_tunnel::TcpTunnel},
+    tunnel_info_bridge::{TunnelInfo, TunnelInfoBridge, TunnelInfoType, TunnelTraffic},
+    tunnel_message::TunnelMessage,
+    udp::{UdpReceiver, UdpSender, udp_server::UdpServer, udp_tunnel::UdpTunnel},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use log::{debug, error, info, warn};
-use quinn::{congestion, crypto::rustls::QuicClientConfig, Connection, Endpoint, TransportConfig};
+use quinn::{Connection, Endpoint, TransportConfig, congestion, crypto::rustls::QuicClientConfig};
 use quinn::{IdleTimeout, VarInt};
 use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
 use rustls::{
-    client::danger::ServerCertVerified,
-    crypto::{ring::cipher_suite, CryptoProvider},
     RootCertStore, SupportedCipherSuite,
+    client::danger::ServerCertVerified,
+    crypto::{CryptoProvider, ring::cipher_suite},
 };
 use rustls_platform_verifier::{self, BuilderVerifierExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::{
     fmt::Display,
+    future::Future,
     net::{IpAddr, SocketAddr},
     str::FromStr,
-    sync::{Arc, Mutex, Once},
+    sync::{Arc, Mutex, MutexGuard, Once},
     time::Duration,
 };
 use tokio::net::TcpStream;
@@ -137,8 +139,18 @@ pub struct Client {
 
 macro_rules! inner_state {
     ($self:ident, $field:ident) => {
-        (*$self.inner_state.lock().unwrap()).$field
+        (*lock_state(&$self.inner_state)).$field
     };
+}
+
+fn lock_state(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("client state lock poisoned, recovering");
+            poisoned.into_inner()
+        }
+    }
 }
 
 impl Client {
@@ -230,7 +242,7 @@ impl Client {
             loop {
                 interval.tick().await;
 
-                let endpoint = { state.lock().unwrap().endpoint.clone() };
+                let endpoint = lock_state(&state).endpoint.clone();
                 if let Some(endpoint) = endpoint {
                     Self::migrate_endpoint(&endpoint).await.ok();
                 }
@@ -382,8 +394,9 @@ impl Client {
                         .with_max_times(usize::MAX),
                 )
                 .when(move |_| {
-                    let client_state = state.lock().unwrap().client_state.clone();
-                    client_state != ClientState::Stopping && client_state != ClientState::Terminated
+                    let client_state = &lock_state(&state).client_state;
+                    *client_state != ClientState::Stopping
+                        && *client_state != ClientState::Terminated
                 })
                 .sleep(tokio::time::sleep)
                 .notify(|err: &anyhow::Error, dur: Duration| {
@@ -449,7 +462,7 @@ impl Client {
         login_info: &LoginInfo,
     ) -> Result<Connection> {
         let login_cfg = self.prepare_login_config().await?;
-        let endpoint = { self.inner_state.lock().unwrap().endpoint.clone() };
+        let endpoint = lock_state(&self.inner_state).endpoint.clone();
         let endpoint = if let Some(endpoint) = endpoint {
             endpoint
         } else {
@@ -482,32 +495,40 @@ impl Client {
         if tunnel_config.mode == TunnelMode::Out {
             match upstream_type {
                 UpstreamType::Tcp => {
-                    self.serve_outbound_tcp(
-                        label,
-                        conn.clone(),
-                        local_server_addr,
-                        pending_request,
-                    )
-                    .await
-                    .ok();
+                    let tunnel = async {
+                        self.serve_outbound_tcp(
+                            label,
+                            conn.clone(),
+                            local_server_addr,
+                            pending_request,
+                        )
+                        .await
+                    };
+                    Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
                 }
                 UpstreamType::Udp => {
-                    self.serve_outbound_udp(label, conn.clone(), local_server_addr)
-                        .await
-                        .ok();
+                    let tunnel = async {
+                        self.serve_outbound_udp(label, conn.clone(), local_server_addr)
+                            .await
+                    };
+                    Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
                 }
             }
         } else {
             match upstream_type {
                 UpstreamType::Tcp => {
-                    self.serve_inbound_tcp(label, conn.clone(), local_server_addr)
-                        .await
-                        .ok();
+                    let tunnel = async {
+                        self.serve_inbound_tcp(label, conn.clone(), local_server_addr)
+                            .await
+                    };
+                    Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
                 }
                 UpstreamType::Udp => {
-                    self.serve_inbound_udp(label, conn.clone(), local_server_addr)
-                        .await
-                        .ok();
+                    let tunnel = async {
+                        self.serve_inbound_udp(label, conn.clone(), local_server_addr)
+                            .await
+                    };
+                    Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
                 }
             }
         }
@@ -539,14 +560,14 @@ impl Client {
                 );
                 self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-                TcpTunnel::start_serving(
+                let tunnel = TcpTunnel::start_serving(
                     true,
                     conn,
                     stream_receiver,
                     pending_request,
                     self.config.tcp_timeout_ms,
-                )
-                .await;
+                );
+                Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
             }
             (ConnectInput::Channel(ChannelUpstream::Udp(sender, receiver)), UpstreamType::Udp) => {
                 self.post_tunnel_log(
@@ -558,7 +579,9 @@ impl Client {
                 );
                 self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-                UdpTunnel::start_serving(conn, sender, receiver, self.config.udp_timeout_ms).await;
+                let tunnel =
+                    UdpTunnel::start_serving(conn, sender, receiver, self.config.udp_timeout_ms);
+                Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
             }
             _ => unreachable!("Channel-based tunnel requires ConnectInput::Channel"),
         }
@@ -656,7 +679,55 @@ impl Client {
             )
             .as_str(),
         );
+
+        self.start_heartbeat_task(conn.clone(), quic_send, quic_recv);
         Ok(conn)
+    }
+
+    fn start_heartbeat_task(
+        &self,
+        conn: Connection,
+        mut quic_send: quinn::SendStream,
+        mut quic_recv: quinn::RecvStream,
+    ) {
+        let state = self.inner_state.clone();
+        let config = HeartbeatConfig {
+            interval: Duration::from_millis(self.config.heartbeat_interval_ms),
+            timeout: Duration::from_millis(self.config.heartbeat_timeout_ms),
+        };
+
+        tokio::spawn(async move {
+            let result = client_heartbeat(&mut quic_recv, &mut quic_send, config, || {
+                let client_state = &lock_state(&state).client_state;
+                *client_state == ClientState::Stopping || *client_state == ClientState::Terminated
+            })
+            .await;
+
+            if let Err(err) = result {
+                warn!("heartbeat failed, closing connection: {err}");
+                conn.close(VarInt::from_u32(1), b"heartbeat failed");
+            }
+        });
+    }
+
+    async fn wait_for_connection_close<C, CF, F>(label: TunnelLabel, mut conn_closed: CF, tunnel: F)
+    where
+        CF: FnMut() -> C,
+        C: Future<Output = quinn::ConnectionError>,
+        F: Future<Output = Result<()>>,
+    {
+        tokio::select! {
+            err = conn_closed() => {
+                debug!("{label}: connection closed, will reconnect: {err}");
+            }
+            result = tunnel => {
+                if let Err(err) = result {
+                    warn!("{label}: tunnel ended with error: {err}");
+                }
+                let err = conn_closed().await;
+                debug!("{label}: connection closed after tunnel ended: {err}");
+            }
+        }
     }
 
     async fn serve_outbound_tcp(
@@ -687,16 +758,16 @@ impl Client {
         );
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let mut tcp_receiver = tcp_server.take_receiver();
+        let mut tcp_receiver = tcp_server.take_receiver()?;
 
-        TcpTunnel::start_serving(
+        let tunnel = TcpTunnel::start_serving(
             true,
             &conn,
             &mut tcp_receiver,
             pending_request,
             self.config.tcp_timeout_ms,
-        )
-        .await;
+        );
+        Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
 
         tcp_server.put_receiver(tcp_receiver);
 
@@ -731,16 +802,16 @@ impl Client {
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
 
-        let mut udp_receiver = udp_server.take_receiver();
+        let mut udp_receiver = udp_server.take_receiver()?;
         let udp_sender = udp_server.clone_sender();
 
-        UdpTunnel::start_serving(
+        let tunnel = UdpTunnel::start_serving(
             &conn,
             &udp_sender,
             &mut udp_receiver,
             self.config.udp_timeout_ms,
-        )
-        .await;
+        );
+        Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
 
         udp_server.put_receiver(udp_receiver);
 
@@ -762,8 +833,9 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        TcpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.tcp_timeout_ms)
-            .await;
+        let tunnel =
+            TcpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.tcp_timeout_ms);
+        Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
 
         Ok(())
     }
@@ -783,8 +855,9 @@ impl Client {
         );
 
         self.set_and_post_tunnel_state(ClientState::Tunneling);
-        UdpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.udp_timeout_ms)
-            .await;
+        let tunnel =
+            UdpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.udp_timeout_ms);
+        Self::wait_for_connection_close(label, || conn.closed(), tunnel).await;
 
         Ok(())
     }
@@ -810,7 +883,7 @@ impl Client {
                 let mut tx_dgrams = 0;
 
                 {
-                    let connections = &state.lock().unwrap().connections;
+                    let connections = &lock_state(&state).connections;
                     for conn in connections.values() {
                         let stats = conn.stats();
                         rx_bytes += stats.udp_rx.bytes;
@@ -821,15 +894,15 @@ impl Client {
                 }
 
                 {
-                    let total_traffic_data = &&state.lock().unwrap().total_traffic_data;
+                    let total_traffic_data = &&lock_state(&state).total_traffic_data;
                     rx_bytes += total_traffic_data.rx_bytes;
                     tx_bytes += total_traffic_data.tx_bytes;
                     rx_dgrams += total_traffic_data.rx_dgrams;
                     tx_dgrams += total_traffic_data.tx_dgrams;
                 }
 
-                let state = state.lock().unwrap();
-                let client_state = state.client_state.clone();
+                let state = lock_state(&state);
+                let client_state = &state.client_state;
                 let data = TunnelTraffic {
                     rx_bytes,
                     tx_bytes,
@@ -837,13 +910,16 @@ impl Client {
                     tx_dgrams,
                 };
 
-                info!("traffic log, rx_bytes:{rx_bytes}, tx_bytes:{tx_bytes}, rx_dgrams:{rx_dgrams}, tx_dgrams:{tx_dgrams}");
+                info!(
+                    "traffic log, rx_bytes:{rx_bytes}, tx_bytes:{tx_bytes}, rx_dgrams:{rx_dgrams}, tx_dgrams:{tx_dgrams}"
+                );
                 state.post_tunnel_info(TunnelInfo::new(
                     TunnelInfoType::TunnelTraffic,
                     Box::new(data),
                 ));
 
-                if client_state == ClientState::Stopping || client_state == ClientState::Terminated
+                if *client_state == ClientState::Stopping
+                    || *client_state == ClientState::Terminated
                 {
                     break;
                 }
@@ -1014,7 +1090,7 @@ impl Client {
 
     fn post_tunnel_log(&self, msg: &str) {
         info!("{msg}");
-        let state = self.inner_state.lock().unwrap();
+        let state = lock_state(&self.inner_state);
         state.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelLog,
             Box::new(format!(
@@ -1025,7 +1101,7 @@ impl Client {
     }
 
     fn set_and_post_tunnel_state(&self, client_state: ClientState) {
-        let mut state = self.inner_state.lock().unwrap();
+        let mut state = lock_state(&self.inner_state);
         state.client_state = client_state.clone();
         state.post_tunnel_info(TunnelInfo::new(
             TunnelInfoType::TunnelState,
@@ -1107,5 +1183,43 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
             warn!("======================= Be cautious, this is for TEST only!!! ========================");
         });
         Ok(ServerCertVerified::assertion())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn wait_for_connection_close_waits_after_tunnel_ends() {
+        let close_notify = Arc::new(Notify::new());
+        let close_notify_clone = close_notify.clone();
+        let tunnel_notify = Arc::new(Notify::new());
+        let tunnel_notify_clone = tunnel_notify.clone();
+
+        let wait_task = tokio::spawn(async move {
+            Client::wait_for_connection_close(
+                TunnelLabel::Network(0),
+                move || {
+                    let close_notify = close_notify_clone.clone();
+                    async move {
+                        close_notify.notified().await;
+                        quinn::ConnectionError::TimedOut
+                    }
+                },
+                async move {
+                    tunnel_notify_clone.notified().await;
+                    Ok(())
+                },
+            )
+            .await;
+        });
+
+        tunnel_notify.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        close_notify.notify_waiters();
+        wait_task.await.unwrap();
     }
 }

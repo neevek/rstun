@@ -1,7 +1,7 @@
 use anyhow::Result;
+use clap::Parser;
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
-use clap::Parser;
 use log::error;
 use log::info;
 use rs_utilities::log_and_bail;
@@ -55,6 +55,7 @@ async fn run(mut args: RstundArgs) -> Result<()> {
         quic_timeout_ms: args.quic_timeout_ms,
         tcp_timeout_ms: args.tcp_timeout_ms,
         udp_timeout_ms: args.udp_timeout_ms,
+        heartbeat_timeout_ms: args.heartbeat_timeout_ms,
         dashboard_server: "".to_string(),
         dashboard_server_credential: "".to_string(),
     };
@@ -146,6 +147,10 @@ struct RstundArgs {
     /// UDP idle timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     udp_timeout_ms: u64,
+
+    /// Heartbeat timeout in milliseconds (0 to disable)
+    #[arg(long, default_value_t = 15000)]
+    heartbeat_timeout_ms: u64,
 
     /// Log level
     #[arg(short = 'l', long, default_value_t = String::from("I"),

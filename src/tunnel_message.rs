@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
     ReqLogin(LoginInfo),
     ReqUdpStart(UdpPeerAddr),
+    ReqHeartbeat(u64),
+    RespHeartbeat(u64),
     RespFailure(String),
     RespSuccess,
 }
@@ -86,6 +88,8 @@ impl Display for TunnelMessage {
             Self::ReqUdpStart(udp_peer_addr) => {
                 f.write_str(format!("udp_start:{udp_peer_addr:?}").as_str())
             }
+            Self::ReqHeartbeat(seq) => f.write_str(format!("heartbeat:req:{seq}").as_str()),
+            Self::RespHeartbeat(seq) => f.write_str(format!("heartbeat:resp:{seq}").as_str()),
             Self::RespFailure(msg) => f.write_str(format!("fail:{msg}").as_str()),
             Self::RespSuccess => f.write_str("succeeded"),
         }
@@ -93,10 +97,10 @@ impl Display for TunnelMessage {
 }
 
 impl TunnelMessage {
-    pub async fn recv(quic_recv: &mut RecvStream) -> Result<TunnelMessage> {
-        let msg_len = quic_recv.read_u32().await? as usize;
+    pub async fn recv_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<TunnelMessage> {
+        let msg_len = reader.read_u32().await? as usize;
         let mut msg = vec![0; msg_len];
-        quic_recv
+        reader
             .read_exact(&mut msg)
             .await
             .context("read message failed")?;
@@ -108,12 +112,20 @@ impl TunnelMessage {
         Ok(tun_msg.0)
     }
 
-    pub async fn send(quic_send: &mut SendStream, msg: &TunnelMessage) -> Result<()> {
+    pub async fn send_to<W: AsyncWrite + Unpin>(writer: &mut W, msg: &TunnelMessage) -> Result<()> {
         let msg = bincode::serde::encode_to_vec(msg, config::standard())
             .context("serialize message failed")?;
-        quic_send.write_u32(msg.len() as u32).await?;
-        quic_send.write_all(&msg).await?;
+        writer.write_u32(msg.len() as u32).await?;
+        writer.write_all(&msg).await?;
         Ok(())
+    }
+
+    pub async fn recv(quic_recv: &mut RecvStream) -> Result<TunnelMessage> {
+        Self::recv_from(quic_recv).await
+    }
+
+    pub async fn send(quic_send: &mut SendStream, msg: &TunnelMessage) -> Result<()> {
+        Self::send_to(quic_send, msg).await
     }
 
     pub async fn send_failure(quic_send: &mut SendStream, msg: String) -> Result<()> {

@@ -1,6 +1,6 @@
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
 use rustls_pemfile::Item;

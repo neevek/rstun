@@ -1,19 +1,20 @@
+use crate::heartbeat::{HeartbeatConfig, server_heartbeat};
 use crate::tcp::tcp_tunnel::TcpTunnel;
 use crate::tcp::{StreamMessage, StreamSender};
 use crate::tunnel_message::TunnelMessage;
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
-    pem_util, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, Tunnel, TunnelConfig,
-    TunnelMode, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, UpstreamType,
-    SUPPORTED_CIPHER_SUITES,
+    SUPPORTED_CIPHER_SUITES, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, Tunnel,
+    TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, UpstreamType,
+    pem_util,
 };
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
-use quinn::crypto::rustls::QuicServerConfig;
 use quinn::IdleTimeout;
 use quinn::VarInt;
-use quinn::{congestion, Connection, Endpoint, SendStream, TransportConfig};
+use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Connection, Endpoint, SendStream, TransportConfig, congestion};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
@@ -84,9 +85,10 @@ impl Server {
         })?;
 
         info!(
-            "tunnel server is bound on address: {}, idle_timeout: {}",
+            "tunnel server is bound on address: {}, idle_timeout: {}, heartbeat_timeout: {}",
             endpoint.local_addr()?,
-            config.quic_timeout_ms
+            config.quic_timeout_ms,
+            config.heartbeat_timeout_ms
         );
 
         let ep = endpoint.clone();
@@ -172,7 +174,8 @@ impl Server {
                                 Some(info.upstream_addr),
                                 config.tcp_timeout_ms,
                             )
-                            .await;
+                            .await
+                            .ok();
                         }
 
                         TunnelType::UdpOut(info) => {
@@ -182,6 +185,7 @@ impl Server {
                                 config.udp_timeout_ms,
                             )
                             .await
+                            .ok();
                         }
 
                         TunnelType::TcpIn(mut info) => {
@@ -194,7 +198,13 @@ impl Server {
                                     sender: info.tcp_server.clone_sender(),
                                 });
 
-                            let mut tcp_receiver = info.tcp_server.take_receiver();
+                            let mut tcp_receiver = match info.tcp_server.take_receiver() {
+                                Ok(receiver) => receiver,
+                                Err(e) => {
+                                    warn!("tcp receiver unavailable, will drop session: {e}");
+                                    return Ok::<(), anyhow::Error>(());
+                                }
+                            };
 
                             TcpTunnel::start_serving(
                                 false,
@@ -203,7 +213,8 @@ impl Server {
                                 &mut None,
                                 config.tcp_timeout_ms,
                             )
-                            .await;
+                            .await
+                            .ok();
 
                             info.tcp_server.shutdown().await.ok();
                         }
@@ -218,7 +229,13 @@ impl Server {
                                     sender: info.udp_server.clone_sender(),
                                 });
 
-                            let mut udp_receiver = info.udp_server.take_receiver();
+                            let mut udp_receiver = match info.udp_server.take_receiver() {
+                                Ok(receiver) => receiver,
+                                Err(e) => {
+                                    warn!("udp receiver unavailable, will drop session: {e}");
+                                    return Ok::<(), anyhow::Error>(());
+                                }
+                            };
                             let udp_sender = info.udp_server.clone_sender();
 
                             UdpTunnel::start_serving(
@@ -227,15 +244,20 @@ impl Server {
                                 &mut udp_receiver,
                                 config.udp_timeout_ms,
                             )
-                            .await;
+                            .await
+                            .ok();
 
                             info.udp_server.shutdown().await.ok();
                         }
                         TunnelType::DynamicUpstreamTcpOut(conn) => {
-                            TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms).await;
+                            TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms)
+                                .await
+                                .ok();
                         }
                         TunnelType::DynamicUpstreamUdpOut(conn) => {
-                            UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms).await
+                            UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms)
+                                .await
+                                .ok();
                         }
                     }
 
@@ -272,6 +294,7 @@ impl Server {
 
                 Self::check_password(config.password.as_str(), login_info.password.as_str())?;
 
+                let heartbeat_conn = conn.clone();
                 let tunnel_type = match login_info.tunnel {
                     Tunnel::NetworkBased(tunnel_config) => {
                         Self::derive_tunnel_type(conn, &mut quic_send, &tunnel_config, config)
@@ -285,6 +308,13 @@ impl Server {
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 info!("connection authenticated! addr: {remote_addr}");
+
+                Self::start_heartbeat_responder(
+                    heartbeat_conn,
+                    quic_send,
+                    quic_recv,
+                    config.heartbeat_timeout_ms,
+                );
                 Ok(tunnel_type)
             }
 
@@ -292,6 +322,35 @@ impl Server {
                 log_and_bail!("received unepxected message");
             }
         }
+    }
+
+    fn start_heartbeat_responder(
+        conn: quinn::Connection,
+        mut quic_send: quinn::SendStream,
+        mut quic_recv: quinn::RecvStream,
+        heartbeat_timeout_ms: u64,
+    ) {
+        let config = HeartbeatConfig {
+            interval: Duration::from_millis(1),
+            timeout: Duration::from_millis(heartbeat_timeout_ms),
+        };
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = conn.closed() => {
+                    debug!("heartbeat responder stopping for {}", conn.remote_address());
+                }
+                result = server_heartbeat(&mut quic_recv, &mut quic_send, config, || false) => {
+                    if let Err(err) = result {
+                        warn!(
+                            "heartbeat failed for {}, closing connection: {err}",
+                            conn.remote_address()
+                        );
+                        conn.close(VarInt::from_u32(1), b"heartbeat failed");
+                    }
+                }
+            }
+        });
     }
 
     async fn derive_tunnel_type(
