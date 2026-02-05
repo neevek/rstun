@@ -198,18 +198,21 @@ impl Server {
                                     sender: info.tcp_server.clone_sender(),
                                 });
 
-                            let mut tcp_receiver = match info.tcp_server.take_receiver() {
+                            let tcp_receiver = match info.tcp_server.take_receiver() {
                                 Ok(receiver) => receiver,
                                 Err(e) => {
                                     warn!("tcp receiver unavailable, will drop session: {e}");
                                     return Ok::<(), anyhow::Error>(());
                                 }
                             };
+                            let tcp_receiver = std::sync::Arc::new(tokio::sync::Mutex::new(
+                                tcp_receiver,
+                            ));
 
                             TcpTunnel::start_serving(
                                 false,
                                 &info.conn,
-                                &mut tcp_receiver,
+                                tcp_receiver,
                                 &mut None,
                                 config.tcp_timeout_ms,
                             )

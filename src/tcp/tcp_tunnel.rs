@@ -7,6 +7,8 @@ use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::sync::Mutex as AsyncMutex;
+use std::sync::Arc;
 
 pub struct TcpTunnel;
 
@@ -14,17 +16,20 @@ impl TcpTunnel {
     pub async fn start_serving<S: AsyncStream>(
         tunnel_out: bool,
         conn: &quinn::Connection,
-        stream_receiver: &mut StreamReceiver<S>,
+        stream_receiver: Arc<AsyncMutex<StreamReceiver<S>>>,
         pending_request: &mut Option<StreamRequest<S>>,
         stream_timeout_ms: u64,
     ) -> Result<()> {
         loop {
             let request = match pending_request.take() {
                 Some(request) => request,
-                None => match stream_receiver.borrow_mut().recv().await {
-                    Some(StreamMessage::Request(request)) => request,
-                    _ => break,
-                },
+                None => {
+                    let mut receiver = stream_receiver.lock().await;
+                    match receiver.borrow_mut().recv().await {
+                        Some(StreamMessage::Request(request)) => request,
+                        _ => break,
+                    }
+                }
             };
 
             match conn.open_bi().await {
