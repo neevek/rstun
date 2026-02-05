@@ -37,11 +37,24 @@ fn main() {
         #[cfg(target_os = "android")]
         {
             use log::info;
-            client.set_enable_on_info_report(true);
-            client.set_on_info_listener(|s| {
-                info!("{}", s);
+            let receiver = client.register_for_events();
+            std::thread::spawn(move || {
+                for event in receiver {
+                    if let Ok(json) = event.to_json() {
+                        info!("{json}");
+                    }
+                }
             });
         }
+
+        let c = client.clone();
+        std::thread::spawn(move || {
+            for event in c.register_for_events() {
+                if let Ok(json) = event.to_json() {
+                    log::debug!("EVENT = {json}");
+                }
+            }
+        });
 
         client.start_tunneling();
     }

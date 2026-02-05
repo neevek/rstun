@@ -72,7 +72,7 @@ impl TcpServer {
 
                             if !active {
                                 // unless being explicitly requested, always drop the connections because we are not
-                                // sure whether the receiver is ready to aceept connections
+                                // sure whether the receiver is ready to accept connections
                                 debug!("drop connection: {addr}");
                                 continue;
                             }
@@ -92,7 +92,7 @@ impl TcpServer {
                                 // succeeded
                             }
                             Err(SendTimeoutError::Timeout(_)) => {
-                                debug!("timedout sending the request, drop the stream");
+                                debug!("timed out sending the request, drop the stream");
                             }
                             Err(e) => {
                                 info!("channel is closed, will quit tcp server, err: {e}");

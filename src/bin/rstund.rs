@@ -19,7 +19,7 @@ fn main() {
         num_cpus::get()
     };
 
-    info!("will use {} workers", workers);
+    info!("will use {workers} workers");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

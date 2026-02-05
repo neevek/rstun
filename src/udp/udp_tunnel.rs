@@ -33,7 +33,7 @@ impl UdpTunnel {
         udp_receiver: &mut Receiver<UdpMessage>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
-        debug!("start serving udp via: {}", conn.remote_address());
+        debug!("udp serving loop started, remote_addr:{}", conn.remote_address());
         let stream_map = Arc::new(DashMap::new());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
             let stream_key = UdpStreamKey {
@@ -53,7 +53,7 @@ impl UdpTunnel {
                 Err(e) => {
                     error!("{e}");
                     if conn.close_reason().is_some() {
-                        debug!("connection is closed, will quit");
+                        debug!("connection already closed, stop udp serving loop");
                         break;
                     }
                     continue;
@@ -83,7 +83,7 @@ impl UdpTunnel {
             });
         }
 
-        info!("udp server quit");
+        info!("udp serving loop stopped");
 
         Ok(())
     }
@@ -159,20 +159,20 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
-        info!("start udp stream, {remote_addr} ↔  {upstream_addr:?}");
+        info!("udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}");
 
         loop {
             match conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut) => {
-                    info!("connection timeout: {remote_addr}");
+                    info!("udp accept loop timed out, remote_addr:{remote_addr}");
                     break;
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("connection closed: {remote_addr}");
+                    debug!("udp accept loop closed, remote_addr:{remote_addr}");
                     break;
                 }
                 Err(e) => {
-                    error!("failed to accept_bi: {remote_addr}, err: {e}");
+                    error!("failed to accept udp bi stream, remote_addr:{remote_addr}, err:{e}");
                     break;
                 }
                 Ok((quic_send, quic_recv)) => tokio::spawn(async move {
@@ -181,7 +181,7 @@ impl UdpTunnel {
             };
         }
 
-        info!("connection for udp out is dropped");
+        info!("udp accept loop stopped, remote_addr:{remote_addr}");
 
         Ok(())
     }

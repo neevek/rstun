@@ -3,7 +3,7 @@ mod heartbeat;
 mod pem_util;
 mod server;
 mod tcp;
-mod tunnel_info_bridge;
+mod tunnel_event_bus;
 mod tunnel_message;
 mod udp;
 mod util;
@@ -26,6 +26,10 @@ use std::net::Ipv6Addr;
 use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
+pub use tunnel_event_bus::{
+    TunnelDescriptor, TunnelEvent, TunnelEventType, TunnelId, TunnelInfo, TunnelSource,
+    TunnelState, TunnelTraffic,
+};
 use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
 pub use udp::{UdpMessage, UdpPacket, UdpReceiver, UdpSender};
@@ -152,7 +156,7 @@ impl Display for TunnelMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum UpstreamType {
     Tcp,
     Udp,
@@ -242,8 +246,8 @@ impl ClientConfig {
         password: &str,
         cert: &str,
         cipher: &str,
-        tcp_addr_mappings: &str,
-        udp_addr_mappings: &str,
+        tcp_mappings: &str,
+        udp_mappings: &str,
         dot: &str,
         dns: &str,
         workers: usize,
@@ -255,7 +259,7 @@ impl ClientConfig {
         mut heartbeat_timeout_ms: u64,
         mut hop_interval_ms: u64,
     ) -> Result<ClientConfig> {
-        if tcp_addr_mappings.is_empty() && udp_addr_mappings.is_empty() {
+        if tcp_mappings.is_empty() && udp_mappings.is_empty() {
             log_and_bail!("must specify either --tcp-mappings or --udp-mappings, or both");
         }
 
@@ -315,8 +319,8 @@ impl ClientConfig {
             ..ClientConfig::default()
         };
 
-        parse_addr_mappings(tcp_addr_mappings, UpstreamType::Tcp, &mut config.tunnels)?;
-        parse_addr_mappings(udp_addr_mappings, UpstreamType::Udp, &mut config.tunnels)?;
+        parse_addr_mappings(tcp_mappings, UpstreamType::Tcp, &mut config.tunnels)?;
+        parse_addr_mappings(udp_mappings, UpstreamType::Udp, &mut config.tunnels)?;
 
         Ok(config)
     }
@@ -424,7 +428,7 @@ pub mod android {
             &mut env,
             JObject::try_from(context).unwrap(),
         ) {
-            error!("failed to init rustls_platform_verifier: {}", e);
+            error!("failed to init rustls_platform_verifier: {e}");
         } else {
             info!("initializing rustls_platform_verifier succeeded!");
         }
@@ -499,7 +503,7 @@ pub mod android {
                 client as jlong
             }
             Err(e) => {
-                error!("failed to create client: {}", e);
+                error!("failed to create client: {e}");
                 0
             }
         }
@@ -567,24 +571,33 @@ pub mod android {
             .lock()
             .unwrap();
         let bool_enable = enable == 1;
-        if bool_enable && !client.has_on_info_listener() {
+        if bool_enable && !client.has_event_listeners() {
             let jvm = env.get_java_vm().unwrap();
             let jobj_global_ref = env.new_global_ref(jobj).unwrap();
-            client.set_on_info_listener(move |data: &str| {
-                let mut env = jvm.attach_current_thread().unwrap();
-                if let Ok(s) = env.new_string(data) {
-                    env.call_method(
-                        &jobj_global_ref,
-                        "onInfo",
-                        "(Ljava/lang/String;)V",
-                        &[(&s).into()],
-                    )
-                    .unwrap();
+            let receiver = client.register_for_events();
+            std::thread::spawn(move || {
+                for event in receiver {
+                    if let Ok(json) = event.to_json() {
+                        let mut env = jvm.attach_current_thread().unwrap();
+                        if let Ok(s) = env.new_string(json) {
+                            env.call_method(
+                                &jobj_global_ref,
+                                "onInfo",
+                                "(Ljava/lang/String;)V",
+                                &[(&s).into()],
+                            )
+                            .unwrap();
+                        }
+                    }
                 }
             });
         }
 
-        client.set_enable_on_info_report(bool_enable);
+        if !bool_enable {
+            log::debug!(
+                "nativeSetEnableOnInfoReport(false) is ignored; event delivery is listener-driven"
+            );
+        }
     }
 
     fn convert_jstring(env: &mut JNIEnv, jstr: JString) -> String {

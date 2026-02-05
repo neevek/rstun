@@ -198,18 +198,21 @@ impl Server {
                                     sender: info.tcp_server.clone_sender(),
                                 });
 
-                            let mut tcp_receiver = match info.tcp_server.take_receiver() {
+                            let tcp_receiver = match info.tcp_server.take_receiver() {
                                 Ok(receiver) => receiver,
                                 Err(e) => {
                                     warn!("tcp receiver unavailable, will drop session: {e}");
                                     return Ok::<(), anyhow::Error>(());
                                 }
                             };
+                            let tcp_receiver = std::sync::Arc::new(tokio::sync::Mutex::new(
+                                tcp_receiver,
+                            ));
 
                             TcpTunnel::start_serving(
                                 false,
                                 &info.conn,
-                                &mut tcp_receiver,
+                                tcp_receiver,
                                 &mut None,
                                 config.tcp_timeout_ms,
                             )
@@ -270,7 +273,7 @@ impl Server {
                 }
             });
         }
-        info!("quit!");
+        info!("server stopped");
 
         Ok(())
     }
@@ -281,7 +284,7 @@ impl Server {
     ) -> Result<TunnelType> {
         let remote_addr = &conn.remote_address();
 
-        info!("authenticating connection, addr:{remote_addr}");
+        info!("authenticating connection, remote_addr:{remote_addr}");
         let (mut quic_send, mut quic_recv) = conn
             .accept_bi()
             .await
@@ -290,7 +293,8 @@ impl Server {
         info!("received bi_stream request: {remote_addr}");
         match TunnelMessage::recv(&mut quic_recv).await? {
             TunnelMessage::ReqLogin(login_info) => {
-                info!("received ReqLogin request: {remote_addr}");
+                let tunnel_label = login_info.to_string();
+                info!("[{tunnel_label}] received ReqLogin request: {remote_addr}");
 
                 Self::check_password(config.password.as_str(), login_info.password.as_str())?;
 
@@ -307,9 +311,10 @@ impl Server {
                 };
 
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
-                info!("connection authenticated! addr: {remote_addr}");
+                info!("[{tunnel_label}] connection authenticated, remote_addr:{remote_addr}");
 
                 Self::start_heartbeat_responder(
+                    tunnel_label,
                     heartbeat_conn,
                     quic_send,
                     quic_recv,
@@ -319,12 +324,13 @@ impl Server {
             }
 
             _ => {
-                log_and_bail!("received unepxected message");
+                log_and_bail!("received unexpected message");
             }
         }
     }
 
     fn start_heartbeat_responder(
+        tunnel_label: String,
         conn: quinn::Connection,
         mut quic_send: quinn::SendStream,
         mut quic_recv: quinn::RecvStream,
@@ -338,12 +344,15 @@ impl Server {
         tokio::spawn(async move {
             tokio::select! {
                 _ = conn.closed() => {
-                    debug!("heartbeat responder stopping for {}", conn.remote_address());
+                    debug!(
+                        "[{tunnel_label}] heartbeat responder stopping, remote_addr:{}",
+                        conn.remote_address()
+                    );
                 }
                 result = server_heartbeat(&mut quic_recv, &mut quic_send, config, || false) => {
                     if let Err(err) = result {
                         warn!(
-                            "heartbeat failed for {}, closing connection: {err}",
+                            "[{tunnel_label}] heartbeat failed, closing connection, remote_addr:{}, err:{err}",
                             conn.remote_address()
                         );
                         conn.close(VarInt::from_u32(1), b"heartbeat failed");
