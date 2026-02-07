@@ -1,7 +1,7 @@
 use crate::{
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
     UpstreamType,
-    heartbeat::{HeartbeatConfig, client_heartbeat},
+    heartbeat::{self, HeartbeatConfig},
     pem_util, socket_addr_with_unspecified_ip_port,
     tcp::{AsyncStream, StreamReceiver, StreamRequest, tcp_tunnel::TcpTunnel},
     tunnel_event_bus::{
@@ -705,6 +705,11 @@ impl Client {
         mut quic_send: quinn::SendStream,
         mut quic_recv: quinn::RecvStream,
     ) {
+        if self.config.heartbeat_interval_ms == 0 || self.config.heartbeat_timeout_ms == 0 {
+            info!("[{tunnel}] heartbeat disabled on client");
+            return;
+        }
+
         let state = self.inner_state.clone();
         let config = HeartbeatConfig {
             interval: Duration::from_millis(self.config.heartbeat_interval_ms),
@@ -718,15 +723,19 @@ impl Client {
         );
 
         tokio::spawn(async move {
-            let result = client_heartbeat(&mut quic_recv, &mut quic_send, config, || {
-                let client_state = &lock_state(&state).client_state;
-                *client_state == ClientState::Stopping || *client_state == ClientState::Terminated
-            })
-            .await;
-
-            if let Err(err) = result {
-                warn!("[{tunnel}] heartbeat failed, closing connection: {err}");
-                conn.close(VarInt::from_u32(1), b"heartbeat failed");
+            tokio::select! {
+                _ = conn.closed() => {
+                    debug!("[{tunnel}] heartbeat task stopped because connection closed");
+                }
+                result = heartbeat::client_heartbeat(&mut quic_recv, &mut quic_send, config, || {
+                    let client_state = &lock_state(&state).client_state;
+                    *client_state == ClientState::Stopping || *client_state == ClientState::Terminated
+                }) => {
+                    if let Err(err) = result {
+                        warn!("[{tunnel}] heartbeat failed, closing connection: {err}");
+                        conn.close(VarInt::from_u32(1), b"heartbeat failed");
+                    }
+                }
             }
         });
     }

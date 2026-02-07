@@ -227,7 +227,6 @@ pub struct ServerConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
-    pub heartbeat_timeout_ms: u64,
 
     /// for TunnelOut only
     pub default_tcp_upstream: Option<SocketAddr>,

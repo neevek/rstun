@@ -1,7 +1,8 @@
 [package]
 name = "rstun"
-version = "0.7.8"
+version = "0.8.0"
 edition = "2024"
+license = "MIT"
 
 [lib]
 crate-type = ["lib"]

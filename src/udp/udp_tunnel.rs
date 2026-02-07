@@ -33,7 +33,10 @@ impl UdpTunnel {
         udp_receiver: &mut Receiver<UdpMessage>,
         udp_timeout_ms: u64,
     ) -> Result<()> {
-        debug!("udp serving loop started, remote_addr:{}", conn.remote_address());
+        debug!(
+            "udp serving loop started, remote_addr:{}",
+            conn.remote_address()
+        );
         let stream_map = Arc::new(DashMap::new());
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
             let stream_key = UdpStreamKey {
@@ -159,7 +162,9 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
-        info!("udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}");
+        info!(
+            "udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}"
+        );
 
         loop {
             match conn.accept_bi().await {

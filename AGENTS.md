@@ -2,14 +2,14 @@
 
 ## Project Structure & Module Organization
 - `src/` contains all Rust sources. Key modules: `src/client.rs`, `src/server.rs`, `src/tcp/`, `src/udp/`, `src/tunnel_*`.
-- `src/bin/rstunc.rs` and `src/bin/rstund.rs` are the CLI entrypoints for client/server.
+- `src/bin/rstun.rs` is the unified CLI entrypoint with `server` and `client` subcommands.
 - `gen_cert_and_key.sh` is a helper for generating local certs. `localhost.*.pem` are test assets.
 - `target/` is build output (do not commit changes there).
 
 ## Build, Test, and Development Commands
 - `cargo build` — compile the workspace.
-- `cargo run --bin rstund -- --help` — run the server CLI.
-- `cargo run --bin rstunc -- --help` — run the client CLI.
+- `cargo run --bin rstun -- server --help` — run the server CLI.
+- `cargo run --bin rstun -- client --help` — run the client CLI.
 - `cargo fmt` — format Rust code (if rustfmt is installed).
 - `cargo clippy` — lint for common issues (if clippy is installed).
 

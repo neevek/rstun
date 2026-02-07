@@ -1,4 +1,4 @@
-use crate::heartbeat::{HeartbeatConfig, server_heartbeat};
+use crate::heartbeat;
 use crate::tcp::tcp_tunnel::TcpTunnel;
 use crate::tcp::{StreamMessage, StreamSender};
 use crate::tunnel_message::TunnelMessage;
@@ -85,10 +85,9 @@ impl Server {
         })?;
 
         info!(
-            "tunnel server is bound on address: {}, idle_timeout: {}, heartbeat_timeout: {}",
+            "tunnel server is bound on address: {}, idle_timeout: {}",
             endpoint.local_addr()?,
-            config.quic_timeout_ms,
-            config.heartbeat_timeout_ms
+            config.quic_timeout_ms
         );
 
         let ep = endpoint.clone();
@@ -205,9 +204,8 @@ impl Server {
                                     return Ok::<(), anyhow::Error>(());
                                 }
                             };
-                            let tcp_receiver = std::sync::Arc::new(tokio::sync::Mutex::new(
-                                tcp_receiver,
-                            ));
+                            let tcp_receiver =
+                                std::sync::Arc::new(tokio::sync::Mutex::new(tcp_receiver));
 
                             TcpTunnel::start_serving(
                                 false,
@@ -313,13 +311,7 @@ impl Server {
                 TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
                 info!("[{tunnel_label}] connection authenticated, remote_addr:{remote_addr}");
 
-                Self::start_heartbeat_responder(
-                    tunnel_label,
-                    heartbeat_conn,
-                    quic_send,
-                    quic_recv,
-                    config.heartbeat_timeout_ms,
-                );
+                Self::start_heartbeat_responder(tunnel_label, heartbeat_conn, quic_send, quic_recv);
                 Ok(tunnel_type)
             }
 
@@ -334,13 +326,7 @@ impl Server {
         conn: quinn::Connection,
         mut quic_send: quinn::SendStream,
         mut quic_recv: quinn::RecvStream,
-        heartbeat_timeout_ms: u64,
     ) {
-        let config = HeartbeatConfig {
-            interval: Duration::from_millis(1),
-            timeout: Duration::from_millis(heartbeat_timeout_ms),
-        };
-
         tokio::spawn(async move {
             tokio::select! {
                 _ = conn.closed() => {
@@ -349,13 +335,20 @@ impl Server {
                         conn.remote_address()
                     );
                 }
-                result = server_heartbeat(&mut quic_recv, &mut quic_send, config, || false) => {
+                result = heartbeat::server_heartbeat(&mut quic_recv, &mut quic_send, || conn.close_reason().is_some()) => {
                     if let Err(err) = result {
-                        warn!(
-                            "[{tunnel_label}] heartbeat failed, closing connection, remote_addr:{}, err:{err}",
-                            conn.remote_address()
-                        );
-                        conn.close(VarInt::from_u32(1), b"heartbeat failed");
+                        if conn.close_reason().is_some() {
+                            debug!(
+                                "[{tunnel_label}] heartbeat responder closed, remote_addr:{}",
+                                conn.remote_address()
+                            );
+                        } else {
+                            warn!(
+                                "[{tunnel_label}] heartbeat failed, closing connection, remote_addr:{}, err:{err}",
+                                conn.remote_address()
+                            );
+                            conn.close(VarInt::from_u32(1), b"heartbeat failed");
+                        }
                     }
                 }
             }

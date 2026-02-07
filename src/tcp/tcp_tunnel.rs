@@ -5,10 +5,10 @@ use anyhow::Result;
 use log::{debug, error, info};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
-use std::sync::Arc;
 
 pub struct TcpTunnel;
 
@@ -66,7 +66,9 @@ impl TcpTunnel {
         stream_timeout_ms: u64,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
-        info!("tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}");
+        info!(
+            "tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}"
+        );
 
         loop {
             match conn.accept_bi().await {
@@ -110,7 +112,9 @@ impl TcpTunnel {
                             (quic_send, quic_recv),
                             stream_timeout_ms,
                         ),
-                        Ok(Err(e)) => error!("failed to connect upstream, dst_addr:{dst_addr}, err:{e}"),
+                        Ok(Err(e)) => {
+                            error!("failed to connect upstream, dst_addr:{dst_addr}, err:{e}")
+                        }
                         Err(_) => error!("tcp connect timed out, dst_addr:{dst_addr}"),
                     }
                 }),

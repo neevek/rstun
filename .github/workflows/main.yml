@@ -68,7 +68,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
-          bin_names=(rstunc rstund)
+          bin_names=(rstun)
           target_dir="target/${{ matrix.target }}/release"
           pkg_name="rstun-${{ matrix.target }}"
           mkdir -p dist
@@ -89,7 +89,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $binNames = @("rstunc.exe", "rstund.exe")
+          $binNames = @("rstun.exe")
           $targetDir = "target/${{ matrix.target }}/release"
           $pkgName = "rstun-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path dist | Out-Null

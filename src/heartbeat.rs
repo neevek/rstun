@@ -10,12 +10,6 @@ pub(crate) struct HeartbeatConfig {
     pub timeout: Duration,
 }
 
-impl HeartbeatConfig {
-    pub fn is_enabled(&self) -> bool {
-        self.interval > Duration::from_millis(0) && self.timeout > Duration::from_millis(0)
-    }
-}
-
 pub(crate) async fn client_heartbeat<R, W, F>(
     reader: &mut R,
     writer: &mut W,
@@ -27,11 +21,6 @@ where
     W: AsyncWrite + Unpin,
     F: FnMut() -> bool,
 {
-    if !config.is_enabled() {
-        debug!("heartbeat disabled on client");
-        return Ok(());
-    }
-
     let mut ticker = tokio::time::interval(config.interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut seq: u64 = 0;
@@ -72,7 +61,6 @@ where
 pub(crate) async fn server_heartbeat<R, W, F>(
     reader: &mut R,
     writer: &mut W,
-    config: HeartbeatConfig,
     mut should_stop: F,
 ) -> Result<()>
 where
@@ -80,24 +68,12 @@ where
     W: AsyncWrite + Unpin,
     F: FnMut() -> bool,
 {
-    if !config.is_enabled() {
-        debug!("heartbeat disabled on server");
-        return Ok(());
-    }
-
     loop {
         if should_stop() {
-            debug!("heartbeat stopped on server");
             return Ok(());
         }
 
-        let msg = match tokio::time::timeout(config.timeout, TunnelMessage::recv_from(reader)).await
-        {
-            Ok(msg) => msg?,
-            Err(_) => {
-                bail!("heartbeat timeout after {:?}", config.timeout);
-            }
-        };
+        let msg = TunnelMessage::recv_from(reader).await?;
 
         match msg {
             TunnelMessage::ReqHeartbeat(seq) => {
@@ -131,11 +107,7 @@ mod tests {
         let stop_clone = stop.clone();
 
         let server_task = tokio::spawn(async move {
-            let config = HeartbeatConfig {
-                interval: Duration::from_millis(10),
-                timeout: Duration::from_millis(200),
-            };
-            let _ = server_heartbeat(&mut server_read, &mut server_write, config, || {
+            let _ = server_heartbeat(&mut server_read, &mut server_write, || {
                 stop_clone.load(Ordering::Relaxed)
             })
             .await;
@@ -176,21 +148,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_heartbeat_times_out_without_ping() {
-        let (_client, server) = tokio::io::duplex(1024);
+    async fn server_heartbeat_quits_when_stream_closed() {
+        let (client, server) = tokio::io::duplex(1024);
+        drop(client);
+
         let (mut server_read, mut server_write) = split(server);
-        let config = HeartbeatConfig {
-            interval: Duration::from_millis(20),
-            timeout: Duration::from_millis(60),
-        };
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            server_heartbeat(&mut server_read, &mut server_write, config, || false),
-        )
-        .await
-        .expect("heartbeat did not return in time");
-
-        assert!(result.is_err(), "expected heartbeat timeout error");
+        let result = server_heartbeat(&mut server_read, &mut server_write, || false).await;
+        assert!(result.is_err(), "expected stream-closed error");
     }
 }
