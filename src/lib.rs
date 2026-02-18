@@ -412,12 +412,12 @@ pub mod android {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub extern "system" fn JNI_OnLoad(_vm: JavaVM, _: *mut c_void) -> jint {
         JNI_VERSION_1_6
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_initCertificateVerifier(
         mut env: JNIEnv,
         _: JClass,
@@ -433,7 +433,7 @@ pub mod android {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeInitLogger(
         mut env: JNIEnv,
         _: JClass,
@@ -452,7 +452,7 @@ pub mod android {
         return JNI_TRUE;
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeCreate(
         mut env: JNIEnv,
         _: JClass,
@@ -508,7 +508,7 @@ pub mod android {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStop(
         _env: JNIEnv,
         _: JClass,
@@ -519,7 +519,7 @@ pub mod android {
         }
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStartTunnelling(
         _env: JNIEnv,
         _: JClass,
@@ -537,7 +537,7 @@ pub mod android {
         });
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeGetState(
         env: JNIEnv,
         _: JClass,
@@ -555,7 +555,7 @@ pub mod android {
             .into_raw()
     }
 
-    #[no_mangle]
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeSetEnableOnInfoReport(
         env: JNIEnv,
         jobj: JClass,
