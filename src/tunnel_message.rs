@@ -10,6 +10,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+const MAX_TUNNEL_MESSAGE_SIZE: usize = 64 * 1024;
+
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
     ReqLogin(LoginInfo),
@@ -99,6 +101,9 @@ impl Display for TunnelMessage {
 impl TunnelMessage {
     pub async fn recv_from<R: AsyncRead + Unpin>(reader: &mut R) -> Result<TunnelMessage> {
         let msg_len = reader.read_u32().await? as usize;
+        if msg_len > MAX_TUNNEL_MESSAGE_SIZE {
+            bail!("tunnel message too large: {msg_len} > {MAX_TUNNEL_MESSAGE_SIZE}");
+        }
         let mut msg = vec![0; msg_len];
         reader
             .read_exact(&mut msg)

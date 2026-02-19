@@ -1,5 +1,6 @@
 use crate::BUFFER_POOL;
 use crate::UDP_PACKET_SIZE;
+use crate::socket_addr_with_unspecified_ip_port;
 use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
 use crate::udp::{UdpMessage, UdpPacket};
 use anyhow::{Context, Result};
@@ -7,16 +8,10 @@ use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use quinn::{Connection, RecvStream, SendStream};
 use rs_utilities::log_and_bail;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
-use tokio::sync::mpsc::{Receiver, Sender};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::{net::UdpSocket, sync::Mutex};
-
-type TSafe<T> = Arc<tokio::sync::Mutex<T>>;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct UdpStreamKey {
@@ -43,7 +38,7 @@ impl UdpTunnel {
                 local_addr: packet.local_addr,
                 peer_addr: packet.peer_addr,
             };
-            let quic_send = match UdpTunnel::open_stream(
+            let packet_sender = match UdpTunnel::open_stream(
                 conn.clone(),
                 udp_sender.clone(),
                 stream_key,
@@ -52,7 +47,7 @@ impl UdpTunnel {
             )
             .await
             {
-                Ok(quic_send) => quic_send,
+                Ok(packet_sender) => packet_sender,
                 Err(e) => {
                     error!("{e}");
                     if conn.close_reason().is_some() {
@@ -63,27 +58,24 @@ impl UdpTunnel {
                 }
             };
 
-            // send the packet using an async task
-            tokio::spawn(async move {
-                let mut quic_send = quic_send.lock().await;
-                let payload_len = packet.payload.len();
-
-                TunnelMessage::send(
-                    &mut quic_send,
-                    &TunnelMessage::ReqUdpStart(UdpPeerAddr(packet.peer_addr)),
-                )
-                .await
-                .ok();
-
-                TunnelMessage::send_raw(&mut quic_send, &packet.payload)
-                    .await
-                    .inspect_err(|e| {
-                        warn!(
-                            "failed to send datagram({payload_len}) through the tunnel, err: {e}"
+            if let Err(e) = packet_sender.try_send(packet) {
+                match e {
+                    mpsc::error::TrySendError::Full(_) => {
+                        debug!(
+                            "udp stream writer queue is full, drop datagram for stream:{stream_key:?}"
                         );
-                    })
-                    .ok();
-            });
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        warn!(
+                            "failed to enqueue datagram for udp stream {stream_key:?}, writer closed"
+                        );
+                        if conn.close_reason().is_some() {
+                            debug!("connection already closed, stop udp serving loop");
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         info!("udp serving loop stopped");
@@ -95,25 +87,55 @@ impl UdpTunnel {
         conn: Connection,
         udp_sender: Sender<UdpMessage>,
         stream_key: UdpStreamKey,
-        stream_map: Arc<DashMap<UdpStreamKey, TSafe<SendStream>>>,
+        stream_map: Arc<DashMap<UdpStreamKey, Sender<UdpPacket>>>,
         udp_timeout_ms: u64,
-    ) -> Result<TSafe<SendStream>> {
+    ) -> Result<Sender<UdpPacket>> {
         if let Some(s) = stream_map.get(&stream_key) {
-            return Ok((*s).clone());
+            return Ok(s.value().clone());
         }
 
-        let (quic_send, mut quic_recv) =
+        let (mut quic_send, mut quic_recv) =
             conn.open_bi().await.context("open_bi failed for udp out")?;
+        let (packet_sender, mut packet_receiver) = mpsc::channel::<UdpPacket>(512);
+        stream_map.insert(stream_key, packet_sender.clone());
 
-        let quic_send = Arc::new(Mutex::new(quic_send));
-        stream_map.insert(stream_key, quic_send.clone());
-
-        let stream_map = stream_map.clone();
+        let stream_map_for_writer = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream: {:?}, streams: {}",
-                stream_key,
-                stream_map.len(),
+                "start udp stream writer: {stream_key:?}, streams: {}",
+                stream_map_for_writer.len(),
+            );
+            while let Some(packet) = packet_receiver.recv().await {
+                let payload_len = packet.payload.len();
+                if let Err(e) = TunnelMessage::send(
+                    &mut quic_send,
+                    &TunnelMessage::ReqUdpStart(UdpPeerAddr(packet.peer_addr)),
+                )
+                .await
+                {
+                    warn!(
+                        "failed to send udp packet metadata({payload_len}) through tunnel, err: {e}"
+                    );
+                    break;
+                }
+                if let Err(e) = TunnelMessage::send_raw(&mut quic_send, &packet.payload).await {
+                    warn!("failed to send datagram({payload_len}) through tunnel, err: {e}");
+                    break;
+                }
+            }
+
+            stream_map_for_writer.remove(&stream_key);
+            debug!(
+                "dropped udp stream writer: {stream_key:?}, streams: {}",
+                stream_map_for_writer.len(),
+            );
+        });
+
+        let stream_map_for_reader = stream_map.clone();
+        tokio::spawn(async move {
+            debug!(
+                "start udp stream reader: {stream_key:?}, streams: {}",
+                stream_map_for_reader.len(),
             );
             loop {
                 let mut payload = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
@@ -145,15 +167,14 @@ impl UdpTunnel {
                 }
             }
 
-            stream_map.remove(&stream_key);
+            stream_map_for_reader.remove(&stream_key);
             debug!(
-                "dropped udp stream: {:?}, streams: {}",
-                stream_key,
-                stream_map.len(),
+                "dropped udp stream reader: {stream_key:?}, streams: {}",
+                stream_map_for_reader.len(),
             );
         });
 
-        Ok(quic_send)
+        Ok(packet_sender)
     }
 
     pub async fn start_accepting(
@@ -280,7 +301,7 @@ impl UdpTunnel {
         quic_send: Arc<Mutex<SendStream>>,
         udp_timeout_ms: u64,
     ) -> Result<Option<(Arc<UdpSocket>, oneshot::Sender<()>)>> {
-        let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let local_addr = socket_addr_with_unspecified_ip_port(addr.is_ipv6());
         match UdpSocket::bind(local_addr).await {
             Ok(udp_socket) => {
                 if let Err(e) = udp_socket.connect(addr).await {

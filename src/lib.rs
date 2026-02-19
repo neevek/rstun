@@ -418,7 +418,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_initCertificateVerifier(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_initCertificateVerifier(
         mut env: JNIEnv,
         _: JClass,
         context: JObject,
@@ -434,7 +434,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeInitLogger(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeInitLogger(
         mut env: JNIEnv,
         _: JClass,
         jlogLevel: JString,
@@ -453,7 +453,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeCreate(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeCreate(
         mut env: JNIEnv,
         _: JClass,
         jserverAddr: JString,
@@ -509,7 +509,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStop(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeStop(
         _env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -520,7 +520,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeStartTunnelling(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeStartTunnelling(
         _env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -538,7 +538,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeGetState(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeGetState(
         env: JNIEnv,
         _: JClass,
         client_ptr: jlong,
@@ -556,7 +556,7 @@ pub mod android {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn Java_net_neevek_omnip_RsTunc_nativeSetEnableOnInfoReport(
+    pub unsafe extern "C" fn Java_net_neevek_omnip_Rstun_nativeSetEnableOnInfoReport(
         env: JNIEnv,
         jobj: JClass,
         client_ptr: jlong,

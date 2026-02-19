@@ -150,7 +150,7 @@ impl Server {
     pub async fn serve(&self) -> Result<()> {
         let state = self.inner_state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            let mut interval = tokio::time::interval(Duration::from_millis(2400));
             loop {
                 interval.tick().await;
                 Self::clear_expired_sessions(state.clone());
@@ -389,14 +389,13 @@ impl Server {
                         Err(e) => {
                             TunnelMessage::send_failure(
                                 quic_send,
-                                format!("udp server failed to bind at: {upstream_addr}"),
+                                format!("tcp server failed to bind at: {upstream_addr}"),
                             )
                             .await?;
                             log_and_bail!("tcp_IN login rejected: {e}");
                         }
                     };
 
-                    TunnelMessage::send(quic_send, &TunnelMessage::RespSuccess).await?;
                     TunnelType::TcpIn(TcpTunnelInInfo { conn, tcp_server })
                 }
 
@@ -413,7 +412,6 @@ impl Server {
                         }
                     };
 
-                    TunnelMessage::send(quic_send, &TunnelMessage::RespSuccess).await?;
                     TunnelType::UdpIn(UdpTunnelInInfo { conn, udp_server })
                 }
             },

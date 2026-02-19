@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use backon::ExponentialBuilder;
 use backon::Retryable;
-use log::{debug, error, info, warn};
+use log::{Level, debug, error, info, log_enabled, warn};
 use quinn::{Connection, Endpoint, TransportConfig, congestion, crypto::rustls::QuicClientConfig};
 use quinn::{IdleTimeout, VarInt};
 use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
@@ -32,7 +32,10 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     str::FromStr,
-    sync::{Arc, Mutex, MutexGuard, Once},
+    sync::{
+        Arc, Mutex, MutexGuard, Once,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::net::TcpStream;
@@ -115,6 +118,8 @@ enum ConnectInput<S: AsyncStream> {
 pub struct Client {
     config: ClientConfig,
     inner_state: Arc<Mutex<State>>,
+    traffic_reporter_once: Arc<Once>,
+    next_tunnel_id: Arc<AtomicUsize>,
 }
 
 macro_rules! inner_state {
@@ -144,6 +149,8 @@ impl Client {
         Client {
             config,
             inner_state: Arc::new(Mutex::new(State::new())),
+            traffic_reporter_once: Arc::new(Once::new()),
+            next_tunnel_id: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -165,6 +172,8 @@ impl Client {
     }
 
     pub fn connect_and_serve_async(&mut self) {
+        self.start_traffic_reporter_once();
+
         for (index, tunnel_config) in self.config.tunnels.iter().cloned().enumerate() {
             let mut this = self.clone();
             tokio::spawn(async move {
@@ -177,7 +186,6 @@ impl Client {
             });
         }
 
-        self.report_traffic_data_in_background();
         if self.config.hop_interval_ms > 0 {
             self.start_migration_task();
         }
@@ -196,11 +204,14 @@ impl Client {
     }
 
     fn connect_and_serve_channel_async<S: AsyncStream>(&mut self, upstream: ChannelUpstream<S>) {
+        self.start_traffic_reporter_once();
+
         let upstream_type = match &upstream {
             ChannelUpstream::Tcp(_) => UpstreamType::Tcp,
             ChannelUpstream::Udp(_, _) => UpstreamType::Udp,
         };
-        let tunnel_id = TunnelId::Channel(upstream_type.clone());
+        let channel_tunnel_id = self.next_tunnel_id.fetch_add(1, Ordering::Relaxed);
+        let tunnel_id = TunnelId::Channel(channel_tunnel_id, upstream_type.clone());
         let mut this = self.clone();
         tokio::spawn(async move {
             this.connect_and_serve::<S>(
@@ -461,6 +472,12 @@ impl Client {
             }
         }
         self.post_tunnel_log(&tunnel_descriptor, format!("[{login_info}] quit").as_str());
+    }
+
+    fn start_traffic_reporter_once(&self) {
+        self.traffic_reporter_once.call_once(|| {
+            self.report_traffic_data_in_background();
+        });
     }
 
     async fn connect_once(
@@ -970,21 +987,24 @@ impl Client {
                             data.rtt_ms /= data.active_conns as u64;
                             data.cwnd_bytes /= data.active_conns as u64;
                         }
-                        info!(
-                            "[{descriptor}] traffic rx_bytes:{}, tx_bytes:{}, rx_dgrams:{}, tx_dgrams:{}, sent_packets:{}, lost_packets:{}, lost_bytes:{}, congestion_events:{}, active_conns:{}, rtt_ms:{}, cwnd_bytes:{}, current_mtu:{}",
-                            data.rx_bytes,
-                            data.tx_bytes,
-                            data.rx_dgrams,
-                            data.tx_dgrams,
-                            data.sent_packets,
-                            data.lost_packets,
-                            data.lost_bytes,
-                            data.congestion_events,
-                            data.active_conns,
-                            data.rtt_ms,
-                            data.cwnd_bytes,
-                            data.current_mtu
-                        );
+
+                        if log_enabled!(Level::Info) {
+                            info!(
+                                "[{descriptor}] traffic rx_bytes:{}, tx_bytes:{}, rx_dgrams:{}, tx_dgrams:{}, sent_packets:{}, lost_packets:{}, lost_bytes:{}, congestion_events:{}, active_conns:{}, rtt_ms:{}, cwnd_bytes:{}, current_mtu:{}",
+                                data.rx_bytes,
+                                data.tx_bytes,
+                                data.rx_dgrams,
+                                data.tx_dgrams,
+                                data.sent_packets,
+                                data.lost_packets,
+                                data.lost_bytes,
+                                data.congestion_events,
+                                data.active_conns,
+                                data.rtt_ms,
+                                data.cwnd_bytes,
+                                data.current_mtu
+                            );
+                        }
                         if event_bus.has_listeners() {
                             event_bus.post(TunnelEvent::new(
                                 timestamp.clone(),

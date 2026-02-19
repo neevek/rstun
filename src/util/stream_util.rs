@@ -72,12 +72,9 @@ impl StreamUtil {
                 match result {
                     Err(TransferError::TimeoutError) => {
                         let _ = quic_to_stream_tx.send(());
-                        match stream_to_quic_rx.await {
-                            _ => {
-                                // either the sender is dropped or the task times out
-                                break;
-                            }
-                        }
+                        stream_to_quic_rx.await.ok();
+                        // either the sender is dropped or the task times out
+                        break;
                     }
                     Ok(0) | Err(_) => {
                         let _ = quic_to_stream_tx.send(());
@@ -108,12 +105,9 @@ impl StreamUtil {
                 match result {
                     Err(TransferError::TimeoutError) => {
                         let _ = stream_to_quic_tx.send(());
-                        match quic_to_stream_rx.await {
-                            _ => {
-                                // either the sender is dropped or the task times out
-                                break;
-                            }
-                        }
+                        quic_to_stream_rx.await.ok();
+                        // either the sender is dropped or the task times out
+                        break;
                     }
                     Ok(0) | Err(_) => {
                         let _ = stream_to_quic_tx.send(());

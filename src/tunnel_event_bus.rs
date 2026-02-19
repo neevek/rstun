@@ -25,14 +25,14 @@ pub struct TunnelTraffic {
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TunnelId {
     Network(usize),
-    Channel(UpstreamType),
+    Channel(usize, UpstreamType),
 }
 
 impl Display for TunnelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TunnelId::Network(index) => write!(f, "{index}"),
-            TunnelId::Channel(protocol) => write!(f, "channel-{protocol}"),
+            TunnelId::Channel(id, protocol) => write!(f, "channel-{protocol}-{id}"),
         }
     }
 }
@@ -97,9 +97,9 @@ impl TunnelEvent {
                 proto: tunnel.proto,
                 mode: tunnel.mode,
             },
-            TunnelId::Channel(protocol) => TunnelInfo {
+            TunnelId::Channel(id, protocol) => TunnelInfo {
                 source: TunnelSource::Channel,
-                id: None,
+                id: Some(id),
                 proto: protocol,
                 mode: tunnel.mode,
             },
