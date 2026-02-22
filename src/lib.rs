@@ -2,6 +2,7 @@ mod client;
 mod heartbeat;
 mod pem_util;
 mod server;
+mod socket_protector;
 mod tcp;
 mod tunnel_event_bus;
 mod tunnel_message;
@@ -19,6 +20,7 @@ use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;
 use serde::Serialize;
 pub use server::Server;
+pub use socket_protector::{protect_socket_fd, protect_udp_socket, set_socket_protector};
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -27,8 +29,8 @@ use std::{net::SocketAddr, ops::Deref};
 pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
 pub use tunnel_event_bus::{
-    TunnelDescriptor, TunnelEvent, TunnelEventType, TunnelId, TunnelInfo, TunnelSource,
-    TunnelState, TunnelTraffic,
+    TunnelDescriptor, TunnelEvent, TunnelEventType, TunnelId, TunnelInfo, TunnelSource, TunnelStat,
+    TunnelState,
 };
 use tunnel_message::LoginInfo;
 use udp::udp_server::UdpServer;
@@ -515,7 +517,7 @@ pub mod android {
         client_ptr: jlong,
     ) {
         if client_ptr != 0 {
-            let _boxed_client = Box::from_raw(client_ptr as *mut Client);
+            let _boxed_client = unsafe { Box::from_raw(client_ptr as *mut Client) };
         }
     }
 
@@ -530,7 +532,7 @@ pub mod android {
         }
 
         thread::spawn(move || {
-            let mut client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+            let mut client = (unsafe { &mut *(client_ptr as *mut Arc<Mutex<Client>>) })
                 .lock()
                 .unwrap();
             client.start_tunneling();
@@ -547,7 +549,7 @@ pub mod android {
             return env.new_string("").unwrap().into_raw();
         }
 
-        let client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+        let client = (unsafe { &mut *(client_ptr as *mut Arc<Mutex<Client>>) })
             .lock()
             .unwrap();
         env.new_string(client.get_state().to_string())
@@ -566,7 +568,7 @@ pub mod android {
             return;
         }
 
-        let client = (&mut *(client_ptr as *mut Arc<Mutex<Client>>))
+        let client = (unsafe { &mut *(client_ptr as *mut Arc<Mutex<Client>>) })
             .lock()
             .unwrap();
         let bool_enable = enable == 1;

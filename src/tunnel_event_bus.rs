@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 const EVENT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TunnelTraffic {
+pub struct TunnelStat {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub tx_dgrams: u64,
@@ -55,7 +55,7 @@ impl Display for TunnelDescriptor {
 pub enum TunnelEventType {
     State(TunnelState),
     Log(String),
-    Traffic(TunnelTraffic),
+    Stat(TunnelStat),
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -67,10 +67,11 @@ pub enum TunnelState {
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct TunnelEvent {
-    pub timestamp: String,
-    pub tunnel: TunnelInfo,
     #[serde(flatten)]
     pub event_type: TunnelEventType,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelInfo>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -89,7 +90,7 @@ pub enum TunnelSource {
 }
 
 impl TunnelEvent {
-    pub fn new(timestamp: String, tunnel: TunnelDescriptor, event_type: TunnelEventType) -> Self {
+    pub fn new(event_type: TunnelEventType, timestamp: String, tunnel: TunnelDescriptor) -> Self {
         let tunnel = match tunnel.id {
             TunnelId::Network(id) => TunnelInfo {
                 source: TunnelSource::Network,
@@ -107,8 +108,16 @@ impl TunnelEvent {
 
         Self {
             timestamp,
-            tunnel,
+            tunnel: Some(tunnel),
             event_type,
+        }
+    }
+
+    pub fn new_without_tunnel(event_type: TunnelEventType, timestamp: String) -> Self {
+        Self {
+            event_type,
+            timestamp,
+            tunnel: None,
         }
     }
 

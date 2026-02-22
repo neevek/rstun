@@ -5,8 +5,8 @@ use crate::{
     pem_util, socket_addr_with_unspecified_ip_port,
     tcp::{AsyncStream, StreamReceiver, StreamRequest, tcp_tunnel::TcpTunnel},
     tunnel_event_bus::{
-        TunnelDescriptor, TunnelEvent, TunnelEventBus, TunnelEventType, TunnelId, TunnelState,
-        TunnelTraffic,
+        TunnelDescriptor, TunnelEvent, TunnelEventBus, TunnelEventType, TunnelId, TunnelStat,
+        TunnelState,
     },
     tunnel_message::TunnelMessage,
     udp::{UdpReceiver, UdpSender, udp_server::UdpServer, udp_tunnel::UdpTunnel},
@@ -70,8 +70,7 @@ struct State {
     endpoint: Option<Endpoint>,
     connections: HashMap<usize, ConnectionEntry>,
     client_state: ClientState,
-    tunnel_traffic: HashMap<TunnelId, TunnelTraffic>,
-    tunnel_registry: HashMap<TunnelId, TunnelDescriptor>,
+    tunnel_stat: TunnelStat,
     event_bus: TunnelEventBus,
 }
 
@@ -84,8 +83,7 @@ impl State {
             endpoint: None,
             connections: HashMap::new(),
             client_state: ClientState::Idle,
-            tunnel_traffic: HashMap::new(),
-            tunnel_registry: HashMap::new(),
+            tunnel_stat: TunnelStat::default(),
             event_bus: TunnelEventBus::new(),
         }
     }
@@ -94,7 +92,6 @@ impl State {
 #[derive(Clone)]
 struct ConnectionEntry {
     conn: Connection,
-    tunnel_id: TunnelId,
 }
 
 struct LoginConfig {
@@ -246,13 +243,19 @@ impl Client {
     async fn migrate_endpoint(endpoint: &Endpoint) -> Result<()> {
         let current_addr = endpoint.local_addr()?;
         let new_addr = socket_addr_with_unspecified_ip_port(current_addr.is_ipv6());
-        let socket = std::net::UdpSocket::bind(new_addr)?;
+        let socket = Self::bind_client_udp_socket(new_addr)?;
         debug!(
             "endpoint migration, from_addr:{current_addr}, to_addr:{}",
             socket.local_addr()?
         );
         endpoint.rebind(socket)?;
         Ok(())
+    }
+
+    fn bind_client_udp_socket(bind_addr: SocketAddr) -> Result<std::net::UdpSocket> {
+        let socket = std::net::UdpSocket::bind(bind_addr)?;
+        crate::protect_udp_socket(&socket)?;
+        Ok(socket)
     }
 
     pub async fn start_tcp_server(&self, addr: SocketAddr) -> Result<TcpServer> {
@@ -376,7 +379,6 @@ impl Client {
         };
         let tunnel_descriptor =
             self.build_tunnel_descriptor(tunnel_id.clone(), &tunnel, &connect_input);
-        self.register_tunnel_descriptor(tunnel_descriptor.clone());
 
         let mut pending_network_request = None;
         let mut pending_channel_request = None;
@@ -419,13 +421,8 @@ impl Client {
                         let ConnectInput::Network = connect_input else {
                             unreachable!("Network-based tunnel requires ConnectInput::Network");
                         };
-                        inner_state!(self, connections).insert(
-                            conn.stable_id(),
-                            ConnectionEntry {
-                                conn: conn.clone(),
-                                tunnel_id: tunnel_id.clone(),
-                            },
-                        );
+                        inner_state!(self, connections)
+                            .insert(conn.stable_id(), ConnectionEntry { conn: conn.clone() });
 
                         self.handle_network_based_tunnel(
                             &tunnel_descriptor,
@@ -438,13 +435,8 @@ impl Client {
                         inner_state!(self, connections).remove(&conn.stable_id());
                     }
                     Tunnel::ChannelBased(upstream_type) => {
-                        inner_state!(self, connections).insert(
-                            conn.stable_id(),
-                            ConnectionEntry {
-                                conn: conn.clone(),
-                                tunnel_id: tunnel_id.clone(),
-                            },
-                        );
+                        inner_state!(self, connections)
+                            .insert(conn.stable_id(), ConnectionEntry { conn: conn.clone() });
                         self.handle_channel_based_tunnel(
                             &tunnel_descriptor,
                             &conn,
@@ -490,8 +482,8 @@ impl Client {
         let endpoint = if let Some(endpoint) = endpoint {
             endpoint
         } else {
-            let mut endpoint = quinn::Endpoint::client(login_cfg.local_addr)?;
-            endpoint.set_default_client_config(login_cfg.quinn_client_cfg);
+            let endpoint =
+                Self::create_client_endpoint(login_cfg.local_addr, login_cfg.quinn_client_cfg)?;
             inner_state!(self, endpoint) = Some(endpoint.clone());
             endpoint
         };
@@ -504,6 +496,21 @@ impl Client {
             login_cfg.domain.as_str(),
         )
         .await
+    }
+
+    fn create_client_endpoint(
+        local_addr: SocketAddr,
+        quinn_client_cfg: quinn::ClientConfig,
+    ) -> Result<Endpoint> {
+        let socket = Self::bind_client_udp_socket(local_addr)?;
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            socket,
+            quinn::default_runtime().ok_or_else(|| anyhow::anyhow!("no async runtime found"))?,
+        )?;
+        endpoint.set_default_client_config(quinn_client_cfg);
+        Ok(endpoint)
     }
 
     async fn handle_network_based_tunnel(
@@ -557,7 +564,7 @@ impl Client {
             }
         }
 
-        self.add_connection_stats_to_total(tunnel.id.clone(), conn);
+        self.add_connection_stats_to_total(conn);
     }
 
     async fn handle_channel_based_tunnel<S: AsyncStream>(
@@ -599,21 +606,21 @@ impl Client {
             _ => unreachable!("Channel-based tunnel requires ConnectInput::Channel"),
         }
 
-        self.add_connection_stats_to_total(tunnel.id.clone(), conn);
+        self.add_connection_stats_to_total(conn);
     }
 
-    fn add_connection_stats_to_total(&self, tunnel_id: TunnelId, conn: &Connection) {
+    fn add_connection_stats_to_total(&self, conn: &Connection) {
         let stats = conn.stats();
         let mut state = lock_state(&self.inner_state);
-        let data = state.tunnel_traffic.entry(tunnel_id).or_default();
-        data.rx_bytes += stats.udp_rx.bytes;
-        data.tx_bytes += stats.udp_tx.bytes;
-        data.rx_dgrams += stats.udp_rx.datagrams;
-        data.tx_dgrams += stats.udp_tx.datagrams;
-        data.sent_packets += stats.path.sent_packets;
-        data.lost_packets += stats.path.lost_packets;
-        data.lost_bytes += stats.path.lost_bytes;
-        data.congestion_events += stats.path.congestion_events;
+        let stat = &mut state.tunnel_stat;
+        stat.rx_bytes += stats.udp_rx.bytes;
+        stat.tx_bytes += stats.udp_tx.bytes;
+        stat.rx_dgrams += stats.udp_rx.datagrams;
+        stat.tx_dgrams += stats.udp_tx.datagrams;
+        stat.sent_packets += stats.path.sent_packets;
+        stat.lost_packets += stats.path.lost_packets;
+        stat.lost_bytes += stats.path.lost_bytes;
+        stat.congestion_events += stats.path.congestion_events;
     }
 
     async fn prepare_login_config(&self) -> Result<LoginConfig> {
@@ -939,80 +946,65 @@ impl Client {
             loop {
                 interval.tick().await;
 
-                let (tunnel_traffic, tunnel_registry, client_state, event_bus) = {
+                let (stat, client_state, event_bus) = {
                     let locked_state = lock_state(&state);
-                    let mut tunnel_traffic: HashMap<TunnelId, TunnelTraffic> = HashMap::new();
+                    let mut stat = TunnelStat::default();
 
                     for entry in locked_state.connections.values() {
                         let stats = entry.conn.stats();
-                        let data = tunnel_traffic.entry(entry.tunnel_id.clone()).or_default();
-                        data.rx_bytes += stats.udp_rx.bytes;
-                        data.tx_bytes += stats.udp_tx.bytes;
-                        data.rx_dgrams += stats.udp_rx.datagrams;
-                        data.tx_dgrams += stats.udp_tx.datagrams;
-                        data.sent_packets += stats.path.sent_packets;
-                        data.lost_packets += stats.path.lost_packets;
-                        data.lost_bytes += stats.path.lost_bytes;
-                        data.congestion_events += stats.path.congestion_events;
-                        data.active_conns += 1;
-                        data.rtt_ms += stats.path.rtt.as_millis() as u64;
-                        data.cwnd_bytes += stats.path.cwnd;
-                        data.current_mtu = data.current_mtu.max(stats.path.current_mtu);
+                        stat.rx_bytes += stats.udp_rx.bytes;
+                        stat.tx_bytes += stats.udp_tx.bytes;
+                        stat.rx_dgrams += stats.udp_rx.datagrams;
+                        stat.tx_dgrams += stats.udp_tx.datagrams;
+                        stat.sent_packets += stats.path.sent_packets;
+                        stat.lost_packets += stats.path.lost_packets;
+                        stat.lost_bytes += stats.path.lost_bytes;
+                        stat.congestion_events += stats.path.congestion_events;
+                        stat.active_conns += 1;
+                        stat.rtt_ms = stat.rtt_ms.max(stats.path.rtt.as_millis() as u64);
+                        stat.cwnd_bytes = stat.cwnd_bytes.max(stats.path.cwnd);
+                        stat.current_mtu = stat.current_mtu.max(stats.path.current_mtu);
                     }
 
-                    for (tunnel_id, total) in &locked_state.tunnel_traffic {
-                        let data = tunnel_traffic.entry(tunnel_id.clone()).or_default();
-                        data.rx_bytes += total.rx_bytes;
-                        data.tx_bytes += total.tx_bytes;
-                        data.rx_dgrams += total.rx_dgrams;
-                        data.tx_dgrams += total.tx_dgrams;
-                        data.sent_packets += total.sent_packets;
-                        data.lost_packets += total.lost_packets;
-                        data.lost_bytes += total.lost_bytes;
-                        data.congestion_events += total.congestion_events;
-                    }
+                    stat.rx_bytes += locked_state.tunnel_stat.rx_bytes;
+                    stat.tx_bytes += locked_state.tunnel_stat.tx_bytes;
+                    stat.rx_dgrams += locked_state.tunnel_stat.rx_dgrams;
+                    stat.tx_dgrams += locked_state.tunnel_stat.tx_dgrams;
+                    stat.sent_packets += locked_state.tunnel_stat.sent_packets;
+                    stat.lost_packets += locked_state.tunnel_stat.lost_packets;
+                    stat.lost_bytes += locked_state.tunnel_stat.lost_bytes;
+                    stat.congestion_events += locked_state.tunnel_stat.congestion_events;
 
                     (
-                        tunnel_traffic,
-                        locked_state.tunnel_registry.clone(),
+                        stat,
                         locked_state.client_state.clone(),
                         locked_state.event_bus.clone(),
                     )
                 };
 
                 let timestamp = chrono::Local::now().format(TIME_FORMAT).to_string();
-                for (tunnel_id, mut data) in tunnel_traffic {
-                    if let Some(descriptor) = tunnel_registry.get(&tunnel_id) {
-                        if data.active_conns > 0 {
-                            data.rtt_ms /= data.active_conns as u64;
-                            data.cwnd_bytes /= data.active_conns as u64;
-                        }
-
-                        if log_enabled!(Level::Info) {
-                            info!(
-                                "[{descriptor}] traffic rx_bytes:{}, tx_bytes:{}, rx_dgrams:{}, tx_dgrams:{}, sent_packets:{}, lost_packets:{}, lost_bytes:{}, congestion_events:{}, active_conns:{}, rtt_ms:{}, cwnd_bytes:{}, current_mtu:{}",
-                                data.rx_bytes,
-                                data.tx_bytes,
-                                data.rx_dgrams,
-                                data.tx_dgrams,
-                                data.sent_packets,
-                                data.lost_packets,
-                                data.lost_bytes,
-                                data.congestion_events,
-                                data.active_conns,
-                                data.rtt_ms,
-                                data.cwnd_bytes,
-                                data.current_mtu
-                            );
-                        }
-                        if event_bus.has_listeners() {
-                            event_bus.post(TunnelEvent::new(
-                                timestamp.clone(),
-                                descriptor.clone(),
-                                TunnelEventType::Traffic(data),
-                            ));
-                        }
-                    }
+                if log_enabled!(Level::Info) {
+                    info!(
+                        "traffic rx_bytes:{}, tx_bytes:{}, rx_dgrams:{}, tx_dgrams:{}, sent_packets:{}, lost_packets:{}, lost_bytes:{}, congestion_events:{}, active_conns:{}, rtt_ms:{}, cwnd_bytes:{}, current_mtu:{}",
+                        stat.rx_bytes,
+                        stat.tx_bytes,
+                        stat.rx_dgrams,
+                        stat.tx_dgrams,
+                        stat.sent_packets,
+                        stat.lost_packets,
+                        stat.lost_bytes,
+                        stat.congestion_events,
+                        stat.active_conns,
+                        stat.rtt_ms,
+                        stat.cwnd_bytes,
+                        stat.current_mtu
+                    );
+                }
+                if event_bus.has_listeners() {
+                    event_bus.post(TunnelEvent::new_without_tunnel(
+                        TunnelEventType::Stat(stat),
+                        timestamp.clone(),
+                    ));
                 }
 
                 if client_state == ClientState::Stopping || client_state == ClientState::Terminated
@@ -1187,17 +1179,17 @@ impl Client {
     fn post_tunnel_log(&self, tunnel: &TunnelDescriptor, msg: &str) {
         info!("[{tunnel}] {msg}");
         self.post_event(TunnelEvent::new(
+            TunnelEventType::Log(msg.to_string()),
             chrono::Local::now().format(TIME_FORMAT).to_string(),
             tunnel.clone(),
-            TunnelEventType::Log(msg.to_string()),
         ));
     }
 
     fn post_tunnel_state(&self, tunnel: &TunnelDescriptor, tunnel_state: TunnelState) {
         self.post_event(TunnelEvent::new(
+            TunnelEventType::State(tunnel_state),
             chrono::Local::now().format(TIME_FORMAT).to_string(),
             tunnel.clone(),
-            TunnelEventType::State(tunnel_state),
         ));
     }
 
@@ -1234,13 +1226,6 @@ impl Client {
                 unreachable!("Channel-based tunnel requires ConnectInput::Channel");
             }
         }
-    }
-
-    fn register_tunnel_descriptor(&self, descriptor: TunnelDescriptor) {
-        let mut state = lock_state(&self.inner_state);
-        state
-            .tunnel_registry
-            .insert(descriptor.id.clone(), descriptor);
     }
 
     pub fn register_for_events(&self) -> std::sync::mpsc::Receiver<TunnelEvent> {
