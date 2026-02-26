@@ -251,9 +251,14 @@ impl Server {
                             info.udp_server.shutdown().await.ok();
                         }
                         TunnelType::DynamicUpstreamTcpOut(conn) => {
-                            TcpTunnel::start_accepting(&conn, None, config.tcp_timeout_ms)
-                                .await
-                                .ok();
+                            TcpTunnel::start_dynamic_accepting(
+                                &conn,
+                                config.default_tcp_upstream,
+                                config.tcp_timeout_ms,
+                                config.channel_tcp_connector.clone(),
+                            )
+                            .await
+                            .ok();
                         }
                         TunnelType::DynamicUpstreamUdpOut(conn) => {
                             UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms)

@@ -21,11 +21,14 @@ use serde::Deserialize;
 use serde::Serialize;
 pub use server::Server;
 pub use socket_protector::{protect_socket_fd, protect_udp_socket, set_socket_protector};
+use std::future::Future;
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
-use std::{net::SocketAddr, ops::Deref};
+use std::pin::Pin;
+use std::{net::SocketAddr, ops::Deref, sync::Arc};
+use tokio::net::TcpStream;
 pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
 pub use tunnel_event_bus::{
@@ -220,7 +223,7 @@ pub struct ClientConfig {
     pub workers: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub addr: String,
     pub password: String,
@@ -234,11 +237,48 @@ pub struct ServerConfig {
     pub default_tcp_upstream: Option<SocketAddr>,
     pub default_udp_upstream: Option<SocketAddr>,
 
+    /// Optional callback for channel-based TCP tunnels. When provided, it can decide how to
+    /// establish the upstream stream for each accepted QUIC stream using requested destination
+    /// metadata and server defaults.
+    pub channel_tcp_connector: Option<ChannelTcpConnector>,
+
     /// 0.0.0.0:3515
     pub dashboard_server: String,
     /// user:password
     pub dashboard_server_credential: String,
 }
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("addr", &self.addr)
+            .field("password", &"<redacted>")
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &self.key_path)
+            .field("quic_timeout_ms", &self.quic_timeout_ms)
+            .field("tcp_timeout_ms", &self.tcp_timeout_ms)
+            .field("udp_timeout_ms", &self.udp_timeout_ms)
+            .field("default_tcp_upstream", &self.default_tcp_upstream)
+            .field("default_udp_upstream", &self.default_udp_upstream)
+            .field(
+                "channel_tcp_connector",
+                &self.channel_tcp_connector.as_ref().map(|_| "Some(<connector>)"),
+            )
+            .field("dashboard_server", &self.dashboard_server)
+            .field("dashboard_server_credential", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelTcpConnectCtx {
+    pub requested_dst: Option<SocketAddr>,
+    pub default_upstream: Option<SocketAddr>,
+    pub timeout_ms: u64,
+}
+
+pub type ChannelTcpConnectFuture = Pin<Box<dyn Future<Output = Result<TcpStream>> + Send>>;
+pub type ChannelTcpConnector = Arc<dyn Fn(ChannelTcpConnectCtx) -> ChannelTcpConnectFuture + Send + Sync>;
 
 impl ClientConfig {
     #[allow(clippy::too_many_arguments)]

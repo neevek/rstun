@@ -1,6 +1,7 @@
 use crate::tcp::StreamMessage;
 use crate::tcp::{AsyncStream, StreamReceiver, StreamRequest};
 use crate::util::stream_util::StreamUtil;
+use crate::{ChannelTcpConnectCtx, ChannelTcpConnector};
 use anyhow::Result;
 use log::{debug, error, info};
 use std::borrow::BorrowMut;
@@ -13,6 +14,25 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct TcpTunnel;
 
 impl TcpTunnel {
+    pub async fn start_dynamic_accepting(
+        conn: &quinn::Connection,
+        default_upstream: Option<SocketAddr>,
+        stream_timeout_ms: u64,
+        tcp_connector: Option<ChannelTcpConnector>,
+    ) -> Result<()> {
+        if let Some(connector) = tcp_connector {
+            Self::start_accepting_with_connector(
+                conn,
+                default_upstream,
+                stream_timeout_ms,
+                Some(connector),
+            )
+            .await
+        } else {
+            Self::start_accepting(conn, None, stream_timeout_ms).await
+        }
+    }
+
     pub async fn start_serving<S: AsyncStream>(
         tunnel_out: bool,
         conn: &quinn::Connection,
@@ -65,6 +85,15 @@ impl TcpTunnel {
         upstream_addr: Option<SocketAddr>,
         stream_timeout_ms: u64,
     ) -> Result<()> {
+        Self::start_accepting_with_connector(conn, upstream_addr, stream_timeout_ms, None).await
+    }
+
+    pub async fn start_accepting_with_connector(
+        conn: &quinn::Connection,
+        upstream_addr: Option<SocketAddr>,
+        stream_timeout_ms: u64,
+        tcp_connector: Option<ChannelTcpConnector>,
+    ) -> Result<()> {
         let remote_addr = &conn.remote_address();
         info!(
             "tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}"
@@ -84,40 +113,73 @@ impl TcpTunnel {
                     error!("failed to accept tcp bi stream, remote_addr:{remote_addr}, err:{e}");
                     break;
                 }
-                Ok((quic_send, mut quic_recv)) => tokio::spawn(async move {
-                    let dst_addr = match upstream_addr {
-                        Some(dst_addr) => dst_addr,
-                        None => {
+                Ok((quic_send, mut quic_recv)) => {
+                    let tcp_connector = tcp_connector.clone();
+                    tokio::spawn(async move {
+                        let requested_dst = if tcp_connector.is_some() || upstream_addr.is_none() {
                             match StreamUtil::read_socket_addr(&mut quic_recv, stream_timeout_ms)
                                 .await
                             {
-                                Ok(dst_addr) => dst_addr,
+                                Ok(dst_addr) => Some(dst_addr),
                                 Err(e) => {
                                     log::error!("failed to read dst address: {e}");
                                     return;
                                 }
                             }
-                        }
-                    };
+                        } else {
+                            None
+                        };
 
-                    match tokio::time::timeout(
-                        Duration::from_secs(5),
-                        TcpStream::connect(&dst_addr),
-                    )
-                    .await
-                    {
-                        Ok(Ok(request)) => StreamUtil::start_flowing(
+                        let upstream_stream = if let Some(connector) = tcp_connector {
+                            let ctx = ChannelTcpConnectCtx {
+                                requested_dst,
+                                default_upstream: upstream_addr,
+                                timeout_ms: stream_timeout_ms,
+                            };
+                            match connector(ctx).await {
+                                Ok(stream) => stream,
+                                Err(e) => {
+                                    error!("failed to connect via custom channel connector: {e}");
+                                    return;
+                                }
+                            }
+                        } else {
+                            let dst_addr = match upstream_addr.or(requested_dst) {
+                                Some(dst_addr) => dst_addr,
+                                None => {
+                                    error!("no destination available for accepted stream");
+                                    return;
+                                }
+                            };
+
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                TcpStream::connect(&dst_addr),
+                            )
+                            .await
+                            {
+                                Ok(Ok(request)) => request,
+                                Ok(Err(e)) => {
+                                    error!(
+                                        "failed to connect upstream, dst_addr:{dst_addr}, err:{e}"
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    error!("tcp connect timed out, dst_addr:{dst_addr}");
+                                    return;
+                                }
+                            }
+                        };
+
+                        StreamUtil::start_flowing(
                             "OUT",
-                            request,
+                            upstream_stream,
                             (quic_send, quic_recv),
                             stream_timeout_ms,
-                        ),
-                        Ok(Err(e)) => {
-                            error!("failed to connect upstream, dst_addr:{dst_addr}, err:{e}")
-                        }
-                        Err(_) => error!("tcp connect timed out, dst_addr:{dst_addr}"),
-                    }
-                }),
+                        );
+                    });
+                }
             };
         }
 

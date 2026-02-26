@@ -106,6 +106,7 @@ async fn run_server_async(mut args: ServerArgs) -> Result<()> {
         key_path: args.key,
         default_tcp_upstream: parse_upstreams("tcp", &args.tcp_upstream)?,
         default_udp_upstream: parse_upstreams("udp", &args.udp_upstream)?,
+        channel_tcp_connector: None,
         quic_timeout_ms: args.quic_timeout_ms,
         tcp_timeout_ms: args.tcp_timeout_ms,
         udp_timeout_ms: args.udp_timeout_ms,
