@@ -186,9 +186,9 @@ mod tests {
             mode: TunnelMode::Out,
         };
         let event = TunnelEvent::new(
+            TunnelEventType::Log("hello".to_string()),
             "2025-01-01 00:00:00.000".to_string(),
             descriptor,
-            TunnelEventType::Log("hello".to_string()),
         );
 
         bus.post(event.clone());

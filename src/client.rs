@@ -44,6 +44,9 @@ use tokio::sync::Mutex as AsyncMutex;
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
 const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 30;
+const RETRY_BACKOFF_MIN_MS: u64 = 300;
+const CONNECT_TIMEOUT_MIN_SECS: u64 = 3;
+const CONNECT_TIMEOUT_MAX_SECS: u64 = 15;
 static INIT: Once = Once::new();
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
@@ -383,18 +386,28 @@ impl Client {
         let mut pending_network_request = None;
         let mut pending_channel_request = None;
         loop {
+            let min_retry_delay = Self::retry_min_backoff_delay();
+            let max_retry_delay = self.retry_max_backoff_delay().max(min_retry_delay);
+            let connect_attempt = Arc::new(AtomicUsize::new(0));
             let this = self.clone();
             let state = self.inner_state.clone();
             let connect = || {
                 let mut client = this.clone();
                 let login_info = login_info.clone();
                 let tunnel_descriptor = tunnel_descriptor.clone();
-                async move { client.connect_once(&tunnel_descriptor, &login_info).await }
+                let attempt = connect_attempt.fetch_add(1, Ordering::Relaxed);
+                let connect_timeout = Self::connect_attempt_timeout_for(attempt);
+                async move {
+                    client
+                        .connect_once(&tunnel_descriptor, &login_info, connect_timeout)
+                        .await
+                }
             };
             let result = connect
                 .retry(
                     ExponentialBuilder::default()
-                        .with_max_delay(Duration::from_secs(10))
+                        .with_min_delay(min_retry_delay)
+                        .with_max_delay(max_retry_delay)
                         .with_max_times(usize::MAX),
                 )
                 .when(move |_| {
@@ -476,6 +489,7 @@ impl Client {
         &mut self,
         tunnel: &TunnelDescriptor,
         login_info: &LoginInfo,
+        connect_timeout: Duration,
     ) -> Result<Connection> {
         let login_cfg = self.prepare_login_config().await?;
         let endpoint = lock_state(&self.inner_state).endpoint.clone();
@@ -494,6 +508,7 @@ impl Client {
             login_info,
             &login_cfg.remote_addr,
             login_cfg.domain.as_str(),
+            connect_timeout,
         )
         .await
     }
@@ -661,25 +676,42 @@ impl Client {
         login_info: &LoginInfo,
         remote_addr: &SocketAddr,
         domain: &str,
+        connect_timeout: Duration,
     ) -> Result<Connection> {
         self.post_tunnel_state(tunnel, TunnelState::Connecting);
         self.post_tunnel_log(
             tunnel,
             format!(
-                "{} connecting, idle_timeout:{}, retry_timeout:{}, cipher:{}, threads:{}",
+                "{} connecting, idle_timeout:{}, retry_timeout:{}, connect_timeout:{}, cipher:{}, threads:{}",
                 login_info.format_with_remote_addr(remote_addr),
                 self.config.quic_timeout_ms,
-                self.config.wait_before_retry_ms,
+                self.retry_max_backoff_delay().as_millis(),
+                connect_timeout.as_millis(),
                 self.config.cipher,
                 self.config.workers,
             )
             .as_str(),
         );
 
-        let conn = endpoint.connect(*remote_addr, domain)?.await?;
-        let (mut quic_send, mut quic_recv) = conn
-            .open_bi()
+        let connecting = endpoint.connect(*remote_addr, domain)?;
+        let conn = tokio::time::timeout(connect_timeout, connecting)
             .await
+            .with_context(|| {
+                format!(
+                    "{} connect timed out after {} ms",
+                    login_info.format_with_remote_addr(remote_addr),
+                    connect_timeout.as_millis()
+                )
+            })??;
+        let (mut quic_send, mut quic_recv) = tokio::time::timeout(connect_timeout, conn.open_bi())
+            .await
+            .with_context(|| {
+                format!(
+                    "{} open bidirectional connection timed out after {} ms",
+                    login_info.format_with_remote_addr(remote_addr),
+                    connect_timeout.as_millis()
+                )
+            })?
             .context("open bidirectional connection failed")?;
 
         self.post_tunnel_state(tunnel, TunnelState::Connected);
@@ -693,9 +725,28 @@ impl Client {
         );
 
         let login_msg = TunnelMessage::ReqLogin(login_info.clone());
-        TunnelMessage::send(&mut quic_send, &login_msg).await?;
+        tokio::time::timeout(
+            connect_timeout,
+            TunnelMessage::send(&mut quic_send, &login_msg),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "{} send login request timed out after {} ms",
+                login_info.format_with_remote_addr(remote_addr),
+                connect_timeout.as_millis()
+            )
+        })??;
 
-        let resp = TunnelMessage::recv(&mut quic_recv).await?;
+        let resp = tokio::time::timeout(connect_timeout, TunnelMessage::recv(&mut quic_recv))
+            .await
+            .with_context(|| {
+                format!(
+                    "{} receive login response timed out after {} ms",
+                    login_info.format_with_remote_addr(remote_addr),
+                    connect_timeout.as_millis()
+                )
+            })??;
         if let TunnelMessage::RespFailure(msg) = resp {
             bail!(
                 "{} failed to login: {msg}",
@@ -720,6 +771,22 @@ impl Client {
 
         self.start_heartbeat_task(tunnel.clone(), conn.clone(), quic_send, quic_recv);
         Ok(conn)
+    }
+
+    fn retry_min_backoff_delay() -> Duration {
+        Duration::from_millis(RETRY_BACKOFF_MIN_MS)
+    }
+
+    fn retry_max_backoff_delay(&self) -> Duration {
+        Duration::from_millis(self.config.wait_before_retry_ms.max(RETRY_BACKOFF_MIN_MS))
+    }
+
+    fn connect_attempt_timeout_for(attempt: usize) -> Duration {
+        let shift = attempt.min((u64::BITS - 1) as usize) as u32;
+        let timeout_secs = CONNECT_TIMEOUT_MIN_SECS
+            .saturating_mul(1_u64 << shift)
+            .min(CONNECT_TIMEOUT_MAX_SECS);
+        Duration::from_secs(timeout_secs)
     }
 
     fn start_heartbeat_task(
@@ -1381,5 +1448,52 @@ mod tests {
             &event.event_type,
             TunnelEventType::State(TunnelState::Connecting)
         ));
+    }
+
+    #[test]
+    fn retry_backoff_delays_start_fast_and_honor_max() {
+        assert_eq!(
+            Client::retry_min_backoff_delay(),
+            Duration::from_millis(RETRY_BACKOFF_MIN_MS)
+        );
+
+        let mut config = ClientConfig::default();
+        config.wait_before_retry_ms = 0;
+        let client = Client::new(config.clone());
+        assert_eq!(
+            client.retry_max_backoff_delay(),
+            Duration::from_millis(RETRY_BACKOFF_MIN_MS)
+        );
+
+        config.wait_before_retry_ms = 5000;
+        let client = Client::new(config);
+        assert_eq!(
+            client.retry_max_backoff_delay(),
+            Duration::from_millis(5000)
+        );
+    }
+
+    #[test]
+    fn connect_attempt_timeout_for_grows_and_caps() {
+        assert_eq!(
+            Client::connect_attempt_timeout_for(0),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            Client::connect_attempt_timeout_for(1),
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            Client::connect_attempt_timeout_for(2),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            Client::connect_attempt_timeout_for(3),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            Client::connect_attempt_timeout_for(10),
+            Duration::from_secs(15)
+        );
     }
 }
