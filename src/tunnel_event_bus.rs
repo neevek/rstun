@@ -1,10 +1,8 @@
 use crate::{TunnelMode, UpstreamType};
 use serde::Serialize;
 use std::fmt::Display;
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-
-const EVENT_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Serialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TunnelStat {
@@ -129,7 +127,7 @@ impl TunnelEvent {
 
 #[derive(Clone)]
 pub struct TunnelEventBus {
-    listeners: Arc<Mutex<Vec<SyncSender<TunnelEvent>>>>,
+    listeners: Arc<Mutex<Vec<Sender<TunnelEvent>>>>,
 }
 
 impl TunnelEventBus {
@@ -140,7 +138,7 @@ impl TunnelEventBus {
     }
 
     pub fn register(&self) -> Receiver<TunnelEvent> {
-        let (tx, rx) = sync_channel(EVENT_QUEUE_CAPACITY);
+        let (tx, rx) = channel();
         let mut listeners = match self.listeners.lock() {
             Ok(listeners) => listeners,
             Err(poisoned) => poisoned.into_inner(),
@@ -162,17 +160,14 @@ impl TunnelEventBus {
             Ok(listeners) => listeners,
             Err(poisoned) => poisoned.into_inner(),
         };
-        listeners.retain(|listener| match listener.try_send(event.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => true,
-            Err(TrySendError::Disconnected(_)) => false,
-        });
+        listeners.retain(|listener| listener.send(event.clone()).is_ok());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn event_bus_delivers_to_multiple_listeners_and_drops_closed() {
@@ -197,5 +192,35 @@ mod tests {
         let received = receiver_one.recv().expect("event should arrive");
         assert!(bus.has_listeners());
         assert_eq!(received.timestamp, event.timestamp);
+    }
+
+    #[test]
+    fn event_bus_preserves_bursty_events_for_slow_listener() {
+        let bus = TunnelEventBus::new();
+        let receiver = bus.register();
+        let descriptor = TunnelDescriptor {
+            id: TunnelId::Network(1),
+            proto: UpstreamType::Tcp,
+            mode: TunnelMode::Out,
+        };
+
+        let total = 512;
+        for i in 0..total {
+            bus.post(TunnelEvent::new(
+                TunnelEventType::Log(format!("log-{i}")),
+                "2025-01-01 00:00:00.000".to_string(),
+                descriptor.clone(),
+            ));
+        }
+
+        for i in 0..total {
+            let event = receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("event should not be dropped");
+            match event.event_type {
+                TunnelEventType::Log(msg) => assert_eq!(msg, format!("log-{i}")),
+                _ => panic!("unexpected event type"),
+            }
+        }
     }
 }

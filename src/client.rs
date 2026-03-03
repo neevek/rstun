@@ -506,8 +506,8 @@ impl Client {
                             "[{tunnel}] recreate endpoint because address family changed, local_addr:{local_addr}, remote_addr:{}",
                             login_cfg.remote_addr
                         );
-                        let reset = self
-                            .clear_cached_endpoint_if_idle(tunnel, "address family changed");
+                        let reset =
+                            self.clear_cached_endpoint_if_idle(tunnel, "address family changed");
                         if reset { None } else { Some(endpoint) }
                     }
                     Err(err) => {
@@ -526,20 +526,16 @@ impl Client {
         let endpoint = if let Some(endpoint) = endpoint {
             endpoint
         } else {
-            let endpoint =
-                Self::create_client_endpoint(login_cfg.local_addr, login_cfg.quinn_client_cfg.clone())?;
+            let endpoint = Self::create_client_endpoint(
+                login_cfg.local_addr,
+                login_cfg.quinn_client_cfg.clone(),
+            )?;
             inner_state!(self, endpoint) = Some(endpoint.clone());
             endpoint
         };
 
         let result = self
-            .login(
-                tunnel,
-                &endpoint,
-                &login_cfg,
-                login_info,
-                connect_timeout,
-            )
+            .login(tunnel, &endpoint, &login_cfg, login_info, connect_timeout)
             .await;
         if let Err(err) = &result
             && !self.should_quit()
@@ -589,7 +585,7 @@ impl Client {
                         )
                         .await
                     };
-                    Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                     if !self.should_quit() {
                         self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                     }
@@ -599,7 +595,7 @@ impl Client {
                         self.serve_outbound_udp(tunnel, conn.clone(), local_server_addr)
                             .await
                     };
-                    Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                     if !self.should_quit() {
                         self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                     }
@@ -612,7 +608,7 @@ impl Client {
                         self.serve_inbound_tcp(tunnel, conn.clone(), local_server_addr)
                             .await
                     };
-                    Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                     if !self.should_quit() {
                         self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                     }
@@ -622,7 +618,7 @@ impl Client {
                         self.serve_inbound_udp(tunnel, conn.clone(), local_server_addr)
                             .await
                     };
-                    Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                     if !self.should_quit() {
                         self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                     }
@@ -656,7 +652,7 @@ impl Client {
                     pending_request,
                     self.config.tcp_timeout_ms,
                 );
-                Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                 if !self.should_quit() {
                     self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                 }
@@ -670,7 +666,7 @@ impl Client {
 
                 let tunnel_task =
                     UdpTunnel::start_serving(conn, sender, receiver, self.config.udp_timeout_ms);
-                Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                Self::wait_for_connection_close(tunnel, conn, tunnel_task).await;
                 if !self.should_quit() {
                     self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
                 }
@@ -970,14 +966,36 @@ impl Client {
         });
     }
 
-    async fn wait_for_connection_close<C, CF, F>(
+    async fn wait_for_connection_close<F>(
+        tunnel: &TunnelDescriptor,
+        conn: &Connection,
+        tunnel_task: F,
+    ) where
+        F: Future<Output = Result<()>>,
+    {
+        Self::wait_for_connection_close_with(
+            tunnel,
+            || conn.closed(),
+            tunnel_task,
+            || {
+                if conn.close_reason().is_none() {
+                    conn.close(VarInt::from_u32(1), b"tunnel task ended");
+                }
+            },
+        )
+        .await;
+    }
+
+    async fn wait_for_connection_close_with<C, CF, F, O>(
         tunnel: &TunnelDescriptor,
         mut conn_closed: CF,
         tunnel_task: F,
+        mut on_tunnel_end: O,
     ) where
         CF: FnMut() -> C,
         C: Future<Output = quinn::ConnectionError>,
         F: Future<Output = Result<()>>,
+        O: FnMut(),
     {
         tokio::select! {
             err = conn_closed() => {
@@ -987,6 +1005,7 @@ impl Client {
                 if let Err(err) = result {
                     warn!("[{tunnel}] tunnel ended with error: {err}");
                 }
+                on_tunnel_end();
                 let err = conn_closed().await;
                 debug!("[{tunnel}] connection closed after tunnel ended: {err}");
             }
@@ -1031,7 +1050,7 @@ impl Client {
             pending_request,
             self.config.tcp_timeout_ms,
         );
-        Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+        Self::wait_for_connection_close(tunnel, &conn, tunnel_task).await;
 
         Ok(())
     }
@@ -1092,7 +1111,7 @@ impl Client {
             &mut udp_receiver,
             self.config.udp_timeout_ms,
         );
-        Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+        Self::wait_for_connection_close(tunnel, &conn, tunnel_task).await;
 
         udp_server.put_receiver(udp_receiver);
 
@@ -1113,7 +1132,7 @@ impl Client {
         self.post_tunnel_state(tunnel, TunnelState::Tunneling);
         let tunnel_task =
             TcpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.tcp_timeout_ms);
-        Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+        Self::wait_for_connection_close(tunnel, &conn, tunnel_task).await;
 
         Ok(())
     }
@@ -1132,7 +1151,7 @@ impl Client {
         self.post_tunnel_state(tunnel, TunnelState::Tunneling);
         let tunnel_task =
             UdpTunnel::start_accepting(&conn, Some(local_server_addr), self.config.udp_timeout_ms);
-        Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+        Self::wait_for_connection_close(tunnel, &conn, tunnel_task).await;
 
         Ok(())
     }
@@ -1509,6 +1528,7 @@ mod tests {
     use super::*;
     use crate::SUPPORTED_CIPHER_SUITE_STRS;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tokio::sync::Notify;
 
@@ -1524,7 +1544,7 @@ mod tests {
                 proto: UpstreamType::Tcp,
                 mode: TunnelMode::Out,
             };
-            Client::wait_for_connection_close(
+            Client::wait_for_connection_close_with(
                 &descriptor,
                 move || {
                     let close_notify = close_notify_clone.clone();
@@ -1537,6 +1557,7 @@ mod tests {
                     tunnel_notify_clone.notified().await;
                     Ok(())
                 },
+                || {},
             )
             .await;
         });
@@ -1545,6 +1566,50 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         close_notify.notify_waiters();
         wait_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_connection_close_calls_on_tunnel_end() {
+        let close_notify = Arc::new(Notify::new());
+        let close_notify_clone = close_notify.clone();
+        let tunnel_notify = Arc::new(Notify::new());
+        let tunnel_notify_clone = tunnel_notify.clone();
+        let on_end_called = Arc::new(AtomicBool::new(false));
+        let on_end_called_clone = on_end_called.clone();
+
+        let wait_task = tokio::spawn(async move {
+            let descriptor = TunnelDescriptor {
+                id: TunnelId::Network(1),
+                proto: UpstreamType::Tcp,
+                mode: TunnelMode::Out,
+            };
+            Client::wait_for_connection_close_with(
+                &descriptor,
+                move || {
+                    let close_notify = close_notify_clone.clone();
+                    async move {
+                        close_notify.notified().await;
+                        quinn::ConnectionError::TimedOut
+                    }
+                },
+                async move {
+                    tunnel_notify_clone.notified().await;
+                    Ok(())
+                },
+                move || {
+                    on_end_called_clone.store(true, Ordering::Relaxed);
+                    close_notify.notify_one();
+                },
+            )
+            .await;
+        });
+
+        tunnel_notify.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), wait_task)
+            .await
+            .expect("wait task should finish")
+            .expect("wait task should not panic");
+        assert!(on_end_called.load(Ordering::Relaxed));
     }
 
     #[test]
