@@ -590,6 +590,9 @@ impl Client {
                         .await
                     };
                     Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    if !self.should_quit() {
+                        self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                    }
                 }
                 UpstreamType::Udp => {
                     let tunnel_task = async {
@@ -597,6 +600,9 @@ impl Client {
                             .await
                     };
                     Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    if !self.should_quit() {
+                        self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                    }
                 }
             }
         } else {
@@ -607,6 +613,9 @@ impl Client {
                             .await
                     };
                     Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    if !self.should_quit() {
+                        self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                    }
                 }
                 UpstreamType::Udp => {
                     let tunnel_task = async {
@@ -614,6 +623,9 @@ impl Client {
                             .await
                     };
                     Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                    if !self.should_quit() {
+                        self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                    }
                 }
             }
         }
@@ -645,6 +657,9 @@ impl Client {
                     self.config.tcp_timeout_ms,
                 );
                 Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                if !self.should_quit() {
+                    self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                }
             }
             (ConnectInput::Channel(ChannelUpstream::Udp(sender, receiver)), UpstreamType::Udp) => {
                 self.post_tunnel_log(
@@ -656,6 +671,9 @@ impl Client {
                 let tunnel_task =
                     UdpTunnel::start_serving(conn, sender, receiver, self.config.udp_timeout_ms);
                 Self::wait_for_connection_close(tunnel, || conn.closed(), tunnel_task).await;
+                if !self.should_quit() {
+                    self.post_tunnel_state(tunnel, TunnelState::Reconnecting);
+                }
             }
             _ => unreachable!("Channel-based tunnel requires ConnectInput::Channel"),
         }

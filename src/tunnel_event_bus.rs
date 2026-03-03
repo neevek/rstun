@@ -63,6 +63,7 @@ pub enum TunnelState {
     Connecting,
     Connected,
     Tunneling,
+    Reconnecting,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
