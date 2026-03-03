@@ -47,6 +47,7 @@ const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 30;
 const RETRY_BACKOFF_MIN_MS: u64 = 300;
 const CONNECT_TIMEOUT_MIN_SECS: u64 = 3;
 const CONNECT_TIMEOUT_MAX_SECS: u64 = 15;
+const STOP_CHECK_INTERVAL_MS: u64 = 100;
 static INIT: Once = Once::new();
 
 #[derive(Clone, Serialize, PartialEq, Debug)]
@@ -406,6 +407,7 @@ impl Client {
             let result = connect
                 .retry(
                     ExponentialBuilder::default()
+                        .with_jitter()
                         .with_min_delay(min_retry_delay)
                         .with_max_delay(max_retry_delay)
                         .with_max_times(usize::MAX),
@@ -492,25 +494,62 @@ impl Client {
         connect_timeout: Duration,
     ) -> Result<Connection> {
         let login_cfg = self.prepare_login_config().await?;
-        let endpoint = lock_state(&self.inner_state).endpoint.clone();
+        let endpoint = {
+            let endpoint = lock_state(&self.inner_state).endpoint.clone();
+            if let Some(endpoint) = endpoint {
+                match endpoint.local_addr() {
+                    Ok(local_addr) if local_addr.is_ipv6() == login_cfg.remote_addr.is_ipv6() => {
+                        Some(endpoint)
+                    }
+                    Ok(local_addr) => {
+                        warn!(
+                            "[{tunnel}] recreate endpoint because address family changed, local_addr:{local_addr}, remote_addr:{}",
+                            login_cfg.remote_addr
+                        );
+                        let reset = self
+                            .clear_cached_endpoint_if_idle(tunnel, "address family changed");
+                        if reset { None } else { Some(endpoint) }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "[{tunnel}] recreate endpoint because local_addr unavailable, err:{err}"
+                        );
+                        let reset = self
+                            .clear_cached_endpoint_if_idle(tunnel, "endpoint local_addr failed");
+                        if reset { None } else { Some(endpoint) }
+                    }
+                }
+            } else {
+                None
+            }
+        };
         let endpoint = if let Some(endpoint) = endpoint {
             endpoint
         } else {
             let endpoint =
-                Self::create_client_endpoint(login_cfg.local_addr, login_cfg.quinn_client_cfg)?;
+                Self::create_client_endpoint(login_cfg.local_addr, login_cfg.quinn_client_cfg.clone())?;
             inner_state!(self, endpoint) = Some(endpoint.clone());
             endpoint
         };
 
-        self.login(
-            tunnel,
-            &endpoint,
-            login_info,
-            &login_cfg.remote_addr,
-            login_cfg.domain.as_str(),
-            connect_timeout,
-        )
-        .await
+        let result = self
+            .login(
+                tunnel,
+                &endpoint,
+                &login_cfg,
+                login_info,
+                connect_timeout,
+            )
+            .await;
+        if let Err(err) = &result
+            && !self.should_quit()
+        {
+            warn!(
+                "[{tunnel}] connect/login failed, will recreate endpoint on next retry, err:{err}"
+            );
+            self.clear_cached_endpoint_if_idle(tunnel, "connect/login failed");
+        }
+        result
     }
 
     fn create_client_endpoint(
@@ -673,11 +712,11 @@ impl Client {
         &self,
         tunnel: &TunnelDescriptor,
         endpoint: &Endpoint,
+        login_cfg: &LoginConfig,
         login_info: &LoginInfo,
-        remote_addr: &SocketAddr,
-        domain: &str,
         connect_timeout: Duration,
     ) -> Result<Connection> {
+        let remote_addr = &login_cfg.remote_addr;
         self.post_tunnel_state(tunnel, TunnelState::Connecting);
         self.post_tunnel_log(
             tunnel,
@@ -693,28 +732,25 @@ impl Client {
             .as_str(),
         );
 
-        let connecting = endpoint.connect(*remote_addr, domain)?;
-        let conn = tokio::time::timeout(connect_timeout, connecting)
-            .await
-            .with_context(|| {
-                format!(
-                    "{} connect timed out after {} ms",
-                    login_info.format_with_remote_addr(remote_addr),
-                    connect_timeout.as_millis()
-                )
-            })??;
-        let (mut quic_send, mut quic_recv) = tokio::time::timeout(connect_timeout, conn.open_bi())
-            .await
-            .with_context(|| {
-                format!(
-                    "{} open bidirectional connection timed out after {} ms",
-                    login_info.format_with_remote_addr(remote_addr),
-                    connect_timeout.as_millis()
-                )
-            })?
-            .context("open bidirectional connection failed")?;
-
-        self.post_tunnel_state(tunnel, TunnelState::Connected);
+        let connecting = endpoint.connect(*remote_addr, login_cfg.domain.as_str())?;
+        let conn = self
+            .run_login_stage(
+                connecting,
+                connect_timeout,
+                "connect",
+                login_info,
+                remote_addr,
+            )
+            .await?;
+        let (mut quic_send, mut quic_recv) = self
+            .run_login_stage(
+                conn.open_bi(),
+                connect_timeout,
+                "open bidirectional connection",
+                login_info,
+                remote_addr,
+            )
+            .await?;
         self.post_tunnel_log(
             tunnel,
             format!(
@@ -725,28 +761,24 @@ impl Client {
         );
 
         let login_msg = TunnelMessage::ReqLogin(login_info.clone());
-        tokio::time::timeout(
-            connect_timeout,
+        self.run_login_stage(
             TunnelMessage::send(&mut quic_send, &login_msg),
+            connect_timeout,
+            "send login request",
+            login_info,
+            remote_addr,
         )
-        .await
-        .with_context(|| {
-            format!(
-                "{} send login request timed out after {} ms",
-                login_info.format_with_remote_addr(remote_addr),
-                connect_timeout.as_millis()
-            )
-        })??;
+        .await?;
 
-        let resp = tokio::time::timeout(connect_timeout, TunnelMessage::recv(&mut quic_recv))
-            .await
-            .with_context(|| {
-                format!(
-                    "{} receive login response timed out after {} ms",
-                    login_info.format_with_remote_addr(remote_addr),
-                    connect_timeout.as_millis()
-                )
-            })??;
+        let resp = self
+            .run_login_stage(
+                TunnelMessage::recv(&mut quic_recv),
+                connect_timeout,
+                "receive login response",
+                login_info,
+                remote_addr,
+            )
+            .await?;
         if let TunnelMessage::RespFailure(msg) = resp {
             bail!(
                 "{} failed to login: {msg}",
@@ -760,6 +792,7 @@ impl Client {
             );
         }
         TunnelMessage::handle_message(&resp)?;
+        self.post_tunnel_state(tunnel, TunnelState::Connected);
         self.post_tunnel_log(
             tunnel,
             format!(
@@ -810,6 +843,71 @@ impl Client {
         stat.rtt_ms = stat.rtt_ms.max(stats.path.rtt.as_millis() as u64);
         stat.cwnd_bytes = stat.cwnd_bytes.max(stats.path.cwnd);
         stat.current_mtu = stat.current_mtu.max(stats.path.current_mtu);
+    }
+
+    fn clear_cached_endpoint_if_idle(&self, tunnel: &TunnelDescriptor, reason: &str) -> bool {
+        let endpoint = {
+            let mut state = lock_state(&self.inner_state);
+            if !state.connections.is_empty() {
+                debug!(
+                    "[{tunnel}] skip endpoint reset because there are active connections:{}, reason:{reason}",
+                    state.connections.len()
+                );
+                return false;
+            }
+            state.endpoint.take()
+        };
+        if endpoint.is_some() {
+            warn!("[{tunnel}] reset cached endpoint, reason:{reason}");
+            return true;
+        }
+        false
+    }
+
+    async fn wait_until_stopping(state: Arc<Mutex<State>>) {
+        loop {
+            let should_stop = {
+                let client_state = &lock_state(&state).client_state;
+                *client_state == ClientState::Stopping || *client_state == ClientState::Terminated
+            };
+            if should_stop {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(STOP_CHECK_INTERVAL_MS)).await;
+        }
+    }
+
+    async fn run_login_stage<T, E, F>(
+        &self,
+        future: F,
+        timeout: Duration,
+        stage_name: &str,
+        login_info: &LoginInfo,
+        remote_addr: &SocketAddr,
+    ) -> Result<T>
+    where
+        F: Future<Output = std::result::Result<T, E>>,
+        E: Into<anyhow::Error>,
+    {
+        tokio::select! {
+            _ = Self::wait_until_stopping(self.inner_state.clone()) => {
+                bail!(
+                    "{} {stage_name} aborted because client is stopping",
+                    login_info.format_with_remote_addr(remote_addr),
+                );
+            }
+            result = tokio::time::timeout(timeout, future) => {
+                result
+                    .with_context(|| {
+                        format!(
+                            "{} {stage_name} timed out after {} ms",
+                            login_info.format_with_remote_addr(remote_addr),
+                            timeout.as_millis()
+                        )
+                    })?
+                    .map_err(Into::into)
+            }
+        }
     }
 
     fn start_heartbeat_task(
