@@ -768,6 +768,7 @@ impl Client {
             )
             .as_str(),
         );
+        self.post_tunnel_stat(tunnel, Self::build_tunnel_stat_from_connection(&conn));
 
         self.start_heartbeat_task(tunnel.clone(), conn.clone(), quic_send, quic_recv);
         Ok(conn)
@@ -787,6 +788,28 @@ impl Client {
             .saturating_mul(1_u64 << shift)
             .min(CONNECT_TIMEOUT_MAX_SECS);
         Duration::from_secs(timeout_secs)
+    }
+
+    fn build_tunnel_stat_from_connection(conn: &Connection) -> TunnelStat {
+        let mut stat = TunnelStat::default();
+        Self::append_conn_stats_to_tunnel_stat(&mut stat, conn);
+        stat
+    }
+
+    fn append_conn_stats_to_tunnel_stat(stat: &mut TunnelStat, conn: &Connection) {
+        let stats = conn.stats();
+        stat.rx_bytes += stats.udp_rx.bytes;
+        stat.tx_bytes += stats.udp_tx.bytes;
+        stat.rx_dgrams += stats.udp_rx.datagrams;
+        stat.tx_dgrams += stats.udp_tx.datagrams;
+        stat.sent_packets += stats.path.sent_packets;
+        stat.lost_packets += stats.path.lost_packets;
+        stat.lost_bytes += stats.path.lost_bytes;
+        stat.congestion_events += stats.path.congestion_events;
+        stat.active_conns += 1;
+        stat.rtt_ms = stat.rtt_ms.max(stats.path.rtt.as_millis() as u64);
+        stat.cwnd_bytes = stat.cwnd_bytes.max(stats.path.cwnd);
+        stat.current_mtu = stat.current_mtu.max(stats.path.current_mtu);
     }
 
     fn start_heartbeat_task(
@@ -1018,19 +1041,7 @@ impl Client {
                     let mut stat = TunnelStat::default();
 
                     for entry in locked_state.connections.values() {
-                        let stats = entry.conn.stats();
-                        stat.rx_bytes += stats.udp_rx.bytes;
-                        stat.tx_bytes += stats.udp_tx.bytes;
-                        stat.rx_dgrams += stats.udp_rx.datagrams;
-                        stat.tx_dgrams += stats.udp_tx.datagrams;
-                        stat.sent_packets += stats.path.sent_packets;
-                        stat.lost_packets += stats.path.lost_packets;
-                        stat.lost_bytes += stats.path.lost_bytes;
-                        stat.congestion_events += stats.path.congestion_events;
-                        stat.active_conns += 1;
-                        stat.rtt_ms = stat.rtt_ms.max(stats.path.rtt.as_millis() as u64);
-                        stat.cwnd_bytes = stat.cwnd_bytes.max(stats.path.cwnd);
-                        stat.current_mtu = stat.current_mtu.max(stats.path.current_mtu);
+                        Self::append_conn_stats_to_tunnel_stat(&mut stat, &entry.conn);
                     }
 
                     stat.rx_bytes += locked_state.tunnel_stat.rx_bytes;
@@ -1260,6 +1271,14 @@ impl Client {
         ));
     }
 
+    fn post_tunnel_stat(&self, tunnel: &TunnelDescriptor, stat: TunnelStat) {
+        self.post_event(TunnelEvent::new(
+            TunnelEventType::Stat(stat),
+            chrono::Local::now().format(TIME_FORMAT).to_string(),
+            tunnel.clone(),
+        ));
+    }
+
     fn set_client_state(&self, client_state: ClientState) {
         let mut state = lock_state(&self.inner_state);
         state.client_state = client_state;
@@ -1448,6 +1467,50 @@ mod tests {
             &event.event_type,
             TunnelEventType::State(TunnelState::Connecting)
         ));
+    }
+
+    #[test]
+    fn event_listener_receives_tunnel_stat() {
+        let config = ClientConfig {
+            cert_path: "".to_string(),
+            cipher: SUPPORTED_CIPHER_SUITE_STRS[0].to_string(),
+            server_addr: "127.0.0.1:3515".to_string(),
+            password: "pass".to_string(),
+            wait_before_retry_ms: 1000,
+            quic_timeout_ms: 1000,
+            tcp_timeout_ms: 1000,
+            udp_timeout_ms: 1000,
+            heartbeat_interval_ms: 1000,
+            heartbeat_timeout_ms: 1000,
+            hop_interval_ms: 0,
+            tunnels: Vec::new(),
+            dot_servers: Vec::new(),
+            dns_servers: Vec::new(),
+            workers: 0,
+        };
+        let client = Client::new(config);
+        let receiver = client.register_for_events();
+        let descriptor = TunnelDescriptor {
+            id: TunnelId::Network(0),
+            proto: UpstreamType::Tcp,
+            mode: TunnelMode::Out,
+        };
+
+        client.post_tunnel_stat(
+            &descriptor,
+            TunnelStat {
+                active_conns: 1,
+                ..TunnelStat::default()
+            },
+        );
+
+        let event = receiver
+            .recv_timeout(Duration::from_millis(100))
+            .expect("event should arrive");
+        match &event.event_type {
+            TunnelEventType::Stat(stat) => assert_eq!(stat.active_conns, 1),
+            _ => panic!("expected stat event"),
+        }
     }
 
     #[test]
