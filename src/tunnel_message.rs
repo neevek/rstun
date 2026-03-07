@@ -19,7 +19,12 @@ pub enum TunnelMessage {
     ReqHeartbeat(u64),
     RespHeartbeat(u64),
     RespFailure(String),
-    RespSuccess,
+    RespSuccess(ServerCapabilities),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ServerCapabilities {
+    pub ipv6_supported: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -93,7 +98,13 @@ impl Display for TunnelMessage {
             Self::ReqHeartbeat(seq) => f.write_str(format!("heartbeat:req:{seq}").as_str()),
             Self::RespHeartbeat(seq) => f.write_str(format!("heartbeat:resp:{seq}").as_str()),
             Self::RespFailure(msg) => f.write_str(format!("fail:{msg}").as_str()),
-            Self::RespSuccess => f.write_str("succeeded"),
+            Self::RespSuccess(server_capabilities) => f.write_str(
+                format!(
+                    "succeeded:ipv6_supported={}",
+                    server_capabilities.ipv6_supported
+                )
+                .as_str(),
+            ),
         }
     }
 }
@@ -157,13 +168,5 @@ impl TunnelMessage {
         quic_send.write_u16(data.len() as u16).await?;
         quic_send.write_all(data).await?;
         Ok(())
-    }
-
-    pub fn handle_message(msg: &TunnelMessage) -> Result<()> {
-        match msg {
-            TunnelMessage::RespSuccess => Ok(()),
-            TunnelMessage::RespFailure(msg) => bail!(format!("received failure, err: {msg}")),
-            _ => bail!("unexpected message type"),
-        }
     }
 }

@@ -1,7 +1,7 @@
 use crate::heartbeat;
 use crate::tcp::tcp_tunnel::TcpTunnel;
 use crate::tcp::{StreamMessage, StreamSender};
-use crate::tunnel_message::TunnelMessage;
+use crate::tunnel_message::{ServerCapabilities, TunnelMessage};
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
@@ -17,7 +17,7 @@ use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Connection, Endpoint, SendStream, TransportConfig, congestion};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, Once};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -313,8 +313,17 @@ impl Server {
                     },
                 };
 
-                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
+                let server_capabilities = Self::build_server_capabilities();
+                TunnelMessage::send(
+                    &mut quic_send,
+                    &TunnelMessage::RespSuccess(server_capabilities.clone()),
+                )
+                .await?;
                 info!("[{tunnel_label}] connection authenticated, remote_addr:{remote_addr}");
+                info!(
+                    "[{tunnel_label}] advertised capabilities, ipv6_supported:{}",
+                    server_capabilities.ipv6_supported
+                );
 
                 Self::start_heartbeat_responder(tunnel_label, heartbeat_conn, quic_send, quic_recv);
                 Ok(tunnel_type)
@@ -523,5 +532,15 @@ impl Server {
             log_and_bail!("passwords don't match!");
         }
         Ok(())
+    }
+
+    fn build_server_capabilities() -> ServerCapabilities {
+        ServerCapabilities {
+            ipv6_supported: Self::is_ipv6_supported(),
+        }
+    }
+
+    fn is_ipv6_supported() -> bool {
+        std::net::TcpListener::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)).is_ok()
     }
 }
