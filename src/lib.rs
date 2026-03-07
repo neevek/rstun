@@ -21,16 +21,16 @@ use serde::Deserialize;
 use serde::Serialize;
 pub use server::Server;
 pub use socket_protector::{protect_socket_fd, protect_udp_socket, set_socket_protector};
-use std::future::Future;
 use std::fmt::Display;
+use std::future::Future;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::pin::Pin;
 use std::{net::SocketAddr, ops::Deref, sync::Arc};
-use tokio::net::TcpStream;
 pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
+use tokio::net::TcpStream;
 pub use tunnel_event_bus::{
     TunnelDescriptor, TunnelEvent, TunnelEventType, TunnelId, TunnelInfo, TunnelSource, TunnelStat,
     TunnelState,
@@ -262,7 +262,10 @@ impl std::fmt::Debug for ServerConfig {
             .field("default_udp_upstream", &self.default_udp_upstream)
             .field(
                 "channel_tcp_connector",
-                &self.channel_tcp_connector.as_ref().map(|_| "Some(<connector>)"),
+                &self
+                    .channel_tcp_connector
+                    .as_ref()
+                    .map(|_| "Some(<connector>)"),
             )
             .field("dashboard_server", &self.dashboard_server)
             .field("dashboard_server_credential", &"<redacted>")
@@ -278,7 +281,8 @@ pub struct ChannelTcpConnectCtx {
 }
 
 pub type ChannelTcpConnectFuture = Pin<Box<dyn Future<Output = Result<TcpStream>> + Send>>;
-pub type ChannelTcpConnector = Arc<dyn Fn(ChannelTcpConnectCtx) -> ChannelTcpConnectFuture + Send + Sync>;
+pub type ChannelTcpConnector =
+    Arc<dyn Fn(ChannelTcpConnectCtx) -> ChannelTcpConnectFuture + Send + Sync>;
 
 impl ClientConfig {
     #[allow(clippy::too_many_arguments)]

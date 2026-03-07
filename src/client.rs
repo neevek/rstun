@@ -73,6 +73,7 @@ struct State {
     tcp_receivers: HashMap<SocketAddr, Arc<AsyncMutex<StreamReceiver<TcpStream>>>>,
     endpoint: Option<Endpoint>,
     connections: HashMap<usize, ConnectionEntry>,
+    server_ipv6_supported: Option<bool>,
     client_state: ClientState,
     tunnel_stat: TunnelStat,
     event_bus: TunnelEventBus,
@@ -86,6 +87,7 @@ impl State {
             tcp_receivers: HashMap::new(),
             endpoint: None,
             connections: HashMap::new(),
+            server_ipv6_supported: None,
             client_state: ClientState::Idle,
             tunnel_stat: TunnelStat::default(),
             event_bus: TunnelEventBus::new(),
@@ -793,25 +795,29 @@ impl Client {
                 remote_addr,
             )
             .await?;
-        if let TunnelMessage::RespFailure(msg) = resp {
-            bail!(
-                "{} failed to login: {msg}",
-                login_info.format_with_remote_addr(remote_addr)
-            );
-        }
-        if !resp.is_resp_success() {
-            bail!(
-                "{} unexpected response, failed to login",
-                login_info.format_with_remote_addr(remote_addr)
-            );
-        }
-        TunnelMessage::handle_message(&resp)?;
+        let server_capabilities = match resp {
+            TunnelMessage::RespFailure(msg) => {
+                bail!(
+                    "{} failed to login: {msg}",
+                    login_info.format_with_remote_addr(remote_addr)
+                );
+            }
+            TunnelMessage::RespSuccess(server_capabilities) => server_capabilities,
+            _ => {
+                bail!(
+                    "{} unexpected response, failed to login",
+                    login_info.format_with_remote_addr(remote_addr)
+                );
+            }
+        };
+        inner_state!(self, server_ipv6_supported) = Some(server_capabilities.ipv6_supported);
         self.post_tunnel_state(tunnel, TunnelState::Connected);
         self.post_tunnel_log(
             tunnel,
             format!(
-                "{} login succeeded!",
-                login_info.format_with_remote_addr(remote_addr)
+                "{} login succeeded! ipv6_supported:{}",
+                login_info.format_with_remote_addr(remote_addr),
+                server_capabilities.ipv6_supported,
             )
             .as_str(),
         );
@@ -1324,6 +1330,10 @@ impl Client {
 
     pub fn get_state(&self) -> ClientState {
         inner_state!(self, client_state).clone()
+    }
+
+    pub fn is_server_ipv6_supported(&self) -> Option<bool> {
+        inner_state!(self, server_ipv6_supported)
     }
 
     fn is_ip_addr(addr: &str) -> bool {

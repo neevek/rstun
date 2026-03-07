@@ -1,7 +1,7 @@
 use crate::heartbeat;
 use crate::tcp::tcp_tunnel::TcpTunnel;
 use crate::tcp::{StreamMessage, StreamSender};
-use crate::tunnel_message::TunnelMessage;
+use crate::tunnel_message::{ServerCapabilities, TunnelMessage};
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
@@ -17,7 +17,9 @@ use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Connection, Endpoint, SendStream, TransportConfig, congestion};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::net::SocketAddr;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::fs;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, Once};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -313,8 +315,17 @@ impl Server {
                     },
                 };
 
-                TunnelMessage::send(&mut quic_send, &TunnelMessage::RespSuccess).await?;
+                let server_capabilities = Self::build_server_capabilities();
+                TunnelMessage::send(
+                    &mut quic_send,
+                    &TunnelMessage::RespSuccess(server_capabilities.clone()),
+                )
+                .await?;
                 info!("[{tunnel_label}] connection authenticated, remote_addr:{remote_addr}");
+                info!(
+                    "[{tunnel_label}] advertised capabilities, ipv6_supported:{}",
+                    server_capabilities.ipv6_supported
+                );
 
                 Self::start_heartbeat_responder(tunnel_label, heartbeat_conn, quic_send, quic_recv);
                 Ok(tunnel_type)
@@ -523,5 +534,116 @@ impl Server {
             log_and_bail!("passwords don't match!");
         }
         Ok(())
+    }
+
+    fn build_server_capabilities() -> ServerCapabilities {
+        ServerCapabilities {
+            ipv6_supported: Self::is_ipv6_supported(),
+        }
+    }
+
+    fn is_ipv6_supported() -> bool {
+        let bind_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
+        std::net::TcpListener::bind(bind_addr).is_ok()
+            && std::net::UdpSocket::bind(bind_addr).is_ok()
+            && {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    fs::read_to_string("/proc/net/if_inet6").ok().is_some_and(|contents| {
+                        Self::procfs_has_usable_ipv6_interface(contents.as_str())
+                    })
+                }
+
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    true
+                }
+            }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn procfs_has_usable_ipv6_interface(contents: &str) -> bool {
+        contents.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            let Some(addr_hex) = fields.next() else {
+                return false;
+            };
+            let _if_index = fields.next();
+            let _prefix_len = fields.next();
+            let _scope = fields.next();
+            let _flags = fields.next();
+            let Some(iface_name) = fields.next() else {
+                return false;
+            };
+
+            if iface_name == "lo" {
+                return false;
+            }
+
+            parse_procfs_ipv6_addr(addr_hex)
+                .is_some_and(|addr| is_usable_ipv6_addr(&addr))
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", test))]
+fn parse_procfs_ipv6_addr(addr_hex: &str) -> Option<Ipv6Addr> {
+    if addr_hex.len() != 32 {
+        return None;
+    }
+
+    let mut octets = [0_u8; 16];
+    for i in 0..16 {
+        octets[i] = u8::from_str_radix(&addr_hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(Ipv6Addr::from(octets))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", test))]
+fn is_usable_ipv6_addr(addr: &Ipv6Addr) -> bool {
+    !(addr.is_unspecified()
+        || addr.is_loopback()
+        || addr.is_multicast()
+        || addr.is_unicast_link_local()
+        || addr.is_unique_local()
+        || (addr.segments()[0] == 0x2001 && addr.segments()[1] == 0x0db8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn procfs_parser_ignores_missing_and_non_usable_ipv6_addresses() {
+        let contents = "\
+00000000000000000000000000000001 01 80 10 80       lo
+fe80000000000000025056fffe123456 02 40 20 80     eth0
+";
+        assert!(!Server::procfs_has_usable_ipv6_interface(contents));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn procfs_parser_accepts_global_ipv6_addresses() {
+        let contents = "\
+24046800040008000000000000000001 03 40 00 80     ens3
+";
+        assert!(Server::procfs_has_usable_ipv6_interface(contents));
+    }
+
+    #[test]
+    fn parse_procfs_ipv6_addr_rejects_invalid_input() {
+        assert!(parse_procfs_ipv6_addr("not-hex").is_none());
+        assert!(parse_procfs_ipv6_addr("1234").is_none());
+    }
+
+    #[test]
+    fn usable_ipv6_addr_filters_non_routable_ranges() {
+        assert!(!is_usable_ipv6_addr(&Ipv6Addr::LOCALHOST));
+        assert!(!is_usable_ipv6_addr(&"fe80::1".parse().unwrap()));
+        assert!(!is_usable_ipv6_addr(&"fd00::1".parse().unwrap()));
+        assert!(!is_usable_ipv6_addr(&"2001:db8::1".parse().unwrap()));
+        assert!(is_usable_ipv6_addr(&"2404:6800:400:800::1".parse().unwrap()));
     }
 }
