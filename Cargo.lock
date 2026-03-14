@@ -282,7 +282,7 @@ checksum = "1628fb46dfa0b37568d12e5edd512553eccf6a22a78e8bde00bb4aed84d5bdbf"
 [[package]]
 name = "byte-pool"
 version = "0.2.3"
-source = "git+https://github.com/neevek/byte-pool#e3a193a24da8e8f7dfa42c31b418f9aee7de1cb0"
+source = "git+https://github.com/neevek/byte-pool#afc235912b06f7d4bfe8cbda9bab24a68922ad44"
 dependencies = [
  "crossbeam-queue",
  "stable_deref_trait",

@@ -46,7 +46,8 @@ pub const TUNNEL_MODE_OUT: &str = "OUT";
 pub const UDP_PACKET_SIZE: usize = 1500;
 
 lazy_static! {
-    static ref BUFFER_POOL: BytePool::<Vec<u8>> = BytePool::<Vec<u8>>::new();
+    static ref BUFFER_POOL: BytePool::<Vec<u8>> =
+        BytePool::<Vec<u8>>::with_max_cache_size(20 * 1024 * 1024);
 }
 
 pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[

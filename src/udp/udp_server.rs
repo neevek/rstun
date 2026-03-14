@@ -73,7 +73,7 @@ impl UdpServer {
                                     continue;
                                 }
 
-                                unsafe { payload.set_len(size); }
+                                payload.set_filled_len(size);
                                 let msg = UdpMessage::Packet(UdpPacket{payload, local_addr, peer_addr: None});
                                 match tokio::time::timeout(
                                         Duration::from_millis(300),

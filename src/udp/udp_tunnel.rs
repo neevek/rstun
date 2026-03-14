@@ -146,9 +146,7 @@ impl UdpTunnel {
                 .await
                 {
                     Ok(Ok(packet_len)) => {
-                        unsafe {
-                            payload.set_len(packet_len as usize);
-                        }
+                        payload.set_filled_len(packet_len as usize);
                         let packet = UdpPacket {
                             payload,
                             local_addr: stream_key.local_addr,
