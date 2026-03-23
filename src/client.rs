@@ -382,6 +382,8 @@ impl Client {
         let login_info = LoginInfo {
             password: self.config.password.clone(),
             tunnel: tunnel.clone(),
+            tcp_timeout_ms: self.config.tcp_timeout_ms,
+            udp_timeout_ms: self.config.udp_timeout_ms,
         };
         let tunnel_descriptor =
             self.build_tunnel_descriptor(tunnel_id.clone(), &tunnel, &connect_input);

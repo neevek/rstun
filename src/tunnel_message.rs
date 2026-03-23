@@ -31,6 +31,8 @@ pub struct ServerCapabilities {
 pub struct LoginInfo {
     pub password: String,
     pub(crate) tunnel: Tunnel,
+    pub tcp_timeout_ms: u64,
+    pub udp_timeout_ms: u64,
 }
 
 impl LoginInfo {

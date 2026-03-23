@@ -5,9 +5,9 @@ use crate::tunnel_message::{ServerCapabilities, TunnelMessage};
 use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
-    SUPPORTED_CIPHER_SUITES, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo, Tunnel,
-    TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo, UpstreamType,
-    pem_util,
+    SUPPORTED_CIPHER_SUITES, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo,
+    TimeoutConfig, Tunnel, TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo,
+    UdpTunnelOutInfo, UpstreamType, pem_util,
 };
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
@@ -164,14 +164,15 @@ impl Server {
             tokio::spawn(async move {
                 let result = async {
                     let client_conn = client_conn.await?;
-                    let tun_type = Self::authenticate_connection(&config, client_conn).await?;
+                    let (tun_type, timeouts) =
+                        Self::authenticate_connection(&config, client_conn).await?;
 
                     match tun_type {
                         TunnelType::TcpOut(info) => {
                             TcpTunnel::start_accepting(
                                 &info.conn,
                                 Some(info.upstream_addr),
-                                config.tcp_timeout_ms,
+                                timeouts.tcp_timeout_ms,
                             )
                             .await
                             .ok();
@@ -181,7 +182,7 @@ impl Server {
                             UdpTunnel::start_accepting(
                                 &info.conn,
                                 Some(info.upstream_addr),
-                                config.udp_timeout_ms,
+                                timeouts.udp_timeout_ms,
                             )
                             .await
                             .ok();
@@ -212,7 +213,7 @@ impl Server {
                                 &info.conn,
                                 tcp_receiver,
                                 &mut None,
-                                config.tcp_timeout_ms,
+                                timeouts.tcp_timeout_ms,
                             )
                             .await
                             .ok();
@@ -243,7 +244,7 @@ impl Server {
                                 &info.conn,
                                 &udp_sender,
                                 &mut udp_receiver,
-                                config.udp_timeout_ms,
+                                timeouts.udp_timeout_ms,
                             )
                             .await
                             .ok();
@@ -254,14 +255,14 @@ impl Server {
                             TcpTunnel::start_dynamic_accepting(
                                 &conn,
                                 config.default_tcp_upstream,
-                                config.tcp_timeout_ms,
+                                timeouts.tcp_timeout_ms,
                                 config.channel_tcp_connector.clone(),
                             )
                             .await
                             .ok();
                         }
                         TunnelType::DynamicUpstreamUdpOut(conn) => {
-                            UdpTunnel::start_accepting(&conn, None, config.udp_timeout_ms)
+                            UdpTunnel::start_accepting(&conn, None, timeouts.udp_timeout_ms)
                                 .await
                                 .ok();
                         }
@@ -284,7 +285,7 @@ impl Server {
     async fn authenticate_connection(
         config: &ServerConfig,
         conn: quinn::Connection,
-    ) -> Result<TunnelType> {
+    ) -> Result<(TunnelType, TimeoutConfig)> {
         let remote_addr = &conn.remote_address();
 
         info!("authenticating connection, remote_addr:{remote_addr}");
@@ -300,6 +301,22 @@ impl Server {
                 info!("[{tunnel_label}] received ReqLogin request: {remote_addr}");
 
                 Self::check_password(config.password.as_str(), login_info.password.as_str())?;
+
+                let tcp_timeout_ms = if login_info.tcp_timeout_ms > 0 {
+                    login_info.tcp_timeout_ms.max(config.tcp_timeout_ms)
+                } else {
+                    config.tcp_timeout_ms
+                };
+                let udp_timeout_ms = if login_info.udp_timeout_ms > 0 {
+                    login_info.udp_timeout_ms.max(config.udp_timeout_ms)
+                } else {
+                    config.udp_timeout_ms
+                };
+                info!(
+                    "[{tunnel_label}] effective timeouts: tcp={tcp_timeout_ms}ms, udp={udp_timeout_ms}ms (client: tcp={}ms, udp={}ms, server: tcp={}ms, udp={}ms)",
+                    login_info.tcp_timeout_ms, login_info.udp_timeout_ms,
+                    config.tcp_timeout_ms, config.udp_timeout_ms
+                );
 
                 let heartbeat_conn = conn.clone();
                 let tunnel_type = match login_info.tunnel {
@@ -326,7 +343,7 @@ impl Server {
                 );
 
                 Self::start_heartbeat_responder(tunnel_label, heartbeat_conn, quic_send, quic_recv);
-                Ok(tunnel_type)
+                Ok((tunnel_type, TimeoutConfig { tcp_timeout_ms, udp_timeout_ms }))
             }
 
             _ => {

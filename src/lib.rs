@@ -137,6 +137,12 @@ pub struct UdpTunnelInInfo {
     udp_server: UdpServer,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct TimeoutConfig {
+    pub tcp_timeout_ms: u64,
+    pub udp_timeout_ms: u64,
+}
+
 #[derive(Debug)]
 pub enum TunnelType {
     TcpOut(TcpTunnelOutInfo),
