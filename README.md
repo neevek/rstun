@@ -169,6 +169,61 @@ Important option groups:
 - client DNS resolution hints: `--dot`, `--dns`
 - client endpoint migration: `--hop-interval-ms` (minimum effective value is 5000 ms when enabled)
 
+## Docker
+
+Minimal Docker setup uses only `Dockerfile` and downloads a release binary on `alpine:latest`.
+
+Build latest release image:
+
+```sh
+docker build -t rstun:latest .
+```
+
+Build with a pinned release tag:
+
+```sh
+docker build -t rstun:v0.8.5 \
+  --build-arg RSTUN_VERSION=v0.8.5 \
+  .
+```
+
+Run server:
+
+```sh
+docker run --rm -it \
+  -p 3515:3515/udp \
+  -v "$PWD/localhost.crt.pem:/certs/localhost.crt.pem:ro" \
+  -v "$PWD/localhost.key.pem:/certs/localhost.key.pem:ro" \
+  rstun:latest \
+  server \
+  -a 0.0.0.0:3515 \
+  -p devpass \
+  -c /certs/localhost.crt.pem \
+  -k /certs/localhost.key.pem \
+  -t 127.0.0.1:8080
+```
+
+Run client:
+
+```sh
+docker run --rm -it \
+  -p 9000:9000 \
+  -v "$PWD/localhost.crt.pem:/certs/localhost.crt.pem:ro" \
+  rstun:latest \
+  client \
+  -a host.docker.internal:3515 \
+  -p devpass \
+  -c /certs/localhost.crt.pem \
+  -t 'OUT^0.0.0.0:9000^ANY'
+```
+
+Notes:
+
+- Supports `x86_64` and `aarch64` release assets.
+- Default behavior downloads the latest release.
+- Tagged builds do not require checksum args.
+- If you only need CLI help: `docker run --rm rstun:latest --help`
+
 ## License
 
 MIT. See `LICENSE`.
