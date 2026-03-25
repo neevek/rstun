@@ -234,7 +234,7 @@ struct ClientArgs {
     heartbeat_interval_ms: u64,
 
     /// Heartbeat timeout in milliseconds (0 to disable)
-    #[arg(long, default_value_t = 10000)]
+    #[arg(long, default_value_t = 15000)]
     heartbeat_timeout_ms: u64,
 
     /// QUIC endpoint migration interval in milliseconds (0 to disable). Values below 5000 are raised to 5000.
@@ -328,7 +328,7 @@ struct ServerArgs {
     workers: usize,
 
     /// QUIC idle timeout in milliseconds
-    #[arg(long, default_value_t = 40000)]
+    #[arg(long, default_value_t = 30000)]
     quic_timeout_ms: u64,
 
     /// TCP idle timeout in milliseconds
