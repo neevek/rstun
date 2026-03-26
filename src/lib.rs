@@ -15,6 +15,7 @@ pub use client::Client;
 pub use client::ClientState;
 use lazy_static::lazy_static;
 use log::warn;
+use quinn::{IdleTimeout, TransportConfig, VarInt, congestion};
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;
@@ -27,6 +28,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::pin::Pin;
+use std::time::Duration;
 use std::{net::SocketAddr, ops::Deref, sync::Arc};
 pub use tcp::tcp_server::TcpServer;
 pub use tcp::{AsyncStream, StreamMessage, StreamReceiver, StreamRequest, StreamSender};
@@ -44,10 +46,34 @@ extern crate pretty_env_logger;
 pub const TUNNEL_MODE_IN: &str = "IN";
 pub const TUNNEL_MODE_OUT: &str = "OUT";
 pub const UDP_PACKET_SIZE: usize = 1500;
+const QUIC_STREAM_RECEIVE_WINDOW_BYTES: u32 = 32 * 1024 * 1024;
+const QUIC_RECEIVE_WINDOW_BYTES: u32 = 64 * 1024 * 1024;
+const QUIC_SEND_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
+const QUIC_MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 
 lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> =
         BytePool::<Vec<u8>>::with_max_cache_size(20 * 1024 * 1024);
+}
+
+pub(crate) fn build_quic_transport_config(quic_timeout_ms: u64) -> TransportConfig {
+    let mut transport_cfg = TransportConfig::default();
+
+    // A single proxied TCP flow maps to a single QUIC stream, so the per-stream
+    // receive window must be large enough to avoid capping high-BDP paths.
+    transport_cfg.stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW_BYTES));
+    transport_cfg.receive_window(VarInt::from_u32(QUIC_RECEIVE_WINDOW_BYTES));
+    transport_cfg.send_window(QUIC_SEND_WINDOW_BYTES);
+    transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
+    transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(QUIC_MAX_CONCURRENT_BIDI_STREAMS));
+
+    if quic_timeout_ms > 0 {
+        let timeout = IdleTimeout::from(VarInt::from_u32(quic_timeout_ms as u32));
+        transport_cfg.max_idle_timeout(Some(timeout));
+        transport_cfg.keep_alive_interval(Some(Duration::from_millis(quic_timeout_ms * 2 / 3)));
+    }
+
+    transport_cfg
 }
 
 pub const SUPPORTED_CIPHER_SUITE_STRS: &[&str] = &[

@@ -7,14 +7,13 @@ use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
     SUPPORTED_CIPHER_SUITES, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo,
     TimeoutConfig, Tunnel, TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo,
-    UdpTunnelOutInfo, UpstreamType, pem_util,
+    UdpTunnelOutInfo, UpstreamType, build_quic_transport_config, pem_util,
 };
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
-use quinn::IdleTimeout;
 use quinn::VarInt;
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Connection, Endpoint, SendStream, TransportConfig, congestion};
+use quinn::{Connection, Endpoint, SendStream};
 use rs_utilities::log_and_bail;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::{Ipv6Addr, SocketAddr};
@@ -128,18 +127,7 @@ impl Server {
             .with_single_cert(certs, key)
             .unwrap();
 
-        let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(VarInt::from_u32(1024 * 1024));
-        transport_cfg.receive_window(VarInt::from_u32(1024 * 1024 * 2));
-        transport_cfg.send_window(1024 * 1024 * 2);
-        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        if config.quic_timeout_ms > 0 {
-            let timeout = IdleTimeout::from(VarInt::from_u32(config.quic_timeout_ms as u32));
-            transport_cfg.max_idle_timeout(Some(timeout));
-            transport_cfg
-                .keep_alive_interval(Some(Duration::from_millis(config.quic_timeout_ms * 2 / 3)));
-        }
-        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
+        let transport_cfg = build_quic_transport_config(config.quic_timeout_ms);
 
         let quic_server_cfg = Arc::new(QuicServerConfig::try_from(tls_server_cfg)?);
         let mut quinn_server_cfg = quinn::ServerConfig::with_crypto(quic_server_cfg);

@@ -1,6 +1,6 @@
 use crate::{
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
-    UpstreamType,
+    UpstreamType, build_quic_transport_config,
     heartbeat::{self, HeartbeatConfig},
     pem_util, socket_addr_with_unspecified_ip_port,
     tcp::{AsyncStream, StreamReceiver, StreamRequest, tcp_tunnel::TcpTunnel},
@@ -15,8 +15,7 @@ use anyhow::{Context, Result, bail};
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use log::{Level, debug, error, info, log_enabled, warn};
-use quinn::{Connection, Endpoint, TransportConfig, congestion, crypto::rustls::QuicClientConfig};
-use quinn::{IdleTimeout, VarInt};
+use quinn::{Connection, Endpoint, VarInt, crypto::rustls::QuicClientConfig};
 use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
 use rustls::{
@@ -696,20 +695,7 @@ impl Client {
     }
 
     async fn prepare_login_config(&self) -> Result<LoginConfig> {
-        let mut transport_cfg = TransportConfig::default();
-        transport_cfg.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
-        transport_cfg.receive_window(quinn::VarInt::from_u32(1024 * 1024 * 2));
-        transport_cfg.send_window(1024 * 1024 * 2);
-        transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
-        transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(1024));
-
-        if self.config.quic_timeout_ms > 0 {
-            let timeout = IdleTimeout::from(VarInt::from_u32(self.config.quic_timeout_ms as u32));
-            transport_cfg.max_idle_timeout(Some(timeout));
-            transport_cfg.keep_alive_interval(Some(Duration::from_millis(
-                self.config.quic_timeout_ms * 2 / 3,
-            )));
-        }
+        let transport_cfg = build_quic_transport_config(self.config.quic_timeout_ms);
 
         let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
         let quic_client_cfg = Arc::new(QuicClientConfig::try_from(tls_client_cfg)?);
