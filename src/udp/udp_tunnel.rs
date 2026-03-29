@@ -1,5 +1,6 @@
 use crate::BUFFER_POOL;
 use crate::UDP_PACKET_SIZE;
+use crate::format_optional_socket_addr;
 use crate::socket_addr_with_unspecified_ip_port;
 use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
 use crate::udp::{UdpMessage, UdpPacket};
@@ -8,6 +9,7 @@ use dashmap::DashMap;
 use log::{debug, error, info, warn};
 use quinn::{Connection, RecvStream, SendStream};
 use rs_utilities::log_and_bail;
+use std::fmt;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
@@ -17,6 +19,27 @@ use tokio::{net::UdpSocket, sync::Mutex};
 struct UdpStreamKey {
     local_addr: SocketAddr,
     peer_addr: Option<SocketAddr>,
+}
+
+impl fmt::Display for UdpStreamKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.peer_addr {
+            Some(peer_addr) => write!(f, "{} -> {peer_addr}", self.local_addr),
+            None => write!(f, "{}", self.local_addr),
+        }
+    }
+}
+
+fn format_udp_socket_label(udp_socket: &UdpSocket) -> String {
+    let local_addr = match udp_socket.local_addr() {
+        Ok(addr) => addr.to_string(),
+        Err(err) => format!("local_addr_unavailable ({err})"),
+    };
+    let peer_addr = match udp_socket.peer_addr() {
+        Ok(addr) => addr.to_string(),
+        Err(err) => format!("peer_addr_unavailable ({err})"),
+    };
+    format!("{local_addr} -> {peer_addr}")
 }
 
 pub struct UdpTunnel;
@@ -61,13 +84,11 @@ impl UdpTunnel {
             if let Err(e) = packet_sender.try_send(packet) {
                 match e {
                     mpsc::error::TrySendError::Full(_) => {
-                        debug!(
-                            "udp stream writer queue is full, drop datagram for stream:{stream_key:?}"
-                        );
+                        debug!("udp stream writer queue is full, drop datagram, {stream_key}");
                     }
                     mpsc::error::TrySendError::Closed(_) => {
                         warn!(
-                            "failed to enqueue datagram for udp stream {stream_key:?}, writer closed"
+                            "failed to enqueue datagram for udp stream {stream_key}, writer closed"
                         );
                         if conn.close_reason().is_some() {
                             debug!("connection already closed, stop udp serving loop");
@@ -102,7 +123,7 @@ impl UdpTunnel {
         let stream_map_for_writer = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream writer: {stream_key:?}, streams: {}",
+                "start udp stream writer, {stream_key}, streams: {}",
                 stream_map_for_writer.len(),
             );
             while let Some(packet) = packet_receiver.recv().await {
@@ -126,7 +147,7 @@ impl UdpTunnel {
 
             stream_map_for_writer.remove(&stream_key);
             debug!(
-                "dropped udp stream writer: {stream_key:?}, streams: {}",
+                "dropped udp stream writer, {stream_key}, streams: {}",
                 stream_map_for_writer.len(),
             );
         });
@@ -134,7 +155,7 @@ impl UdpTunnel {
         let stream_map_for_reader = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream reader: {stream_key:?}, streams: {}",
+                "start udp stream reader, {stream_key}, streams: {}",
                 stream_map_for_reader.len(),
             );
             loop {
@@ -167,7 +188,7 @@ impl UdpTunnel {
 
             stream_map_for_reader.remove(&stream_key);
             debug!(
-                "dropped udp stream reader: {stream_key:?}, streams: {}",
+                "dropped udp stream reader, {stream_key}, streams: {}",
                 stream_map_for_reader.len(),
             );
         });
@@ -181,8 +202,9 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
+        let upstream_addr_label = format_optional_socket_addr(upstream_addr);
         info!(
-            "udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}"
+            "udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr_label}"
         );
 
         loop {
@@ -248,7 +270,7 @@ impl UdpTunnel {
                         Some(peer_addr) => {
                             if let Some(upstream_addr) = upstream_addr {
                                 warn!(
-                                    "upstream_addr {upstream_addr:?} is specified for the connection, peer_addr {peer_addr} is ignored"
+                                    "upstream_addr {upstream_addr} is specified for the connection, peer_addr {peer_addr} is ignored"
                                 );
                             } else if udp_socket.as_ref().and_then(|sock| sock.0.peer_addr().ok())
                                 != Some(peer_addr)
@@ -331,7 +353,8 @@ impl UdpTunnel {
         mut shutdown_rx: oneshot::Receiver<()>,
     ) {
         tokio::spawn(async move {
-            debug!("start udp stream →  {:?}", udp_socket.peer_addr());
+            let socket_label = format_udp_socket_label(&udp_socket);
+            debug!("start udp stream, {socket_label}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 tokio::select! {
@@ -353,7 +376,7 @@ impl UdpTunnel {
                                     .ok();
                             }
                             Ok(Err(e)) => {
-                                warn!("failed to receive datagrams from upstream, err: {e:?}");
+                                warn!("failed to receive datagrams from upstream, err: {e}");
                                 break;
                             }
                             Err(_) => {
@@ -364,7 +387,7 @@ impl UdpTunnel {
                     }
                 }
             }
-            debug!("dropped udp stream →  {:?}", udp_socket.peer_addr());
+            debug!("dropped udp stream, {socket_label}");
         });
     }
 }

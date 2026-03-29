@@ -5,7 +5,7 @@ use bincode::config::{self, Configuration};
 use enum_as_inner::EnumAsInner;
 use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -77,6 +77,15 @@ impl LoginInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct UdpPeerAddr(pub Option<SocketAddr>);
 
+impl Display for UdpPeerAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(addr) => write!(f, "{addr}"),
+            None => f.write_str("none"),
+        }
+    }
+}
+
 impl Display for LoginInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.tunnel {
@@ -95,7 +104,7 @@ impl Display for TunnelMessage {
         match self {
             Self::ReqLogin(login_info) => f.write_str(login_info.to_string().as_str()),
             Self::ReqUdpStart(udp_peer_addr) => {
-                f.write_str(format!("udp_start:{udp_peer_addr:?}").as_str())
+                f.write_str(format!("udp_start:{udp_peer_addr}").as_str())
             }
             Self::ReqHeartbeat(seq) => f.write_str(format!("heartbeat:req:{seq}").as_str()),
             Self::RespHeartbeat(seq) => f.write_str(format!("heartbeat:resp:{seq}").as_str()),

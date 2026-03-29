@@ -1,7 +1,7 @@
 use crate::tcp::StreamMessage;
 use crate::tcp::{AsyncStream, StreamReceiver, StreamRequest};
 use crate::util::stream_util::StreamUtil;
-use crate::{ChannelTcpConnectCtx, ChannelTcpConnector};
+use crate::{ChannelTcpConnectCtx, ChannelTcpConnector, format_optional_socket_addr};
 use anyhow::Result;
 use log::{debug, error, info};
 use std::borrow::BorrowMut;
@@ -95,8 +95,9 @@ impl TcpTunnel {
         tcp_connector: Option<ChannelTcpConnector>,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
+        let upstream_addr_label = format_optional_socket_addr(upstream_addr);
         info!(
-            "tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr:?}"
+            "tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr_label}"
         );
 
         loop {

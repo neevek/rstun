@@ -95,6 +95,10 @@ pub static SUPPORTED_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
     cipher_suite::TLS13_AES_128_GCM_SHA256,
 ];
 
+pub(crate) fn format_optional_socket_addr(addr: Option<SocketAddr>) -> String {
+    addr.map_or_else(|| String::from("none"), |addr| addr.to_string())
+}
+
 pub(crate) struct SelectedCipherSuite(rustls::SupportedCipherSuite);
 
 impl std::str::FromStr for SelectedCipherSuite {
