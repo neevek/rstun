@@ -164,11 +164,18 @@ impl TunnelMessage {
     }
 
     pub async fn recv_raw(quic_recv: &mut RecvStream, data: &mut [u8]) -> Result<u16> {
-        let msg_len = quic_recv.read_u16().await? as usize;
+        Self::recv_raw_from(quic_recv, data).await
+    }
+
+    pub async fn recv_raw_from<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        data: &mut [u8],
+    ) -> Result<u16> {
+        let msg_len = reader.read_u16().await? as usize;
         if msg_len > data.len() {
             bail!("message too large: {msg_len}");
         }
-        quic_recv
+        reader
             .read_exact(&mut data[..msg_len])
             .await
             .context("read message failed")?;
@@ -176,8 +183,12 @@ impl TunnelMessage {
     }
 
     pub async fn send_raw(quic_send: &mut SendStream, data: &[u8]) -> Result<()> {
-        quic_send.write_u16(data.len() as u16).await?;
-        quic_send.write_all(data).await?;
+        Self::send_raw_to(quic_send, data).await
+    }
+
+    pub async fn send_raw_to<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
+        writer.write_u16(data.len() as u16).await?;
+        writer.write_all(data).await?;
         Ok(())
     }
 }

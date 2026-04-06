@@ -6,8 +6,8 @@ use crate::udp::udp_server::{UdpMessage, UdpSender};
 use crate::udp::{udp_server::UdpServer, udp_tunnel::UdpTunnel};
 use crate::{
     SUPPORTED_CIPHER_SUITES, ServerConfig, TcpServer, TcpTunnelInInfo, TcpTunnelOutInfo,
-    TimeoutConfig, Tunnel, TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo,
-    UdpTunnelOutInfo, UpstreamType, build_quic_transport_config, pem_util,
+    TimeoutConfig, Tunnel, TunnelConfig, TunnelMode, TunnelType, UdpTunnelInInfo, UdpTunnelOutInfo,
+    UpstreamType, build_quic_transport_config, pem_util,
 };
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
@@ -250,9 +250,14 @@ impl Server {
                             .ok();
                         }
                         TunnelType::DynamicUpstreamUdpOut(conn) => {
-                            UdpTunnel::start_accepting(&conn, None, timeouts.udp_timeout_ms)
-                                .await
-                                .ok();
+                            UdpTunnel::start_dynamic_accepting(
+                                &conn,
+                                config.default_udp_upstream,
+                                timeouts.udp_timeout_ms,
+                                config.channel_udp_connector.clone(),
+                            )
+                            .await
+                            .ok();
                         }
                     }
 
@@ -302,8 +307,10 @@ impl Server {
                 };
                 info!(
                     "[{tunnel_label}] effective timeouts: tcp={tcp_timeout_ms}ms, udp={udp_timeout_ms}ms (client: tcp={}ms, udp={}ms, server: tcp={}ms, udp={}ms)",
-                    login_info.tcp_timeout_ms, login_info.udp_timeout_ms,
-                    config.tcp_timeout_ms, config.udp_timeout_ms
+                    login_info.tcp_timeout_ms,
+                    login_info.udp_timeout_ms,
+                    config.tcp_timeout_ms,
+                    config.udp_timeout_ms
                 );
 
                 let heartbeat_conn = conn.clone();
@@ -331,7 +338,13 @@ impl Server {
                 );
 
                 Self::start_heartbeat_responder(tunnel_label, heartbeat_conn, quic_send, quic_recv);
-                Ok((tunnel_type, TimeoutConfig { tcp_timeout_ms, udp_timeout_ms }))
+                Ok((
+                    tunnel_type,
+                    TimeoutConfig {
+                        tcp_timeout_ms,
+                        udp_timeout_ms,
+                    },
+                ))
             }
 
             _ => {

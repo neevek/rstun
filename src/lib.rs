@@ -279,6 +279,10 @@ pub struct ServerConfig {
     /// metadata and server defaults.
     pub channel_tcp_connector: Option<ChannelTcpConnector>,
 
+    /// Optional callback for channel-based UDP tunnels. When provided, it can decide how to
+    /// serve accepted QUIC UDP channels, including chaining them to another QUIC client.
+    pub channel_udp_connector: Option<ChannelUdpConnector>,
+
     /// 0.0.0.0:3515
     pub dashboard_server: String,
     /// user:password
@@ -304,6 +308,13 @@ impl std::fmt::Debug for ServerConfig {
                     .as_ref()
                     .map(|_| "Some(<connector>)"),
             )
+            .field(
+                "channel_udp_connector",
+                &self
+                    .channel_udp_connector
+                    .as_ref()
+                    .map(|_| "Some(<connector>)"),
+            )
             .field("dashboard_server", &self.dashboard_server)
             .field("dashboard_server_credential", &"<redacted>")
             .finish()
@@ -320,6 +331,23 @@ pub struct ChannelTcpConnectCtx {
 pub type ChannelTcpConnectFuture = Pin<Box<dyn Future<Output = Result<TcpStream>> + Send>>;
 pub type ChannelTcpConnector =
     Arc<dyn Fn(ChannelTcpConnectCtx) -> ChannelTcpConnectFuture + Send + Sync>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelUdpConnectCtx {
+    pub default_upstream: Option<SocketAddr>,
+    pub timeout_ms: u64,
+}
+
+pub struct ChannelUdpConnection {
+    pub sender: UdpSender,
+    pub receiver: UdpReceiver,
+    pub stop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub type ChannelUdpConnectFuture =
+    Pin<Box<dyn Future<Output = Result<ChannelUdpConnection>> + Send>>;
+pub type ChannelUdpConnector =
+    Arc<dyn Fn(ChannelUdpConnectCtx) -> ChannelUdpConnectFuture + Send + Sync>;
 
 impl ClientConfig {
     #[allow(clippy::too_many_arguments)]
