@@ -18,6 +18,7 @@ use log::{Level, debug, error, info, log_enabled, warn};
 use quinn::{Connection, Endpoint, VarInt, crypto::rustls::QuicClientConfig};
 use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
+use rs_utilities::net;
 use rustls::{
     RootCertStore, SupportedCipherSuite,
     client::danger::ServerCertVerified,
@@ -1368,11 +1369,9 @@ impl Client {
         dot_server: &str,
         name_servers: Vec<String>,
     ) -> Result<IpAddr> {
-        let dns_config = DNSResolverConfig {
-            strategy: DNSResolverLookupIpStrategy::Ipv6thenIpv4,
-            num_conccurent_reqs: 3,
-            ordering: DNSQueryOrdering::QueryStatistics,
-        };
+        let ipv6_supported = net::has_usable_ipv6_route();
+        let dns_config = Self::server_lookup_dns_config(ipv6_supported);
+        let name_servers = Self::filter_name_servers(name_servers, ipv6_supported);
 
         let resolver = if !dot_server.is_empty() {
             dns::resolver2(dot_server, vec![], dns_config)
@@ -1385,6 +1384,29 @@ impl Client {
         let ip = resolver.await.lookup_first(domain).await?;
         info!("resolved {domain} to {ip}");
         Ok(ip)
+    }
+
+    fn server_lookup_dns_config(ipv6_supported: bool) -> DNSResolverConfig {
+        DNSResolverConfig {
+            strategy: if ipv6_supported {
+                DNSResolverLookupIpStrategy::Ipv4thenIpv6
+            } else {
+                DNSResolverLookupIpStrategy::Ipv4Only
+            },
+            num_conccurent_reqs: 3,
+            ordering: DNSQueryOrdering::QueryStatistics,
+        }
+    }
+
+    fn filter_name_servers(name_servers: Vec<String>, ipv6_supported: bool) -> Vec<String> {
+        if ipv6_supported {
+            return name_servers;
+        }
+
+        name_servers
+            .into_iter()
+            .filter(|entry| entry.parse::<IpAddr>().map_or(true, |ip| ip.is_ipv4()))
+            .collect()
     }
 
     fn post_tunnel_log(&self, tunnel: &TunnelDescriptor, msg: &str) {
@@ -1736,6 +1758,40 @@ mod tests {
         assert_eq!(
             Client::connect_attempt_timeout_for(10),
             Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn server_lookup_dns_config_uses_ipv4_only_without_ipv6_route() {
+        let config = Client::server_lookup_dns_config(false);
+        assert!(matches!(
+            config.strategy,
+            DNSResolverLookupIpStrategy::Ipv4Only
+        ));
+    }
+
+    #[test]
+    fn server_lookup_dns_config_prefers_ipv4_even_when_ipv6_is_supported() {
+        let config = Client::server_lookup_dns_config(true);
+        assert!(matches!(
+            config.strategy,
+            DNSResolverLookupIpStrategy::Ipv4thenIpv6
+        ));
+    }
+
+    #[test]
+    fn filter_name_servers_drops_ipv6_literals_without_ipv6_route() {
+        let filtered = Client::filter_name_servers(
+            vec![
+                "1.1.1.1".to_string(),
+                "2606:4700:4700::1111".to_string(),
+                "resolver.example".to_string(),
+            ],
+            false,
+        );
+        assert_eq!(
+            filtered,
+            vec!["1.1.1.1".to_string(), "resolver.example".to_string()]
         );
     }
 }

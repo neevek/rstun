@@ -1529,9 +1529,9 @@ dependencies = [
 
 [[package]]
 name = "rs-utilities"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "299f040c83f4243b8daf48a8a391547508c8365ba925df7efa430d58e0ef5070"
+checksum = "339a7c7889befe6dbfeb87dbf74c192c66e391bcc73b837b0c85b91da12b9996"
 dependencies = [
  "android_logger 0.13.3",
  "anyhow",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "rstun"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "android_logger 0.15.0",
  "anyhow",

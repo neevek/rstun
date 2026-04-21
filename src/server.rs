@@ -15,8 +15,9 @@ use quinn::VarInt;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Connection, Endpoint, SendStream};
 use rs_utilities::log_and_bail;
+use rs_utilities::net;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Once};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -559,6 +560,19 @@ impl Server {
     }
 
     fn is_ipv6_supported() -> bool {
-        std::net::TcpListener::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)).is_ok()
+        net::has_usable_ipv6_route()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ServerCapabilities;
+
+    #[test]
+    fn server_capabilities_store_ipv6_support_flag() {
+        let caps = ServerCapabilities {
+            ipv6_supported: false,
+        };
+        assert!(!caps.ipv6_supported);
     }
 }
