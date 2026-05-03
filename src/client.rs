@@ -696,7 +696,12 @@ impl Client {
     }
 
     async fn prepare_login_config(&self) -> Result<LoginConfig> {
-        let transport_cfg = build_quic_transport_config(self.config.quic_timeout_ms);
+        let transport_cfg = build_quic_transport_config(
+            self.config.quic_timeout_ms,
+            self.config.quic_receive_window,
+            self.config.stream_receive_window,
+            self.config.quic_send_window,
+        );
 
         let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
         let quic_client_cfg = Arc::new(QuicClientConfig::try_from(tls_client_cfg)?);
@@ -1650,6 +1655,9 @@ mod tests {
             dot_servers: Vec::new(),
             dns_servers: Vec::new(),
             workers: 0,
+            quic_receive_window: 0,
+            stream_receive_window: 0,
+            quic_send_window: 0,
         };
         let client = Client::new(config);
         let receiver = client.register_for_events();
@@ -1688,6 +1696,9 @@ mod tests {
             dot_servers: Vec::new(),
             dns_servers: Vec::new(),
             workers: 0,
+            quic_receive_window: 0,
+            stream_receive_window: 0,
+            quic_send_window: 0,
         };
         let client = Client::new(config);
         let receiver = client.register_for_events();

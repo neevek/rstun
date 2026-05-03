@@ -111,6 +111,9 @@ async fn run_server_async(mut args: ServerArgs) -> Result<()> {
         quic_timeout_ms: args.quic_timeout_ms,
         tcp_timeout_ms: args.tcp_timeout_ms,
         udp_timeout_ms: args.udp_timeout_ms,
+        quic_receive_window: 0,
+        stream_receive_window: 0,
+        quic_send_window: 0,
         dashboard_server: "".to_string(),
         dashboard_server_credential: "".to_string(),
     };

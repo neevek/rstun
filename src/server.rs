@@ -128,7 +128,12 @@ impl Server {
             .with_single_cert(certs, key)
             .unwrap();
 
-        let transport_cfg = build_quic_transport_config(config.quic_timeout_ms);
+        let transport_cfg = build_quic_transport_config(
+            config.quic_timeout_ms,
+            config.quic_receive_window,
+            config.stream_receive_window,
+            config.quic_send_window,
+        );
 
         let quic_server_cfg = Arc::new(QuicServerConfig::try_from(tls_server_cfg)?);
         let mut quinn_server_cfg = quinn::ServerConfig::with_crypto(quic_server_cfg);

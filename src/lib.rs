@@ -51,19 +51,44 @@ const QUIC_RECEIVE_WINDOW_BYTES: u32 = 64 * 1024 * 1024;
 const QUIC_SEND_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const QUIC_MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 
+#[cfg(target_os = "ios")]
+const BUFFER_POOL_CACHE_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(not(target_os = "ios"))]
+const BUFFER_POOL_CACHE_BYTES: usize = 20 * 1024 * 1024;
+
 lazy_static! {
     static ref BUFFER_POOL: BytePool::<Vec<u8>> =
-        BytePool::<Vec<u8>>::with_max_cache_size(20 * 1024 * 1024);
+        BytePool::<Vec<u8>>::with_max_cache_size(BUFFER_POOL_CACHE_BYTES);
 }
 
-pub(crate) fn build_quic_transport_config(quic_timeout_ms: u64) -> TransportConfig {
+pub(crate) fn build_quic_transport_config(
+    quic_timeout_ms: u64,
+    quic_receive_window: u32,
+    stream_receive_window: u32,
+    quic_send_window: u64,
+) -> TransportConfig {
     let mut transport_cfg = TransportConfig::default();
 
     // A single proxied TCP flow maps to a single QUIC stream, so the per-stream
     // receive window must be large enough to avoid capping high-BDP paths.
-    transport_cfg.stream_receive_window(VarInt::from_u32(QUIC_STREAM_RECEIVE_WINDOW_BYTES));
-    transport_cfg.receive_window(VarInt::from_u32(QUIC_RECEIVE_WINDOW_BYTES));
-    transport_cfg.send_window(QUIC_SEND_WINDOW_BYTES);
+    let effective_stream_receive_window = if stream_receive_window > 0 {
+        stream_receive_window
+    } else {
+        QUIC_STREAM_RECEIVE_WINDOW_BYTES
+    };
+    let effective_quic_receive_window = if quic_receive_window > 0 {
+        quic_receive_window
+    } else {
+        QUIC_RECEIVE_WINDOW_BYTES
+    };
+    let effective_quic_send_window = if quic_send_window > 0 {
+        quic_send_window
+    } else {
+        QUIC_SEND_WINDOW_BYTES
+    };
+    transport_cfg.stream_receive_window(VarInt::from_u32(effective_stream_receive_window));
+    transport_cfg.receive_window(VarInt::from_u32(effective_quic_receive_window));
+    transport_cfg.send_window(effective_quic_send_window);
     transport_cfg.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
     transport_cfg.max_concurrent_bidi_streams(VarInt::from_u32(QUIC_MAX_CONCURRENT_BIDI_STREAMS));
 
@@ -258,6 +283,9 @@ pub struct ClientConfig {
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
     pub workers: usize,
+    pub quic_receive_window: u32,
+    pub stream_receive_window: u32,
+    pub quic_send_window: u64,
 }
 
 #[derive(Clone)]
@@ -269,6 +297,9 @@ pub struct ServerConfig {
     pub quic_timeout_ms: u64,
     pub tcp_timeout_ms: u64,
     pub udp_timeout_ms: u64,
+    pub quic_receive_window: u32,
+    pub stream_receive_window: u32,
+    pub quic_send_window: u64,
 
     /// for TunnelOut only
     pub default_tcp_upstream: Option<SocketAddr>,
@@ -299,6 +330,9 @@ impl std::fmt::Debug for ServerConfig {
             .field("quic_timeout_ms", &self.quic_timeout_ms)
             .field("tcp_timeout_ms", &self.tcp_timeout_ms)
             .field("udp_timeout_ms", &self.udp_timeout_ms)
+            .field("quic_receive_window", &self.quic_receive_window)
+            .field("stream_receive_window", &self.stream_receive_window)
+            .field("quic_send_window", &self.quic_send_window)
             .field("default_tcp_upstream", &self.default_tcp_upstream)
             .field("default_udp_upstream", &self.default_udp_upstream)
             .field(
