@@ -38,6 +38,7 @@ fn run_client(args: ClientArgs) {
         args.heartbeat_interval_ms,
         args.heartbeat_timeout_ms,
         args.hop_interval_ms,
+        args.stats_interval_ms,
     )
     .map_err(|e| {
         error!("{e}");
@@ -241,6 +242,10 @@ struct ClientArgs {
     /// QUIC endpoint migration interval in milliseconds (0 to disable). Values below 5000 are raised to 5000.
     #[arg(long, default_value_t = 0)]
     hop_interval_ms: u64,
+
+    /// Traffic stats emission interval in milliseconds (default: 30000)
+    #[arg(long, default_value_t = 30000)]
+    stats_interval_ms: u64,
 
     /// Comma-separated DoT servers (domains) for DNS resolution, e.g. "dns.google,one.one.one.one". Takes precedence over --dns if set.
     #[arg(

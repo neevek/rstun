@@ -43,7 +43,6 @@ use tokio::sync::Mutex as AsyncMutex;
 
 const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%3f";
 const DEFAULT_SERVER_PORT: u16 = 3515;
-const POST_TRAFFIC_DATA_INTERVAL_SECS: u64 = 30;
 const RETRY_BACKOFF_MIN_MS: u64 = 300;
 const CONNECT_TIMEOUT_MIN_SECS: u64 = 3;
 const CONNECT_TIMEOUT_MAX_SECS: u64 = 15;
@@ -1158,9 +1157,14 @@ impl Client {
 
     fn report_traffic_data_in_background(&self) {
         let state = self.inner_state.clone();
+        let stats_interval_ms = if self.config.stats_interval_ms == 0 {
+            30_000
+        } else {
+            self.config.stats_interval_ms
+        };
         tokio::spawn(async move {
             let mut interval =
-                tokio::time::interval(Duration::from_secs(POST_TRAFFIC_DATA_INTERVAL_SECS));
+                tokio::time::interval(Duration::from_millis(stats_interval_ms));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {

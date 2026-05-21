@@ -254,6 +254,7 @@ pub struct ClientConfig {
     pub heartbeat_interval_ms: u64,
     pub heartbeat_timeout_ms: u64,
     pub hop_interval_ms: u64,
+    pub stats_interval_ms: u64,
     pub tunnels: Vec<TunnelConfig>,
     pub dot_servers: Vec<String>,
     pub dns_servers: Vec<String>,
@@ -368,6 +369,7 @@ impl ClientConfig {
         mut heartbeat_interval_ms: u64,
         mut heartbeat_timeout_ms: u64,
         mut hop_interval_ms: u64,
+        stats_interval_ms: u64,
     ) -> Result<ClientConfig> {
         if tcp_mappings.is_empty() && udp_mappings.is_empty() {
             log_and_bail!("must specify either --tcp-mappings or --udp-mappings, or both");
@@ -424,6 +426,7 @@ impl ClientConfig {
             heartbeat_interval_ms,
             heartbeat_timeout_ms,
             hop_interval_ms,
+            stats_interval_ms: if stats_interval_ms == 0 { 30_000 } else { stats_interval_ms },
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
             ..ClientConfig::default()
@@ -606,6 +609,7 @@ pub mod android {
             0, // heartbeat_interval_ms - use default
             0, // heartbeat_timeout_ms - use default
             jhopTimeoutMs as u64,
+            0, // stats_interval_ms - use default (30000)
         ) {
             Ok(client_config) => {
                 let client = Client::new(client_config);
