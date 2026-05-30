@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use dashmap::{DashMap, mapref::entry::Entry};
-use log::{debug, error, info, warn};
+use log::{debug, warn};
 use quinn::{Connection, RecvStream, SendStream};
 use rs_utilities::log_and_bail;
 use std::fmt;
@@ -83,7 +83,7 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         debug!(
-            "udp serving loop started, remote_addr:{}",
+            "[udp] serving loop started, remote_addr={}",
             conn.remote_address()
         );
         let stream_map = Arc::new(DashMap::new());
@@ -103,9 +103,9 @@ impl UdpTunnel {
             {
                 Ok(packet_sender) => packet_sender,
                 Err(e) => {
-                    error!("{e}");
+                    debug!("[udp] open stream failed, err={e}");
                     if conn.close_reason().is_some() {
-                        debug!("connection already closed, stop udp serving loop");
+                        debug!("[udp] connection closed, stopping serving loop");
                         break;
                     }
                     continue;
@@ -115,14 +115,12 @@ impl UdpTunnel {
             if let Err(e) = packet_sender.try_send(packet) {
                 match e {
                     mpsc::error::TrySendError::Full(_) => {
-                        debug!("udp stream writer queue is full, drop datagram, {stream_key}");
+                        debug!("[udp] writer queue full, drop datagram, key={stream_key}");
                     }
                     mpsc::error::TrySendError::Closed(_) => {
-                        warn!(
-                            "failed to enqueue datagram for udp stream {stream_key}, writer closed"
-                        );
+                        warn!("[udp] enqueue failed, writer closed, key={stream_key}");
                         if conn.close_reason().is_some() {
-                            debug!("connection already closed, stop udp serving loop");
+                            debug!("[udp] connection closed, stopping serving loop");
                             break;
                         }
                     }
@@ -130,7 +128,10 @@ impl UdpTunnel {
             }
         }
 
-        info!("udp serving loop stopped");
+        debug!(
+            "[udp] serving loop stopped, remote_addr={}",
+            conn.remote_address()
+        );
 
         Ok(())
     }
@@ -154,7 +155,7 @@ impl UdpTunnel {
         let stream_map_for_writer = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream writer, {stream_key}, streams: {}",
+                "[udp] stream writer open key={stream_key}, streams={}",
                 stream_map_for_writer.len(),
             );
             while let Some(packet) = packet_receiver.recv().await {
@@ -165,20 +166,18 @@ impl UdpTunnel {
                 )
                 .await
                 {
-                    warn!(
-                        "failed to send udp packet metadata({payload_len}) through tunnel, err: {e}"
-                    );
+                    warn!("[udp] send metadata failed, len={payload_len}, err={e}");
                     break;
                 }
                 if let Err(e) = TunnelMessage::send_raw(&mut quic_send, &packet.payload).await {
-                    warn!("failed to send datagram({payload_len}) through tunnel, err: {e}");
+                    warn!("[udp] send datagram failed, len={payload_len}, err={e}");
                     break;
                 }
             }
 
             stream_map_for_writer.remove(&stream_key);
             debug!(
-                "dropped udp stream writer, {stream_key}, streams: {}",
+                "[udp] stream writer close key={stream_key}, streams={}",
                 stream_map_for_writer.len(),
             );
         });
@@ -186,7 +185,7 @@ impl UdpTunnel {
         let stream_map_for_reader = stream_map.clone();
         tokio::spawn(async move {
             debug!(
-                "start udp stream reader, {stream_key}, streams: {}",
+                "[udp] stream reader open key={stream_key}, streams={}",
                 stream_map_for_reader.len(),
             );
             loop {
@@ -219,7 +218,7 @@ impl UdpTunnel {
 
             stream_map_for_reader.remove(&stream_key);
             debug!(
-                "dropped udp stream reader, {stream_key}, streams: {}",
+                "[udp] stream reader close key={stream_key}, streams={}",
                 stream_map_for_reader.len(),
             );
         });
@@ -243,8 +242,8 @@ impl UdpTunnel {
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
         let upstream_addr_label = format_optional_socket_addr(default_upstream);
-        info!(
-            "udp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr_label}"
+        debug!(
+            "[udp] accept loop started, remote_addr={remote_addr}, upstream={upstream_addr_label}"
         );
 
         if let Some(connector) = udp_connector {
@@ -272,34 +271,39 @@ impl UdpTunnel {
                     result?;
                 }
                 Err(err) => {
-                    warn!("udp channel connector failed: {err}");
+                    warn!("[udp-ch] connector failed, err={err}");
                 }
             }
         } else {
             loop {
                 match conn.accept_bi().await {
                     Err(quinn::ConnectionError::TimedOut) => {
-                        info!("udp accept loop timed out, remote_addr:{remote_addr}");
+                        debug!("[udp] accept loop idle timeout, remote_addr={remote_addr}");
                         break;
                     }
                     Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                        debug!("udp accept loop closed, remote_addr:{remote_addr}");
+                        debug!("[udp] accept loop peer closed, remote_addr={remote_addr}");
                         break;
                     }
                     Err(e) => {
-                        error!(
-                            "failed to accept udp bi stream, remote_addr:{remote_addr}, err:{e}"
-                        );
+                        warn!("[udp] accept failed, remote_addr={remote_addr}, err={e}");
                         break;
                     }
-                    Ok((quic_send, quic_recv)) => tokio::spawn(async move {
-                        Self::process(quic_send, quic_recv, default_upstream, udp_timeout_ms).await
-                    }),
+                    Ok((quic_send, quic_recv)) => {
+                        tokio::spawn(async move {
+                            if let Err(err) =
+                                Self::process(quic_send, quic_recv, default_upstream, udp_timeout_ms)
+                                    .await
+                            {
+                                warn!("[udp] stream processing failed, err={err}");
+                            }
+                        });
+                    }
                 };
             }
         }
 
-        info!("udp accept loop stopped, remote_addr:{remote_addr}");
+        debug!("[udp] accept loop stopped, remote_addr={remote_addr}");
 
         Ok(())
     }
@@ -312,7 +316,7 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
-        info!("udp channel accept loop started, remote_addr:{remote_addr}");
+        debug!("[udp-ch] accept loop started, remote_addr={remote_addr}");
 
         let next_local_port = Arc::new(AtomicU16::new(10000));
         let reply_map = Arc::new(ChannelReplyMap::new());
@@ -321,17 +325,15 @@ impl UdpTunnel {
         loop {
             match conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut) => {
-                    info!("udp channel accept loop timed out, remote_addr:{remote_addr}");
+                    debug!("[udp-ch] accept loop idle timeout, remote_addr={remote_addr}");
                     break;
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("udp channel accept loop closed, remote_addr:{remote_addr}");
+                    debug!("[udp-ch] accept loop peer closed, remote_addr={remote_addr}");
                     break;
                 }
                 Err(e) => {
-                    error!(
-                        "failed to accept udp channel bi stream, remote_addr:{remote_addr}, err:{e}"
-                    );
+                    warn!("[udp-ch] accept failed, remote_addr={remote_addr}, err={e}");
                     break;
                 }
                 Ok((quic_send, quic_recv)) => Self::spawn_channel_bridge_stream(
@@ -346,7 +348,7 @@ impl UdpTunnel {
             }
         }
 
-        info!("udp channel accept loop stopped, remote_addr:{remote_addr}");
+        debug!("[udp-ch] accept loop stopped, remote_addr={remote_addr}");
 
         Ok(())
     }
@@ -377,8 +379,8 @@ impl UdpTunnel {
                     match peer_addr {
                         Some(peer_addr) => {
                             if let Some(upstream_addr) = upstream_addr {
-                                warn!(
-                                    "upstream_addr {upstream_addr} is specified for the connection, peer_addr {peer_addr} is ignored"
+                                debug!(
+                                    "[udp] fixed upstream={upstream_addr} set, ignoring peer={peer_addr}"
                                 );
                             } else if udp_socket.as_ref().and_then(|sock| sock.0.peer_addr().ok())
                                 != Some(peer_addr)
@@ -411,7 +413,7 @@ impl UdpTunnel {
                         .context("failed to send datagram through udp_socket")?;
                 }
                 Ok(Err(e)) => {
-                    warn!("failed to read from udp packet from tunnel, err: {e}");
+                    warn!("[udp] read from tunnel failed, err={e}");
                     break;
                 }
                 Err(_) => {
@@ -492,7 +494,7 @@ impl UdpTunnel {
                         .ok();
                 }
                 Ok(Err(e)) => {
-                    warn!("failed to read udp packet from channel tunnel, err: {e}");
+                    warn!("[udp-ch] read from tunnel failed, err={e}");
                     break;
                 }
                 Err(_) => {
@@ -532,7 +534,7 @@ impl UdpTunnel {
             )
             .await;
             if let Err(err) = result {
-                warn!("udp channel bridge stream failed: {err}");
+                warn!("[udp-ch] bridge stream failed, err={err}");
             }
         });
     }
@@ -649,7 +651,7 @@ impl UdpTunnel {
     ) {
         tokio::spawn(async move {
             let socket_label = format_udp_socket_label(&udp_socket);
-            debug!("start udp stream, {socket_label}");
+            debug!("[udp] upstream socket open, {socket_label}");
             let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             loop {
                 tokio::select! {
@@ -671,7 +673,7 @@ impl UdpTunnel {
                                     .ok();
                             }
                             Ok(Err(e)) => {
-                                warn!("failed to receive datagrams from upstream, err: {e}");
+                                warn!("[udp] upstream recv failed, err={e}");
                                 break;
                             }
                             Err(_) => {

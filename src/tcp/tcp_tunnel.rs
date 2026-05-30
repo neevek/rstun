@@ -3,7 +3,7 @@ use crate::tcp::{AsyncStream, StreamReceiver, StreamRequest};
 use crate::util::stream_util::StreamUtil;
 use crate::{ChannelTcpConnectCtx, ChannelTcpConnector, format_optional_socket_addr};
 use anyhow::Result;
-use log::{debug, error, info};
+use log::{debug, warn};
 use std::borrow::BorrowMut;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ impl TcpTunnel {
                         StreamUtil::write_tunnel_target(&mut quic_send, &request.target, false)
                             .await
                     {
-                        error!("failed to send dst addr: {e}");
+                        warn!("[tcp] send target failed, err={e}");
                         *pending_request = Some(request);
                         continue;
                     }
@@ -70,7 +70,7 @@ impl TcpTunnel {
                     )
                 }
                 Err(e) => {
-                    error!("failed to open_bi, will retry: {e}");
+                    warn!("[tcp] open stream failed, err={e}");
                     *pending_request = Some(request);
                     break;
                 }
@@ -96,22 +96,22 @@ impl TcpTunnel {
     ) -> Result<()> {
         let remote_addr = &conn.remote_address();
         let upstream_addr_label = format_optional_socket_addr(upstream_addr);
-        info!(
-            "tcp accept loop started, remote_addr:{remote_addr}, upstream_addr:{upstream_addr_label}"
+        debug!(
+            "[tcp] accept loop started, remote_addr={remote_addr}, upstream={upstream_addr_label}"
         );
 
         loop {
             match conn.accept_bi().await {
                 Err(quinn::ConnectionError::TimedOut) => {
-                    info!("tcp accept loop timed out, remote_addr:{remote_addr}");
+                    debug!("[tcp] accept loop idle timeout, remote_addr={remote_addr}");
                     break;
                 }
                 Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                    debug!("tcp accept loop closed, remote_addr:{remote_addr}");
+                    debug!("[tcp] accept loop peer closed, remote_addr={remote_addr}");
                     break;
                 }
                 Err(e) => {
-                    error!("failed to accept tcp bi stream, remote_addr:{remote_addr}, err:{e}");
+                    warn!("[tcp] accept failed, remote_addr={remote_addr}, err={e}");
                     break;
                 }
                 Ok((quic_send, mut quic_recv)) => {
@@ -123,7 +123,7 @@ impl TcpTunnel {
                             {
                                 Ok(target) => Some(target),
                                 Err(e) => {
-                                    log::error!("failed to read dst address: {e}");
+                                    warn!("[tcp] read target failed, err={e}");
                                     return;
                                 }
                             }
@@ -140,7 +140,7 @@ impl TcpTunnel {
                             match connector(ctx).await {
                                 Ok(stream) => stream,
                                 Err(e) => {
-                                    error!("failed to connect via custom channel connector: {e}");
+                                    warn!("[tcp] channel connector failed, err={e}");
                                     return;
                                 }
                             }
@@ -152,7 +152,7 @@ impl TcpTunnel {
                             {
                                 Some(target) => target,
                                 None => {
-                                    error!("no destination available for accepted stream");
+                                    warn!("[tcp] no destination for accepted stream");
                                     return;
                                 }
                             };
@@ -177,13 +177,11 @@ impl TcpTunnel {
                             match connect_result {
                                 Ok(Ok(request)) => request,
                                 Ok(Err(e)) => {
-                                    error!(
-                                        "failed to connect upstream, dst_addr:{target}, err:{e}"
-                                    );
+                                    warn!("[tcp] upstream connect failed, dst={target}, err={e}");
                                     return;
                                 }
                                 Err(_) => {
-                                    error!("tcp connect timed out, dst_addr:{target}");
+                                    warn!("[tcp] upstream connect timeout, dst={target}");
                                     return;
                                 }
                             }
@@ -200,6 +198,7 @@ impl TcpTunnel {
             };
         }
 
+        debug!("[tcp] accept loop stopped, remote_addr={remote_addr}");
         Ok(())
     }
 }

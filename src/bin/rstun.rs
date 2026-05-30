@@ -73,7 +73,7 @@ fn run_server(args: ServerArgs) {
         num_cpus::get()
     };
 
-    info!("will use {workers} workers");
+    info!("using {workers} worker threads");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

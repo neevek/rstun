@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use backon::ExponentialBuilder;
 use backon::Retryable;
-use log::{Level, debug, error, info, log_enabled, warn};
+use log::{Level, debug, info, log_enabled, warn};
 use quinn::{Connection, Endpoint, VarInt, crypto::rustls::QuicClientConfig};
 use rs_utilities::dns::{self, DNSQueryOrdering, DNSResolverConfig, DNSResolverLookupIpStrategy};
 use rs_utilities::log_and_bail;
@@ -135,7 +135,7 @@ fn lock_state(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
     match state.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
-            warn!("client state lock poisoned, recovering");
+            warn!("[client] state lock poisoned, recovering");
             poisoned.into_inner()
         }
     }
@@ -145,7 +145,7 @@ impl Client {
     pub fn new(config: ClientConfig) -> Self {
         INIT.call_once(|| {
             if let Err(err) = rustls::crypto::ring::default_provider().install_default() {
-                warn!("failed to install rustls ring crypto provider: {err:?}");
+                warn!("[client] failed to install rustls crypto provider, err={err:?}");
             }
         });
 
@@ -251,7 +251,7 @@ impl Client {
         let new_addr = socket_addr_with_unspecified_ip_port(current_addr.is_ipv6());
         let socket = Self::bind_client_udp_socket(new_addr)?;
         debug!(
-            "endpoint migration, from_addr:{current_addr}, to_addr:{}",
+            "[client] endpoint migrated, from={current_addr}, to={}",
             socket.local_addr()?
         );
         endpoint.rebind(socket)?;
@@ -274,7 +274,7 @@ impl Client {
             )
             .sleep(tokio::time::sleep)
             .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will start tcp server ({addr}) after {dur:?}, err: {err:?}");
+                warn!("[tcp-srv] bind failed, retry in {dur:?}, addr={addr}, err={err:?}");
             })
             .await?;
 
@@ -294,7 +294,7 @@ impl Client {
             )
             .sleep(tokio::time::sleep)
             .notify(|err: &anyhow::Error, dur: Duration| {
-                warn!("will start udp server ({addr}) after {dur:?}, err: {err:?}");
+                warn!("[udp-srv] bind failed, retry in {dur:?}, addr={addr}, err={err:?}");
             })
             .await?;
 
@@ -308,6 +308,7 @@ impl Client {
 
     #[allow(clippy::unnecessary_to_owned)]
     pub fn stop(&self) {
+        info!("[client] stopping");
         self.set_client_state(ClientState::Stopping);
 
         if let Ok(mut state) = self.inner_state.lock() {
@@ -337,10 +338,12 @@ impl Client {
 
         std::thread::sleep(Duration::from_secs(3));
         self.set_client_state(ClientState::Terminated);
+        info!("[client] stopped");
     }
 
     #[allow(clippy::unnecessary_to_owned)]
     pub async fn stop_async(&self) {
+        info!("[client] stopping");
         self.set_client_state(ClientState::Stopping);
 
         let mut tasks = tokio::task::JoinSet::new();
@@ -371,6 +374,7 @@ impl Client {
 
         while tasks.join_next().await.is_some() {}
         self.set_client_state(ClientState::Terminated);
+        info!("[client] stopped");
     }
 
     async fn connect_and_serve<S: AsyncStream>(
@@ -425,7 +429,7 @@ impl Client {
                 .notify({
                     let tunnel_descriptor = tunnel_descriptor.clone();
                     move |err: &anyhow::Error, dur: Duration| {
-                        warn!("[{tunnel_descriptor}] will retry after {dur:?}, err: {err:?}");
+                        warn!("[{tunnel_descriptor}] connect failed, retry in {dur:?}, err={err:?}");
                     }
                 })
                 .await;
@@ -469,11 +473,7 @@ impl Client {
                 },
 
                 Err(e) => {
-                    error!("{e}");
-                    info!(
-                        "[{login_info}] quit after having retried for {} times",
-                        usize::MAX
-                    );
+                    info!("[{tunnel_descriptor}] stopped connecting, err={e}");
                     break;
                 }
             };
@@ -507,7 +507,7 @@ impl Client {
                     }
                     Ok(local_addr) => {
                         warn!(
-                            "[{tunnel}] recreate endpoint because address family changed, local_addr:{local_addr}, remote_addr:{}",
+                            "[{tunnel}] recreate endpoint, reason=address family changed, local_addr={local_addr}, remote_addr={}",
                             login_cfg.remote_addr
                         );
                         let reset =
@@ -516,7 +516,7 @@ impl Client {
                     }
                     Err(err) => {
                         warn!(
-                            "[{tunnel}] recreate endpoint because local_addr unavailable, err:{err}"
+                            "[{tunnel}] recreate endpoint, reason=local_addr unavailable, err={err}"
                         );
                         let reset = self
                             .clear_cached_endpoint_if_idle(tunnel, "endpoint local_addr failed");
@@ -545,7 +545,7 @@ impl Client {
             && !self.should_quit()
         {
             warn!(
-                "[{tunnel}] connect/login failed, will recreate endpoint on next retry, err:{err}"
+                "[{tunnel}] connect/login failed, will recreate endpoint, err={err}"
             );
             self.clear_cached_endpoint_if_idle(tunnel, "connect/login failed");
         }
@@ -731,7 +731,7 @@ impl Client {
         self.post_tunnel_log(
             tunnel,
             format!(
-                "{} connecting, idle_timeout:{}, retry_timeout:{}, connect_timeout:{}, cipher:{}, threads:{}",
+                "{} connecting, idle_timeout={}, retry_timeout={}, connect_timeout={}, cipher={}, threads={}",
                 login_info.format_with_remote_addr(remote_addr),
                 self.config.quic_timeout_ms,
                 self.retry_max_backoff_delay().as_millis(),
@@ -809,7 +809,7 @@ impl Client {
         self.post_tunnel_log(
             tunnel,
             format!(
-                "{} login succeeded! ipv6_supported:{}",
+                "{} login succeeded, ipv6_supported={}",
                 login_info.format_with_remote_addr(remote_addr),
                 server_capabilities.ipv6_supported,
             )
@@ -864,7 +864,7 @@ impl Client {
             let mut state = lock_state(&self.inner_state);
             if !state.connections.is_empty() {
                 debug!(
-                    "[{tunnel}] skip endpoint reset because there are active connections:{}, reason:{reason}",
+                    "[{tunnel}] skip endpoint reset, active_connections={}, reason={reason}",
                     state.connections.len()
                 );
                 return false;
@@ -872,7 +872,7 @@ impl Client {
             state.endpoint.take()
         };
         if endpoint.is_some() {
-            warn!("[{tunnel}] reset cached endpoint, reason:{reason}");
+            warn!("[{tunnel}] reset cached endpoint, reason={reason}");
             return true;
         }
         false
@@ -932,7 +932,7 @@ impl Client {
         mut quic_recv: quinn::RecvStream,
     ) {
         if self.config.heartbeat_interval_ms == 0 || self.config.heartbeat_timeout_ms == 0 {
-            info!("[{tunnel}] heartbeat disabled on client");
+            debug!("[{tunnel}] heartbeat disabled");
             return;
         }
 
@@ -942,8 +942,8 @@ impl Client {
             timeout: Duration::from_millis(self.config.heartbeat_timeout_ms),
         };
 
-        info!(
-            "[{tunnel}] heartbeat task started, interval_ms:{}, timeout_ms:{}",
+        debug!(
+            "[{tunnel}] heartbeat started, interval_ms={}, timeout_ms={}",
             config.interval.as_millis(),
             config.timeout.as_millis()
         );
@@ -951,14 +951,14 @@ impl Client {
         tokio::spawn(async move {
             tokio::select! {
                 _ = conn.closed() => {
-                    debug!("[{tunnel}] heartbeat task stopped because connection closed");
+                    debug!("[{tunnel}] heartbeat stopped, reason=connection closed");
                 }
                 result = heartbeat::client_heartbeat(&mut quic_recv, &mut quic_send, config, || {
                     let client_state = &lock_state(&state).client_state;
                     *client_state == ClientState::Stopping || *client_state == ClientState::Terminated
                 }) => {
                     if let Err(err) = result {
-                        warn!("[{tunnel}] heartbeat failed, closing connection: {err}");
+                        warn!("[{tunnel}] heartbeat failed, closing connection, err={err}");
                         conn.close(VarInt::from_u32(1), b"heartbeat failed");
                     }
                 }
@@ -999,15 +999,15 @@ impl Client {
     {
         tokio::select! {
             err = conn_closed() => {
-                debug!("[{tunnel}] connection closed, will reconnect: {err}");
+                debug!("[{tunnel}] connection closed, will reconnect, err={err}");
             }
             result = tunnel_task => {
                 if let Err(err) = result {
-                    warn!("[{tunnel}] tunnel ended with error: {err}");
+                    warn!("[{tunnel}] tunnel task ended with error, err={err}");
                 }
                 on_tunnel_end();
                 let err = conn_closed().await;
-                debug!("[{tunnel}] connection closed after tunnel ended: {err}");
+                debug!("[{tunnel}] connection closed after tunnel ended, err={err}");
             }
         }
     }
@@ -1126,7 +1126,7 @@ impl Client {
     ) -> Result<()> {
         self.post_tunnel_log(
             tunnel,
-            format!("TCP_IN start serving via: {}", conn.remote_address()).as_str(),
+            format!("TCP_IN start serving via {}", conn.remote_address()).as_str(),
         );
 
         self.post_tunnel_state(tunnel, TunnelState::Tunneling);
@@ -1145,7 +1145,7 @@ impl Client {
     ) -> Result<()> {
         self.post_tunnel_log(
             tunnel,
-            format!("UDP_IN start serving via: {}", conn.remote_address()).as_str(),
+            format!("UDP_IN start serving via {}", conn.remote_address()).as_str(),
         );
 
         self.post_tunnel_state(tunnel, TunnelState::Tunneling);
@@ -1198,7 +1198,7 @@ impl Client {
                 let timestamp = chrono::Local::now().format(TIME_FORMAT).to_string();
                 if log_enabled!(Level::Info) {
                     info!(
-                        "traffic rx_bytes:{}, tx_bytes:{}, rx_dgrams:{}, tx_dgrams:{}, sent_packets:{}, lost_packets:{}, lost_bytes:{}, congestion_events:{}, active_conns:{}, rtt_ms:{}, cwnd_bytes:{}, current_mtu:{}",
+                        "[traffic] rx_bytes={}, tx_bytes={}, rx_dgrams={}, tx_dgrams={}, sent_packets={}, lost_packets={}, lost_bytes={}, congestion_events={}, active_conns={}, rtt_ms={}, cwnd_bytes={}, current_mtu={}",
                         stat.rx_bytes,
                         stat.tx_bytes,
                         stat.rx_dgrams,
@@ -1284,7 +1284,7 @@ impl Client {
             static ONCE: Once = Once::new();
             ONCE.call_once(|| {
                 warn!(
-                    "No certificate is provided for verification, domain \"localhost\" is assumed"
+                    "no certificate provided for verification, assuming domain \"localhost\""
                 );
             });
             return Ok((client_config, "localhost".to_string()));
@@ -1353,17 +1353,25 @@ impl Client {
         }
 
         for dot in &self.config.dot_servers {
-            if let Ok(ip) = Self::lookup_server_ip(domain, dot, vec![]).await {
-                return Ok(SocketAddr::new(ip, port));
+            match Self::lookup_server_ip(domain, dot, vec![]).await {
+                Ok(ip) => return Ok(SocketAddr::new(ip, port)),
+                Err(err) if !dot.is_empty() => {
+                    debug!("dns lookup via DoT {dot} failed, domain={domain}, err={err}");
+                }
+                Err(_) => {}
             }
         }
 
-        if let Ok(ip) = Self::lookup_server_ip(domain, "", self.config.dns_servers.clone()).await {
-            return Ok(SocketAddr::new(ip, port));
+        match Self::lookup_server_ip(domain, "", self.config.dns_servers.clone()).await {
+            Ok(ip) => return Ok(SocketAddr::new(ip, port)),
+            Err(err) => {
+                debug!("dns lookup via configured servers failed, domain={domain}, err={err}");
+            }
         }
 
-        if let Ok(ip) = Self::lookup_server_ip(domain, "", vec![]).await {
-            return Ok(SocketAddr::new(ip, port));
+        match Self::lookup_server_ip(domain, "", vec![]).await {
+            Ok(ip) => return Ok(SocketAddr::new(ip, port)),
+            Err(err) => debug!("dns lookup via system resolver failed, domain={domain}, err={err}"),
         }
 
         bail!("failed to resolve domain: {domain}");
@@ -1387,7 +1395,7 @@ impl Client {
         };
 
         let ip = resolver.await.lookup_first(domain).await?;
-        info!("resolved {domain} to {ip}");
+        info!("dns resolved, domain={domain}, ip={ip}");
         Ok(ip)
     }
 
@@ -1539,10 +1547,11 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
     ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            warn!("======================================= WARNING ======================================");
-            warn!("Connecting to a server without verifying its certificate is DANGEROUS!!!");
-            warn!("Provide the self-signed certificate for verification or connect with a domain name");
-            warn!("======================= Be cautious, this is for TEST only!!! ========================");
+            warn!("==================================== WARNING ====================================");
+            warn!("connecting without verifying the server certificate is DANGEROUS");
+            warn!("provide the self-signed certificate or connect with a domain name to verify");
+            warn!("this is intended for TESTING only");
+            warn!("=================================================================================");
         });
         Ok(ServerCertVerified::assertion())
     }

@@ -81,11 +81,11 @@ impl Server {
 
         let quinn_server_cfg = Self::load_quinn_server_config(&config)?;
         let endpoint = quinn::Endpoint::server(quinn_server_cfg, addr).inspect_err(|e| {
-            error!("failed to bind tunnel server on address: {addr}, err: {e}");
+            error!("[server] bind failed, addr={addr}, err={e}");
         })?;
 
         info!(
-            "tunnel server is bound on address: {}, idle_timeout: {}",
+            "[server] listening, addr={}, quic_timeout_ms={}",
             endpoint.local_addr()?,
             config.quic_timeout_ms
         );
@@ -96,11 +96,11 @@ impl Server {
                 tokio::time::sleep(Duration::from_secs(3600 * 24)).await;
                 match Self::load_quinn_server_config(&config) {
                     Ok(quinn_server_cfg) => {
-                        info!("updated quinn server config!");
+                        info!("[server] config reloaded");
                         ep.set_server_config(Some(quinn_server_cfg));
                     }
                     Err(e) => {
-                        error!("failed to load quinn server config:{e}");
+                        error!("[server] config reload failed, err={e}");
                     }
                 }
             }
@@ -195,7 +195,7 @@ impl Server {
                             let tcp_receiver = match info.tcp_server.take_receiver() {
                                 Ok(receiver) => receiver,
                                 Err(e) => {
-                                    warn!("tcp receiver unavailable, will drop session: {e}");
+                                    warn!("[server] tcp receiver unavailable, dropping session, err={e}");
                                     return Ok::<(), anyhow::Error>(());
                                 }
                             };
@@ -228,7 +228,7 @@ impl Server {
                             let mut udp_receiver = match info.udp_server.take_receiver() {
                                 Ok(receiver) => receiver,
                                 Err(e) => {
-                                    warn!("udp receiver unavailable, will drop session: {e}");
+                                    warn!("[server] udp receiver unavailable, dropping session, err={e}");
                                     return Ok::<(), anyhow::Error>(());
                                 }
                             };
@@ -272,11 +272,11 @@ impl Server {
                 .await;
 
                 if let Err(err) = result {
-                    error!("connection handling failed: {err:?}");
+                    warn!("[server] connection handling failed, err={err:?}");
                 }
             });
         }
-        info!("server stopped");
+        info!("[server] stopped");
 
         Ok(())
     }
@@ -287,17 +287,16 @@ impl Server {
     ) -> Result<(TunnelType, TimeoutConfig)> {
         let remote_addr = &conn.remote_address();
 
-        info!("authenticating connection, remote_addr:{remote_addr}");
+        debug!("[server] connection accepted, remote_addr={remote_addr}");
         let (mut quic_send, mut quic_recv) = conn
             .accept_bi()
             .await
             .context(format!("login request not received in time: {remote_addr}"))?;
 
-        info!("received bi_stream request: {remote_addr}");
         match TunnelMessage::recv(&mut quic_recv).await? {
             TunnelMessage::ReqLogin(login_info) => {
                 let tunnel_label = login_info.to_string();
-                info!("[{tunnel_label}] received ReqLogin request: {remote_addr}");
+                info!("[{tunnel_label}] login request, remote_addr={remote_addr}");
 
                 Self::check_password(config.password.as_str(), login_info.password.as_str())?;
 
@@ -311,8 +310,8 @@ impl Server {
                 } else {
                     config.udp_timeout_ms
                 };
-                info!(
-                    "[{tunnel_label}] effective timeouts: tcp={tcp_timeout_ms}ms, udp={udp_timeout_ms}ms (client: tcp={}ms, udp={}ms, server: tcp={}ms, udp={}ms)",
+                debug!(
+                    "[{tunnel_label}] timeouts effective tcp={tcp_timeout_ms}ms udp={udp_timeout_ms}ms (client tcp={}ms udp={}ms, server tcp={}ms udp={}ms)",
                     login_info.tcp_timeout_ms,
                     login_info.udp_timeout_ms,
                     config.tcp_timeout_ms,
@@ -337,9 +336,8 @@ impl Server {
                     &TunnelMessage::RespSuccess(server_capabilities.clone()),
                 )
                 .await?;
-                info!("[{tunnel_label}] connection authenticated, remote_addr:{remote_addr}");
                 info!(
-                    "[{tunnel_label}] advertised capabilities, ipv6_supported:{}",
+                    "[{tunnel_label}] authenticated, remote_addr={remote_addr}, ipv6_supported={}",
                     server_capabilities.ipv6_supported
                 );
 
@@ -369,7 +367,7 @@ impl Server {
             tokio::select! {
                 _ = conn.closed() => {
                     debug!(
-                        "[{tunnel_label}] heartbeat responder stopping, remote_addr:{}",
+                        "[{tunnel_label}] heartbeat responder stopped, remote_addr={}, reason=connection closed",
                         conn.remote_address()
                     );
                 }
@@ -377,12 +375,12 @@ impl Server {
                     if let Err(err) = result {
                         if conn.close_reason().is_some() {
                             debug!(
-                                "[{tunnel_label}] heartbeat responder closed, remote_addr:{}",
+                                "[{tunnel_label}] heartbeat responder stopped, remote_addr={}, reason=connection closed",
                                 conn.remote_address()
                             );
                         } else {
                             warn!(
-                                "[{tunnel_label}] heartbeat failed, closing connection, remote_addr:{}, err:{err}",
+                                "[{tunnel_label}] heartbeat failed, closing connection, remote_addr={}, err={err}",
                                 conn.remote_address()
                             );
                             conn.close(VarInt::from_u32(1), b"heartbeat failed");
@@ -500,7 +498,7 @@ impl Server {
                 let sess = sess.clone();
                 tokio::spawn(async move {
                     sess.sender.send(UdpMessage::Quit).await.ok();
-                    debug!("dropped udp session: {}", sess.conn.remote_address());
+                    debug!("[server] dropped udp session, remote_addr={}", sess.conn.remote_address());
                 });
                 false
             } else {
@@ -513,7 +511,7 @@ impl Server {
                 let sess = sess.clone();
                 tokio::spawn(async move {
                     sess.sender.send(StreamMessage::Quit).await.ok();
-                    debug!("dropped tcp session: {}", sess.conn.remote_address());
+                    debug!("[server] dropped tcp session, remote_addr={}", sess.conn.remote_address());
                 });
                 false
             } else {
@@ -529,11 +527,10 @@ impl Server {
         let (certs, key) = if cert_path.is_empty() {
             static ONCE: Once = Once::new();
             ONCE.call_once(|| {
-                info!("will use auto-generated self-signed certificate.");
-                warn!("============================= WARNING ==============================");
-                warn!("No valid certificate path is provided, a self-signed certificate");
-                warn!("for the domain \"localhost\" is generated.");
-                warn!("============== Be cautious, this is for TEST only!!! ===============");
+                warn!("==================================== WARNING ====================================");
+                warn!("no certificate provided; generating a self-signed certificate for \"localhost\"");
+                warn!("this is insecure and intended for TESTING only");
+                warn!("=================================================================================");
             });
 
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;

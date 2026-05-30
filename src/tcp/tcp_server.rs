@@ -27,7 +27,7 @@ impl TcpServer {
         match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                warn!("tcp server state lock poisoned, recovering");
+                warn!("[tcp-srv] state lock poisoned, recovering");
                 poisoned.into_inner()
             }
         }
@@ -57,7 +57,7 @@ impl TcpServer {
                                     Ok(guard) => guard,
                                     Err(poisoned) => {
                                         warn!(
-                                            "tcp server state lock poisoned in accept loop, recovering"
+                                            "[tcp-srv] state lock poisoned in accept loop, recovering"
                                         );
                                         poisoned.into_inner()
                                     }
@@ -73,7 +73,7 @@ impl TcpServer {
                             if !active {
                                 // unless being explicitly requested, always drop the connections because we are not
                                 // sure whether the receiver is ready to accept connections
-                                debug!("drop connection: {addr}");
+                                debug!("[tcp-srv] inactive, drop connection, peer={addr}");
                                 continue;
                             }
                         }
@@ -92,23 +92,24 @@ impl TcpServer {
                                 // succeeded
                             }
                             Err(SendTimeoutError::Timeout(_)) => {
-                                debug!("timed out sending the request, drop the stream");
+                                debug!("[tcp-srv] timed out forwarding stream, dropped");
                             }
                             Err(e) => {
-                                info!("channel is closed, will quit tcp server, err: {e}");
+                                debug!("[tcp-srv] channel closed, stopping, err={e}");
                                 break;
                             }
                         }
                     }
 
                     Err(e) => {
-                        error!("tcp server failed, err: {e}");
+                        error!("[tcp-srv] accept failed, addr={addr}, err={e}");
                     }
                 }
             }
-            info!("tcp server quit: {addr}");
+            info!("[tcp-srv] stopped, addr={addr}");
         });
 
+        info!("[tcp-srv] started, addr={addr}");
         Ok(Self { state: state_clone })
     }
 

@@ -458,14 +458,14 @@ impl ClientConfig {
             heartbeat_timeout_ms = 0;
         } else if heartbeat_timeout_ms < heartbeat_interval_ms {
             warn!(
-                "heartbeat timeout: {heartbeat_timeout_ms} ms is lower than interval: {heartbeat_interval_ms} ms, forcing timeout to {} ms",
+                "heartbeat timeout ({heartbeat_timeout_ms}ms) below interval ({heartbeat_interval_ms}ms), raising timeout to {}ms",
                 heartbeat_interval_ms.saturating_mul(2)
             );
             heartbeat_timeout_ms = heartbeat_interval_ms.saturating_mul(2);
         }
         if hop_interval_ms != 0 && hop_interval_ms < 5000 {
             warn!(
-                "Endpoint migration interval: {hop_interval_ms} ms is too low and has been forcibly set to 5000 ms to prevent potential network failures due to excessive port or NAT resource exhaustion."
+                "endpoint migration interval ({hop_interval_ms}ms) too low, raising to 5000ms to avoid port/NAT exhaustion"
             );
             hop_interval_ms = 5000;
         }
@@ -605,9 +605,9 @@ pub mod android {
             &mut env,
             JObject::try_from(context).unwrap(),
         ) {
-            error!("failed to init rustls_platform_verifier: {e}");
+            error!("failed to init platform certificate verifier, err={e}");
         } else {
-            info!("initializing rustls_platform_verifier succeeded!");
+            info!("platform certificate verifier initialized");
         }
     }
 
@@ -680,7 +680,7 @@ pub mod android {
                 client as jlong
             }
             Err(e) => {
-                error!("failed to create client: {e}");
+                error!("failed to create client, err={e}");
                 0
             }
         }

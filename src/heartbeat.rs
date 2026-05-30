@@ -28,7 +28,7 @@ where
     loop {
         ticker.tick().await;
         if should_stop() {
-            debug!("heartbeat stopped on client");
+            debug!("[heartbeat] stopped on client");
             return Ok(());
         }
 
@@ -49,10 +49,10 @@ where
                 // debug!("heartbeat ok, seq:{seq}");
             }
             TunnelMessage::RespHeartbeat(resp_seq) => {
-                warn!("heartbeat sequence mismatch, expected:{seq}, got:{resp_seq}");
+                warn!("[heartbeat] seq mismatch, expected={seq}, got={resp_seq}");
             }
             other => {
-                warn!("unexpected heartbeat response: {other}");
+                warn!("[heartbeat] unexpected response, msg={other}");
             }
         }
     }
@@ -81,7 +81,7 @@ where
                 writer.flush().await?;
             }
             other => {
-                warn!("unexpected heartbeat request: {other}");
+                warn!("[heartbeat] unexpected request, msg={other}");
             }
         }
     }

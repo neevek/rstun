@@ -43,7 +43,7 @@ impl StreamUtil {
         let peer_addr = match stream.peer_addr() {
             Ok(addr) => addr,
             Err(e) => {
-                log::error!("failed to obtain peer address:{e}");
+                log::warn!("[{tag}] peer address unavailable, err={e}");
                 return;
             }
         };
@@ -52,7 +52,7 @@ impl StreamUtil {
         let (mut quic_send, mut quic_recv) = quic_stream;
         let index = quic_send.id().index();
 
-        debug!("[{tag}] START {index:<3} →  {peer_addr:<20}");
+        debug!("[{tag}] stream open id={index}, peer={peer_addr}");
 
         let (quic_to_stream_tx, quic_to_stream_rx) = oneshot::channel::<()>();
         let (stream_to_quic_tx, stream_to_quic_rx) = oneshot::channel::<()>();
@@ -88,7 +88,7 @@ impl StreamUtil {
                 }
             }
 
-            debug!("[{tag}] END  {index:<5}→  {peer_addr}, {transfer_bytes} bytes");
+            debug!("[{tag}] stream close id={index}, peer={peer_addr}, dir=q2s, bytes={transfer_bytes}");
         });
 
         tokio::spawn(async move {
@@ -121,7 +121,7 @@ impl StreamUtil {
                 }
             }
 
-            debug!("[{tag}] END  {index:<4}←  {peer_addr}, {transfer_bytes} bytes");
+            debug!("[{tag}] stream close id={index}, peer={peer_addr}, dir=s2q, bytes={transfer_bytes}");
             Ok::<(), anyhow::Error>(())
         });
     }
@@ -307,7 +307,7 @@ impl StreamUtil {
                 Ok(crate::TunnelTarget::Domain(host, port))
             }
             _ => {
-                log::error!("invalid address family");
+                log::warn!("invalid tunnel target address family, family={}", family[0]);
                 Err(TransferError::InvalidIPFamily)
             }
         }

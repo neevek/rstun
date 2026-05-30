@@ -31,7 +31,7 @@ impl UdpServer {
         match self.0.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                warn!("udp server state lock poisoned, recovering");
+                warn!("[udp-srv] state lock poisoned, recovering");
                 poisoned.into_inner()
             }
         }
@@ -63,13 +63,13 @@ impl UdpServer {
                                     match state.lock() {
                                         Ok(guard) => guard.active,
                                         Err(poisoned) => {
-                                            warn!("udp server state lock poisoned in recv loop, recovering");
+                                            warn!("[udp-srv] state lock poisoned in recv loop, recovering");
                                             poisoned.into_inner().active
                                         }
                                     }
                                 };
                                 if !active {
-                                    debug!("drop the packet ({size}) from addr: {local_addr}");
+                                    debug!("[udp-srv] inactive, drop packet, peer={local_addr}, bytes={size}");
                                     continue;
                                 }
 
@@ -85,13 +85,13 @@ impl UdpServer {
                                         // timeout
                                     }
                                     Ok(Err(e)) => {
-                                        error!("receiving end of the channel is closed, will quit. err: {e}");
+                                        debug!("[udp-srv] channel closed, stopping, err={e}");
                                         break;
                                     }
                                 }
                             }
                             Err(e) => {
-                                error!("failed to read from local udp socket, err: {e}");
+                                error!("[udp-srv] socket recv failed, err={e}");
                             }
                         }
                     }
@@ -104,17 +104,17 @@ impl UdpServer {
                                         // succeeded
                                     }
                                     Err(e) => {
-                                        error!("failed to send packet to local, err: {e}");
+                                        error!("[udp-srv] socket send failed, err={e}");
                                     }
                                 }
                             }
                             Some(UdpMessage::Quit) => {
-                                info!("udp server is requested to quit");
+                                debug!("[udp-srv] quit requested");
                                 break;
                             }
                             None => {
                                 // all senders quit
-                                info!("udp server quit");
+                                debug!("[udp-srv] all senders dropped");
                                 break;
                             }
                         }
@@ -122,9 +122,10 @@ impl UdpServer {
                 }
             }
 
-            info!("udp server quit: {addr}");
+            info!("[udp-srv] stopped, addr={addr}");
         });
 
+        info!("[udp-srv] started, addr={addr}");
         Ok(Self(state_clone))
     }
 
