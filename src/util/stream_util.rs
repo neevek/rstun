@@ -15,6 +15,7 @@ pub enum TransferError {
     InternalError,
     InvalidIPAddress,
     InvalidIPFamily,
+    InvalidDomain,
     TimeoutError,
 }
 
@@ -24,6 +25,7 @@ impl Display for TransferError {
             Self::InternalError => write!(f, "InternalError"),
             Self::InvalidIPAddress => write!(f, "InvalidIPAddress"),
             Self::InvalidIPFamily => write!(f, "InvalidIPFamily"),
+            Self::InvalidDomain => write!(f, "InvalidDomain"),
             Self::TimeoutError => write!(f, "TimeoutError"),
         }
     }
@@ -183,76 +185,200 @@ impl StreamUtil {
         }
     }
 
-    pub async fn write_socket_addr(
-        quic_send: &mut SendStream,
-        addr: &Option<SocketAddr>,
+    /// Serializes a tunnel target into its wire bytes. Returns `None` when there
+    /// is nothing to write (a `None` target with `mark_none == false`). Kept pure
+    /// so it is unit-testable.
+    ///
+    /// Wire format:
+    ///   family 4: [4][4-byte ipv4][2-byte port]
+    ///   family 6: [6][16-byte ipv6][2-byte port]
+    ///   family 3: [3][1-byte host len][host utf8][2-byte port]  (domain)
+    ///   none + mark_none: [0]
+    pub fn encode_tunnel_target(
+        target: &Option<crate::TunnelTarget>,
         mark_none: bool,
-    ) -> Result<()> {
-        match addr {
-            Some(SocketAddr::V4(v4)) => {
-                let mut buf = [0u8; 1 + 4 + 2];
-                buf[0] = 4;
-                buf[1..5].copy_from_slice(&v4.ip().octets());
-                buf[5..7].copy_from_slice(&v4.port().to_be_bytes());
-                quic_send.write_all(&buf[..7]).await?;
+    ) -> Result<Option<Vec<u8>>> {
+        let buf = match target {
+            Some(crate::TunnelTarget::Addr(SocketAddr::V4(v4))) => {
+                let mut buf = Vec::with_capacity(1 + 4 + 2);
+                buf.push(4);
+                buf.extend_from_slice(&v4.ip().octets());
+                buf.extend_from_slice(&v4.port().to_be_bytes());
+                buf
             }
-            Some(SocketAddr::V6(v6)) => {
-                let mut buf = [0u8; 1 + 16 + 2];
-                buf[0] = 6;
-                buf[1..17].copy_from_slice(&v6.ip().octets());
-                buf[17..19].copy_from_slice(&v6.port().to_be_bytes());
-                quic_send.write_all(&buf[..19]).await?;
+            Some(crate::TunnelTarget::Addr(SocketAddr::V6(v6))) => {
+                let mut buf = Vec::with_capacity(1 + 16 + 2);
+                buf.push(6);
+                buf.extend_from_slice(&v6.ip().octets());
+                buf.extend_from_slice(&v6.port().to_be_bytes());
+                buf
+            }
+            Some(crate::TunnelTarget::Domain(host, port)) => {
+                let host_bytes = host.as_bytes();
+                if host_bytes.is_empty() || host_bytes.len() > u8::MAX as usize {
+                    anyhow::bail!("invalid tunnel domain length: {}", host_bytes.len());
+                }
+                let mut buf = Vec::with_capacity(1 + 1 + host_bytes.len() + 2);
+                buf.push(3);
+                buf.push(host_bytes.len() as u8);
+                buf.extend_from_slice(host_bytes);
+                buf.extend_from_slice(&port.to_be_bytes());
+                buf
             }
             None => {
                 if mark_none {
-                    quic_send.write_u8(0).await?;
+                    vec![0]
+                } else {
+                    return Ok(None);
                 }
             }
         };
+        Ok(Some(buf))
+    }
+
+    pub async fn write_tunnel_target(
+        quic_send: &mut SendStream,
+        target: &Option<crate::TunnelTarget>,
+        mark_none: bool,
+    ) -> Result<()> {
+        if let Some(buf) = Self::encode_tunnel_target(target, mark_none)? {
+            quic_send.write_all(&buf).await?;
+        }
         Ok(())
     }
 
-    pub async fn read_socket_addr(
-        quic_recv: &mut RecvStream,
+    pub async fn read_tunnel_target<R: AsyncRead + Unpin>(
+        quic_recv: &mut R,
         stream_timeout_ms: u64,
-    ) -> Result<SocketAddr, TransferError> {
-        let mut buf = [0u8; 19];
-        tokio::time::timeout(
-            Duration::from_millis(stream_timeout_ms),
-            quic_recv.read_exact(&mut buf[..7]),
-        )
-        .await
-        .map_err(|_: Elapsed| TransferError::TimeoutError)?
-        .map_err(|_| TransferError::InternalError)?;
+    ) -> Result<crate::TunnelTarget, TransferError> {
+        let timeout = Duration::from_millis(stream_timeout_ms);
 
-        match buf[0] {
+        let mut family = [0u8; 1];
+        tokio::time::timeout(timeout, quic_recv.read_exact(&mut family))
+            .await
+            .map_err(|_: Elapsed| TransferError::TimeoutError)?
+            .map_err(|_| TransferError::InternalError)?;
+
+        match family[0] {
             4 => {
+                let mut buf = [0u8; 4 + 2];
+                tokio::time::timeout(timeout, quic_recv.read_exact(&mut buf))
+                    .await
+                    .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                    .map_err(|_| TransferError::InternalError)?;
                 let ip = Ipv4Addr::from(
-                    <[u8; 4]>::try_from(&buf[1..5]).map_err(|_| TransferError::InvalidIPAddress)?,
+                    <[u8; 4]>::try_from(&buf[0..4]).map_err(|_| TransferError::InvalidIPAddress)?,
                 );
-                let port = u16::from_be_bytes(buf[5..7].try_into().unwrap());
-                Ok(SocketAddr::new(ip.into(), port))
+                let port = u16::from_be_bytes(buf[4..6].try_into().unwrap());
+                Ok(crate::TunnelTarget::Addr(SocketAddr::new(ip.into(), port)))
             }
             6 => {
-                tokio::time::timeout(
-                    Duration::from_millis(stream_timeout_ms),
-                    quic_recv.read_exact(&mut buf[7..]),
-                )
-                .await
-                .map_err(|_: Elapsed| TransferError::TimeoutError)?
-                .map_err(|_| TransferError::InternalError)?;
-
+                let mut buf = [0u8; 16 + 2];
+                tokio::time::timeout(timeout, quic_recv.read_exact(&mut buf))
+                    .await
+                    .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                    .map_err(|_| TransferError::InternalError)?;
                 let ip = Ipv6Addr::from(
-                    <[u8; 16]>::try_from(&buf[1..17])
+                    <[u8; 16]>::try_from(&buf[0..16])
                         .map_err(|_| TransferError::InvalidIPAddress)?,
                 );
-                let port = u16::from_be_bytes(buf[17..19].try_into().unwrap());
-                Ok(SocketAddr::new(ip.into(), port))
+                let port = u16::from_be_bytes(buf[16..18].try_into().unwrap());
+                Ok(crate::TunnelTarget::Addr(SocketAddr::new(ip.into(), port)))
+            }
+            3 => {
+                let mut len = [0u8; 1];
+                tokio::time::timeout(timeout, quic_recv.read_exact(&mut len))
+                    .await
+                    .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                    .map_err(|_| TransferError::InternalError)?;
+                let host_len = len[0] as usize;
+                if host_len == 0 {
+                    return Err(TransferError::InvalidDomain);
+                }
+                let mut buf = vec![0u8; host_len + 2];
+                tokio::time::timeout(timeout, quic_recv.read_exact(&mut buf))
+                    .await
+                    .map_err(|_: Elapsed| TransferError::TimeoutError)?
+                    .map_err(|_| TransferError::InternalError)?;
+                let host = std::str::from_utf8(&buf[..host_len])
+                    .map_err(|_| TransferError::InvalidDomain)?
+                    .to_string();
+                let port = u16::from_be_bytes(buf[host_len..host_len + 2].try_into().unwrap());
+                Ok(crate::TunnelTarget::Domain(host, port))
             }
             _ => {
                 log::error!("invalid address family");
                 Err(TransferError::InvalidIPFamily)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TunnelTarget;
+
+    async fn round_trip(target: TunnelTarget) -> TunnelTarget {
+        let bytes = StreamUtil::encode_tunnel_target(&Some(target), true)
+            .unwrap()
+            .unwrap();
+        StreamUtil::read_tunnel_target(&mut bytes.as_slice(), 1000)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn tunnel_target_round_trips_all_families() {
+        let v4 = TunnelTarget::Addr("198.18.0.7:443".parse().unwrap());
+        assert_eq!(round_trip(v4.clone()).await, v4);
+
+        let v6 = TunnelTarget::Addr("[fd00:1234::1]:8443".parse().unwrap());
+        assert_eq!(round_trip(v6.clone()).await, v6);
+
+        let domain = TunnelTarget::Domain("example.com".to_string(), 443);
+        assert_eq!(round_trip(domain.clone()).await, domain);
+    }
+
+    #[test]
+    fn encode_none_respects_mark_none() {
+        assert_eq!(
+            StreamUtil::encode_tunnel_target(&None, true).unwrap(),
+            Some(vec![0])
+        );
+        assert_eq!(
+            StreamUtil::encode_tunnel_target(&None, false).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn encode_rejects_empty_and_oversized_domain() {
+        let empty = TunnelTarget::Domain(String::new(), 443);
+        assert!(StreamUtil::encode_tunnel_target(&Some(empty), true).is_err());
+        let oversized = TunnelTarget::Domain("a".repeat(256), 443);
+        assert!(StreamUtil::encode_tunnel_target(&Some(oversized), true).is_err());
+    }
+
+    #[tokio::test]
+    async fn read_rejects_unknown_family_and_zero_len_domain() {
+        // Unknown family byte.
+        let mut bad = [9u8, 1, 2, 3].as_slice();
+        assert_eq!(
+            StreamUtil::read_tunnel_target(&mut bad, 1000).await,
+            Err(TransferError::InvalidIPFamily)
+        );
+        // Domain family with zero length.
+        let mut zero = [3u8, 0].as_slice();
+        assert_eq!(
+            StreamUtil::read_tunnel_target(&mut zero, 1000).await,
+            Err(TransferError::InvalidDomain)
+        );
+        // Domain family with non-UTF8 host bytes.
+        let mut bad_utf8 = [3u8, 2, 0xff, 0xfe, 0, 80].as_slice();
+        assert_eq!(
+            StreamUtil::read_tunnel_target(&mut bad_utf8, 1000).await,
+            Err(TransferError::InvalidDomain)
+        );
     }
 }

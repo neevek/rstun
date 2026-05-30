@@ -82,7 +82,7 @@ impl TcpServer {
                             .send_timeout(
                                 StreamMessage::Request(StreamRequest {
                                     stream,
-                                    dst_addr: None,
+                                    target: None,
                                 }),
                                 Duration::from_millis(3000),
                             )

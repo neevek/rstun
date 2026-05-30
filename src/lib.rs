@@ -355,9 +355,42 @@ impl std::fmt::Debug for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Destination carried over a tunnel stream. `Addr` is the existing
+/// IP:port behavior; `Domain` defers resolution to the tunnel egress so the
+/// server resolves the hostname (used by TUN fake-IP mode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelTarget {
+    Addr(SocketAddr),
+    Domain(String, u16),
+}
+
+impl TunnelTarget {
+    pub fn port(&self) -> u16 {
+        match self {
+            TunnelTarget::Addr(addr) => addr.port(),
+            TunnelTarget::Domain(_, port) => *port,
+        }
+    }
+}
+
+impl From<SocketAddr> for TunnelTarget {
+    fn from(addr: SocketAddr) -> Self {
+        TunnelTarget::Addr(addr)
+    }
+}
+
+impl Display for TunnelTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunnelTarget::Addr(addr) => write!(f, "{addr}"),
+            TunnelTarget::Domain(host, port) => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ChannelTcpConnectCtx {
-    pub requested_dst: Option<SocketAddr>,
+    pub requested_dst: Option<TunnelTarget>,
     pub default_upstream: Option<SocketAddr>,
     pub timeout_ms: u64,
 }

@@ -18,7 +18,7 @@ impl AsyncStream for TcpStream {
 
 pub struct StreamRequest<S: AsyncStream> {
     pub stream: S,
-    pub dst_addr: Option<SocketAddr>,
+    pub target: Option<crate::TunnelTarget>,
 }
 
 pub enum StreamMessage<S: AsyncStream> {

@@ -55,7 +55,7 @@ impl TcpTunnel {
             match conn.open_bi().await {
                 Ok((mut quic_send, quic_recv)) => {
                     if let Err(e) =
-                        StreamUtil::write_socket_addr(&mut quic_send, &request.dst_addr, false)
+                        StreamUtil::write_tunnel_target(&mut quic_send, &request.target, false)
                             .await
                     {
                         error!("failed to send dst addr: {e}");
@@ -118,10 +118,10 @@ impl TcpTunnel {
                     let tcp_connector = tcp_connector.clone();
                     tokio::spawn(async move {
                         let requested_dst = if tcp_connector.is_some() || upstream_addr.is_none() {
-                            match StreamUtil::read_socket_addr(&mut quic_recv, stream_timeout_ms)
+                            match StreamUtil::read_tunnel_target(&mut quic_recv, stream_timeout_ms)
                                 .await
                             {
-                                Ok(dst_addr) => Some(dst_addr),
+                                Ok(target) => Some(target),
                                 Err(e) => {
                                     log::error!("failed to read dst address: {e}");
                                     return;
@@ -145,29 +145,45 @@ impl TcpTunnel {
                                 }
                             }
                         } else {
-                            let dst_addr = match upstream_addr.or(requested_dst) {
-                                Some(dst_addr) => dst_addr,
+                            // Prefer a fixed upstream; otherwise use the requested target.
+                            let target = match upstream_addr
+                                .map(crate::TunnelTarget::Addr)
+                                .or(requested_dst)
+                            {
+                                Some(target) => target,
                                 None => {
                                     error!("no destination available for accepted stream");
                                     return;
                                 }
                             };
 
-                            match tokio::time::timeout(
-                                Duration::from_secs(5),
-                                TcpStream::connect(&dst_addr),
-                            )
-                            .await
-                            {
+                            let connect_result = match &target {
+                                crate::TunnelTarget::Addr(addr) => {
+                                    tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        TcpStream::connect(addr),
+                                    )
+                                    .await
+                                }
+                                crate::TunnelTarget::Domain(host, port) => {
+                                    tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        TcpStream::connect((host.as_str(), *port)),
+                                    )
+                                    .await
+                                }
+                            };
+
+                            match connect_result {
                                 Ok(Ok(request)) => request,
                                 Ok(Err(e)) => {
                                     error!(
-                                        "failed to connect upstream, dst_addr:{dst_addr}, err:{e}"
+                                        "failed to connect upstream, dst_addr:{target}, err:{e}"
                                     );
                                     return;
                                 }
                                 Err(_) => {
-                                    error!("tcp connect timed out, dst_addr:{dst_addr}");
+                                    error!("tcp connect timed out, dst_addr:{target}");
                                     return;
                                 }
                             }
