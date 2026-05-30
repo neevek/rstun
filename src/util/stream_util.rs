@@ -88,7 +88,9 @@ impl StreamUtil {
                 }
             }
 
-            debug!("[{tag}] stream close id={index}, peer={peer_addr}, dir=q2s, bytes={transfer_bytes}");
+            debug!(
+                "[{tag}] stream close id={index}, peer={peer_addr}, dir=q2s, bytes={transfer_bytes}"
+            );
         });
 
         tokio::spawn(async move {
@@ -121,7 +123,9 @@ impl StreamUtil {
                 }
             }
 
-            debug!("[{tag}] stream close id={index}, peer={peer_addr}, dir=s2q, bytes={transfer_bytes}");
+            debug!(
+                "[{tag}] stream close id={index}, peer={peer_addr}, dir=s2q, bytes={transfer_bytes}"
+            );
             Ok::<(), anyhow::Error>(())
         });
     }
@@ -252,14 +256,46 @@ impl StreamUtil {
         stream_timeout_ms: u64,
     ) -> Result<crate::TunnelTarget, TransferError> {
         let timeout = Duration::from_millis(stream_timeout_ms);
+        let family = Self::read_target_family(quic_recv, timeout).await?;
+        Self::read_tunnel_target_body(quic_recv, family, timeout).await
+    }
 
+    /// Like `read_tunnel_target`, but a leading family byte of `0` (the
+    /// `mark_none` sentinel produced by `encode_tunnel_target`) decodes to
+    /// `None`. Used by the UDP relay, where a flow may target the server's
+    /// configured default upstream instead of an explicit destination.
+    pub async fn read_optional_tunnel_target<R: AsyncRead + Unpin>(
+        quic_recv: &mut R,
+        stream_timeout_ms: u64,
+    ) -> Result<Option<crate::TunnelTarget>, TransferError> {
+        let timeout = Duration::from_millis(stream_timeout_ms);
+        let family = Self::read_target_family(quic_recv, timeout).await?;
+        if family == 0 {
+            return Ok(None);
+        }
+        Self::read_tunnel_target_body(quic_recv, family, timeout)
+            .await
+            .map(Some)
+    }
+
+    async fn read_target_family<R: AsyncRead + Unpin>(
+        quic_recv: &mut R,
+        timeout: Duration,
+    ) -> Result<u8, TransferError> {
         let mut family = [0u8; 1];
         tokio::time::timeout(timeout, quic_recv.read_exact(&mut family))
             .await
             .map_err(|_: Elapsed| TransferError::TimeoutError)?
             .map_err(|_| TransferError::InternalError)?;
+        Ok(family[0])
+    }
 
-        match family[0] {
+    async fn read_tunnel_target_body<R: AsyncRead + Unpin>(
+        quic_recv: &mut R,
+        family: u8,
+        timeout: Duration,
+    ) -> Result<crate::TunnelTarget, TransferError> {
+        match family {
             4 => {
                 let mut buf = [0u8; 4 + 2];
                 tokio::time::timeout(timeout, quic_recv.read_exact(&mut buf))
@@ -307,7 +343,7 @@ impl StreamUtil {
                 Ok(crate::TunnelTarget::Domain(host, port))
             }
             _ => {
-                log::warn!("invalid tunnel target address family, family={}", family[0]);
+                log::warn!("invalid tunnel target address family, family={family}");
                 Err(TransferError::InvalidIPFamily)
             }
         }
@@ -338,6 +374,40 @@ mod tests {
 
         let domain = TunnelTarget::Domain("example.com".to_string(), 443);
         assert_eq!(round_trip(domain.clone()).await, domain);
+    }
+
+    #[tokio::test]
+    async fn read_optional_tunnel_target_decodes_none_and_targets() {
+        // `mark_none` sentinel byte [0] decodes to None (the fixed-upstream case
+        // used by the UDP relay).
+        let none_bytes = StreamUtil::encode_tunnel_target(&None, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(none_bytes, vec![0]);
+        assert_eq!(
+            StreamUtil::read_optional_tunnel_target(&mut none_bytes.as_slice(), 1000).await,
+            Ok(None)
+        );
+
+        // A real Domain target round-trips through the optional reader.
+        let domain = TunnelTarget::Domain("example.com".to_string(), 443);
+        let domain_bytes = StreamUtil::encode_tunnel_target(&Some(domain.clone()), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            StreamUtil::read_optional_tunnel_target(&mut domain_bytes.as_slice(), 1000).await,
+            Ok(Some(domain))
+        );
+
+        // An Addr target round-trips too.
+        let addr = TunnelTarget::Addr("198.18.0.7:443".parse().unwrap());
+        let addr_bytes = StreamUtil::encode_tunnel_target(&Some(addr.clone()), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            StreamUtil::read_optional_tunnel_target(&mut addr_bytes.as_slice(), 1000).await,
+            Ok(Some(addr))
+        );
     }
 
     #[test]

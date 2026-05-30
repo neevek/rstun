@@ -1,12 +1,14 @@
 use crate::BUFFER_POOL;
+use crate::TunnelTarget;
 use crate::UDP_PACKET_SIZE;
 use crate::socket_addr_with_unspecified_ip_port;
-use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
+use crate::tunnel_message::TunnelMessage;
 use crate::udp::{UdpMessage, UdpPacket, UdpReceiver, UdpSender};
+use crate::util::stream_util::StreamUtil;
 use crate::{
     ChannelUdpConnectCtx, ChannelUdpConnection, ChannelUdpConnector, format_optional_socket_addr,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use dashmap::{DashMap, mapref::entry::Entry};
 use log::{debug, warn};
 use quinn::{Connection, RecvStream, SendStream};
@@ -25,18 +27,30 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::{net::UdpSocket, sync::Mutex};
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct UdpStreamKey {
     local_addr: SocketAddr,
-    peer_addr: Option<SocketAddr>,
+    peer_addr: Option<TunnelTarget>,
 }
 
 impl fmt::Display for UdpStreamKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.peer_addr {
+        match &self.peer_addr {
             Some(peer_addr) => write!(f, "{} -> {peer_addr}", self.local_addr),
             None => write!(f, "{}", self.local_addr),
         }
+    }
+}
+
+/// Whether the synthetic channel local address should be IPv6. A `Domain`
+/// target has no known family at this hop, so fall back to the default upstream.
+fn target_family_is_ipv6(
+    target: &Option<TunnelTarget>,
+    default_upstream: Option<SocketAddr>,
+) -> bool {
+    match target {
+        Some(TunnelTarget::Addr(addr)) => addr.is_ipv6(),
+        Some(TunnelTarget::Domain(..)) | None => default_upstream.is_some_and(|a| a.is_ipv6()),
     }
 }
 
@@ -90,12 +104,12 @@ impl UdpTunnel {
         while let Some(UdpMessage::Packet(packet)) = udp_receiver.recv().await {
             let stream_key = UdpStreamKey {
                 local_addr: packet.local_addr,
-                peer_addr: packet.peer_addr,
+                peer_addr: packet.peer_addr.clone(),
             };
             let packet_sender = match UdpTunnel::open_stream(
                 conn.clone(),
                 udp_sender.clone(),
-                stream_key,
+                stream_key.clone(),
                 stream_map.clone(),
                 udp_timeout_ms,
             )
@@ -149,35 +163,36 @@ impl UdpTunnel {
 
         let (mut quic_send, mut quic_recv) =
             conn.open_bi().await.context("open_bi failed for udp out")?;
+
+        // The flow's target is constant for the stream's lifetime, so it is sent
+        // once at stream open (mirroring the TCP path) instead of per datagram.
+        // Send it before publishing the stream so a failed open never leaves a
+        // half-initialized map entry.
+        StreamUtil::write_tunnel_target(&mut quic_send, &stream_key.peer_addr, true)
+            .await
+            .map_err(|e| anyhow!("send udp tunnel target failed: {e}"))?;
+
         let (packet_sender, mut packet_receiver) = mpsc::channel::<UdpPacket>(512);
-        stream_map.insert(stream_key, packet_sender.clone());
+        stream_map.insert(stream_key.clone(), packet_sender.clone());
 
         let stream_map_for_writer = stream_map.clone();
+        let writer_stream_key = stream_key.clone();
         tokio::spawn(async move {
             debug!(
-                "[udp] stream writer open key={stream_key}, streams={}",
+                "[udp] stream writer open key={writer_stream_key}, streams={}",
                 stream_map_for_writer.len(),
             );
             while let Some(packet) = packet_receiver.recv().await {
                 let payload_len = packet.payload.len();
-                if let Err(e) = TunnelMessage::send(
-                    &mut quic_send,
-                    &TunnelMessage::ReqUdpStart(UdpPeerAddr(packet.peer_addr)),
-                )
-                .await
-                {
-                    warn!("[udp] send metadata failed, len={payload_len}, err={e}");
-                    break;
-                }
                 if let Err(e) = TunnelMessage::send_raw(&mut quic_send, &packet.payload).await {
                     warn!("[udp] send datagram failed, len={payload_len}, err={e}");
                     break;
                 }
             }
 
-            stream_map_for_writer.remove(&stream_key);
+            stream_map_for_writer.remove(&writer_stream_key);
             debug!(
-                "[udp] stream writer close key={stream_key}, streams={}",
+                "[udp] stream writer close key={writer_stream_key}, streams={}",
                 stream_map_for_writer.len(),
             );
         });
@@ -201,7 +216,7 @@ impl UdpTunnel {
                         let packet = UdpPacket {
                             payload,
                             local_addr: stream_key.local_addr,
-                            peer_addr: stream_key.peer_addr,
+                            peer_addr: stream_key.peer_addr.clone(),
                         };
                         let _ = udp_sender.send(UdpMessage::Packet(packet)).await;
                     }
@@ -291,9 +306,13 @@ impl UdpTunnel {
                     }
                     Ok((quic_send, quic_recv)) => {
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                Self::process(quic_send, quic_recv, default_upstream, udp_timeout_ms)
-                                    .await
+                            if let Err(err) = Self::process(
+                                quic_send,
+                                quic_recv,
+                                default_upstream,
+                                udp_timeout_ms,
+                            )
+                            .await
                             {
                                 warn!("[udp] stream processing failed, err={err}");
                             }
@@ -360,53 +379,41 @@ impl UdpTunnel {
         udp_timeout_ms: u64,
     ) -> Result<()> {
         let quic_send = Arc::new(Mutex::new(quic_send));
-        let mut udp_socket = None;
-        if let Some(upstream_addr) = upstream_addr {
-            // pre-create the udp-socket if upstream is specified
-            udp_socket = Self::create_peer_socket_and_exchange_data(
-                upstream_addr,
-                quic_send.clone(),
-                udp_timeout_ms,
-            )
-            .await?;
-        }
+
+        // The flow's target is sent once at stream open. Resolve a Domain target
+        // here at the tunnel egress; a fixed `upstream_addr` always wins.
+        let target = StreamUtil::read_optional_tunnel_target(&mut quic_recv, udp_timeout_ms)
+            .await
+            .map_err(|e| anyhow!("read udp tunnel target failed: {e}"))?;
+        let resolved = match upstream_addr {
+            Some(addr) => addr,
+            None => match target {
+                Some(target) => Self::resolve_udp_target(&target, udp_timeout_ms).await?,
+                None => bail!("no valid upstream_addr to connect"),
+            },
+        };
+
+        let udp_socket = match Self::create_peer_socket_and_exchange_data(
+            resolved,
+            quic_send.clone(),
+            udp_timeout_ms,
+        )
+        .await?
+        {
+            Some(socket) => socket,
+            None => bail!("failed to create upstream udp socket for {resolved}"),
+        };
 
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         loop {
-            match Self::recv_udp_packet_from_tunnel(&mut quic_recv, &mut buf, udp_timeout_ms).await
+            match tokio::time::timeout(
+                Duration::from_millis(udp_timeout_ms),
+                TunnelMessage::recv_raw(&mut quic_recv, &mut buf),
+            )
+            .await
             {
-                Ok(Ok((peer_addr, packet_len))) => {
-                    match peer_addr {
-                        Some(peer_addr) => {
-                            if let Some(upstream_addr) = upstream_addr {
-                                debug!(
-                                    "[udp] fixed upstream={upstream_addr} set, ignoring peer={peer_addr}"
-                                );
-                            } else if udp_socket.as_ref().and_then(|sock| sock.0.peer_addr().ok())
-                                != Some(peer_addr)
-                            {
-                                if let Some(udp_socket) = udp_socket {
-                                    // shutdown the old socket
-                                    udp_socket.1.send(()).ok();
-                                }
-                                udp_socket = Self::create_peer_socket_and_exchange_data(
-                                    peer_addr,
-                                    quic_send.clone(),
-                                    udp_timeout_ms,
-                                )
-                                .await?;
-                            }
-                        }
-                        None => {
-                            if udp_socket.is_none() {
-                                log_and_bail!("no valid upstream_addr to connect");
-                            }
-                        }
-                    };
-
+                Ok(Ok(packet_len)) => {
                     udp_socket
-                        .as_ref()
-                        .unwrap()
                         .0
                         .send(&buf[..packet_len as usize])
                         .await
@@ -417,13 +424,44 @@ impl UdpTunnel {
                     break;
                 }
                 Err(_) => {
-                    // timeout on receiving datagrams from upstream
+                    // timeout on receiving datagrams from the tunnel
                     break;
                 }
             }
         }
 
         Ok::<(), anyhow::Error>(())
+    }
+
+    /// Resolves a UDP flow target to a concrete upstream address. `Addr` is
+    /// returned as-is; `Domain` resolves at the egress via the system resolver
+    /// (mirroring how the TCP path connects by hostname).
+    async fn resolve_udp_target(target: &TunnelTarget, udp_timeout_ms: u64) -> Result<SocketAddr> {
+        match target {
+            TunnelTarget::Addr(addr) => Ok(*addr),
+            TunnelTarget::Domain(host, port) => {
+                let addrs: Vec<SocketAddr> = tokio::time::timeout(
+                    Duration::from_millis(udp_timeout_ms),
+                    tokio::net::lookup_host((host.as_str(), *port)),
+                )
+                .await
+                .map_err(|_| anyhow!("udp resolve timeout for {host}:{port}"))?
+                .with_context(|| format!("udp resolve failed for {host}:{port}"))?
+                .collect();
+                // Prefer IPv4: a UDP `connect` does not verify reachability, so a
+                // resolver-first IPv6 on a host with broken IPv6 would silently
+                // blackhole the flow (TCP egress sidesteps this by trying every
+                // address). Fall back to the first result for IPv6-only names.
+                let resolved = addrs
+                    .iter()
+                    .find(|a| a.is_ipv4())
+                    .or_else(|| addrs.first())
+                    .copied()
+                    .with_context(|| format!("udp resolve empty for {host}:{port}"))?;
+                debug!("[udp] resolve host={host}:{port} -> ip={resolved}");
+                Ok(resolved)
+            }
+        }
     }
 
     async fn process_channel(
@@ -470,25 +508,37 @@ impl UdpTunnel {
         });
 
         let mut quic_recv = quic_recv;
+
+        // The flow's target is sent once at stream open; stamp it on every
+        // forwarded datagram so the chained next hop knows the destination.
+        let target = StreamUtil::read_optional_tunnel_target(&mut quic_recv, udp_timeout_ms)
+            .await
+            .map_err(|e| anyhow!("read udp tunnel target failed: {e}"))?;
+        let ipv6 = target_family_is_ipv6(&target, default_upstream);
+
         let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         let mut local_addr = None;
         loop {
-            match Self::recv_udp_packet_from_reader(&mut quic_recv, &mut buf, udp_timeout_ms).await
+            match tokio::time::timeout(
+                Duration::from_millis(udp_timeout_ms),
+                TunnelMessage::recv_raw_from(&mut quic_recv, &mut buf),
+            )
+            .await
             {
-                Ok(Ok((peer_addr, packet_len))) => {
+                Ok(Ok(packet_len)) => {
                     let local_addr = Self::channel_local_addr(
                         &mut local_addr,
                         &next_local_port,
                         &reply_map,
                         &reply_tx,
-                        peer_addr.or(default_upstream),
+                        ipv6,
                     )?;
                     let payload = BUFFER_POOL.alloc_from_slice(&buf[..packet_len as usize]);
                     udp_sender
                         .send(UdpMessage::Packet(UdpPacket {
                             payload,
                             local_addr,
-                            peer_addr,
+                            peer_addr: target.clone(),
                         }))
                         .await
                         .ok();
@@ -568,49 +618,16 @@ impl UdpTunnel {
         next_local_port: &AtomicU16,
         reply_map: &ChannelReplyMap,
         reply_tx: &Sender<UdpPacket>,
-        upstream_addr: Option<SocketAddr>,
+        ipv6: bool,
     ) -> Result<SocketAddr> {
         if let Some(local_addr) = *local_addr {
             return Ok(local_addr);
         }
 
-        let allocated_local_addr = Self::reserve_channel_local_addr(
-            next_local_port,
-            upstream_addr.is_some_and(|addr| addr.is_ipv6()),
-            reply_map,
-            reply_tx,
-        )?;
+        let allocated_local_addr =
+            Self::reserve_channel_local_addr(next_local_port, ipv6, reply_map, reply_tx)?;
         *local_addr = Some(allocated_local_addr);
         Ok(allocated_local_addr)
-    }
-
-    async fn recv_udp_packet_from_tunnel(
-        quic_recv: &mut RecvStream,
-        buf: &mut [u8],
-        udp_timeout_ms: u64,
-    ) -> std::result::Result<anyhow::Result<(Option<SocketAddr>, u16)>, tokio::time::error::Elapsed>
-    {
-        Self::recv_udp_packet_from_reader(quic_recv, buf, udp_timeout_ms).await
-    }
-
-    async fn recv_udp_packet_from_reader<R: AsyncRead + Unpin>(
-        quic_recv: &mut R,
-        buf: &mut [u8],
-        udp_timeout_ms: u64,
-    ) -> std::result::Result<anyhow::Result<(Option<SocketAddr>, u16)>, tokio::time::error::Elapsed>
-    {
-        tokio::time::timeout(Duration::from_millis(udp_timeout_ms), async {
-            let peer_addr = match TunnelMessage::recv_from(quic_recv).await? {
-                TunnelMessage::ReqUdpStart(UdpPeerAddr(peer_addr)) => peer_addr,
-                msg => {
-                    log_and_bail!("unexpected tunnel message: {msg}");
-                }
-            };
-
-            let packet_len = TunnelMessage::recv_raw_from(quic_recv, buf).await?;
-            Ok((peer_addr, packet_len))
-        })
-        .await
     }
 
     async fn create_peer_socket_and_exchange_data(
@@ -725,14 +742,52 @@ impl UdpTunnel {
 mod tests {
     use super::UdpTunnel;
     use crate::BUFFER_POOL;
-    use crate::tunnel_message::{TunnelMessage, UdpPeerAddr};
+    use crate::TunnelTarget;
+    use crate::tunnel_message::TunnelMessage;
     use crate::udp::{UdpMessage, UdpPacket};
+    use crate::util::stream_util::StreamUtil;
     use dashmap::DashMap;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::{Arc, atomic::AtomicU16};
-    use tokio::io::{duplex, split};
+    use tokio::io::{AsyncWriteExt, duplex, split};
     use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn resolve_udp_target_returns_addr_unchanged() {
+        let addr: SocketAddr = "203.0.113.5:443".parse().unwrap();
+        let resolved = UdpTunnel::resolve_udp_target(&TunnelTarget::Addr(addr), 1000)
+            .await
+            .expect("resolve addr");
+        assert_eq!(resolved, addr);
+    }
+
+    #[tokio::test]
+    async fn resolve_udp_target_prefers_ipv4_for_domain() {
+        // `localhost` resolves (via /etc/hosts, offline) to both 127.0.0.1 and
+        // ::1. The egress resolver must prefer the IPv4 address, since a UDP
+        // `connect` cannot probe IPv6 reachability.
+        let resolved = UdpTunnel::resolve_udp_target(
+            &TunnelTarget::Domain("localhost".to_string(), 5353),
+            1000,
+        )
+        .await
+        .expect("resolve localhost");
+        assert!(resolved.is_ipv4(), "expected IPv4, got {resolved}");
+        assert_eq!(resolved, "127.0.0.1:5353".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_udp_target_accepts_numeric_domain_host() {
+        // A numeric host string resolves to itself without a DNS round-trip.
+        let resolved = UdpTunnel::resolve_udp_target(
+            &TunnelTarget::Domain("198.51.100.9".to_string(), 9000),
+            1000,
+        )
+        .await
+        .expect("resolve numeric host");
+        assert_eq!(resolved, "198.51.100.9:9000".parse().unwrap());
+    }
 
     #[test]
     fn reserve_channel_local_addr_matches_upstream_address_family() {
@@ -816,12 +871,16 @@ mod tests {
             1_000,
         ));
 
-        TunnelMessage::send_to(
-            &mut peer_stream,
-            &TunnelMessage::ReqUdpStart(UdpPeerAddr(Some(dst_addr))),
-        )
-        .await
-        .expect("send first metadata");
+        // New framing: the flow target is written once at stream open, then
+        // datagrams are sent raw with no per-packet metadata.
+        let target_bytes =
+            StreamUtil::encode_tunnel_target(&Some(TunnelTarget::Addr(dst_addr)), true)
+                .expect("encode tunnel target")
+                .expect("target bytes");
+        peer_stream
+            .write_all(&target_bytes)
+            .await
+            .expect("send tunnel target");
         TunnelMessage::send_raw_to(&mut peer_stream, b"first")
             .await
             .expect("send first payload");
@@ -844,17 +903,12 @@ mod tests {
             .send(UdpPacket {
                 payload: BUFFER_POOL.alloc_from_slice(b"reply"),
                 local_addr,
-                peer_addr: Some(dst_addr),
+                peer_addr: Some(TunnelTarget::Addr(dst_addr)),
             })
             .await
             .expect("send reply");
 
-        TunnelMessage::send_to(
-            &mut peer_stream,
-            &TunnelMessage::ReqUdpStart(UdpPeerAddr(Some(dst_addr))),
-        )
-        .await
-        .expect("send second metadata");
+        // No second metadata frame — the target was already sent once at open.
         TunnelMessage::send_raw_to(&mut peer_stream, b"second")
             .await
             .expect("send second payload");

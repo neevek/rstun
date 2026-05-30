@@ -5,7 +5,7 @@ use bincode::config::{self, Configuration};
 use enum_as_inner::EnumAsInner;
 use quinn::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display};
+use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -15,7 +15,6 @@ const MAX_TUNNEL_MESSAGE_SIZE: usize = 64 * 1024;
 #[derive(EnumAsInner, Serialize, Deserialize, Debug, Clone)]
 pub enum TunnelMessage {
     ReqLogin(LoginInfo),
-    ReqUdpStart(UdpPeerAddr),
     ReqHeartbeat(u64),
     RespHeartbeat(u64),
     RespFailure(String),
@@ -74,18 +73,6 @@ impl LoginInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct UdpPeerAddr(pub Option<SocketAddr>);
-
-impl Display for UdpPeerAddr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0 {
-            Some(addr) => write!(f, "{addr}"),
-            None => f.write_str("none"),
-        }
-    }
-}
-
 impl Display for LoginInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.tunnel {
@@ -103,9 +90,6 @@ impl Display for TunnelMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReqLogin(login_info) => f.write_str(login_info.to_string().as_str()),
-            Self::ReqUdpStart(udp_peer_addr) => {
-                f.write_str(format!("udp_start:{udp_peer_addr}").as_str())
-            }
             Self::ReqHeartbeat(seq) => f.write_str(format!("heartbeat:req:{seq}").as_str()),
             Self::RespHeartbeat(seq) => f.write_str(format!("heartbeat:resp:{seq}").as_str()),
             Self::RespFailure(msg) => f.write_str(format!("fail:{msg}").as_str()),

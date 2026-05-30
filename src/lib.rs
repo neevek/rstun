@@ -358,7 +358,7 @@ impl std::fmt::Debug for ServerConfig {
 /// Destination carried over a tunnel stream. `Addr` is the existing
 /// IP:port behavior; `Domain` defers resolution to the tunnel egress so the
 /// server resolves the hostname (used by TUN fake-IP mode).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TunnelTarget {
     Addr(SocketAddr),
     Domain(String, u16),
@@ -369,6 +369,15 @@ impl TunnelTarget {
         match self {
             TunnelTarget::Addr(addr) => addr.port(),
             TunnelTarget::Domain(_, port) => *port,
+        }
+    }
+
+    /// Returns the concrete `SocketAddr` when this target is already an address.
+    /// `Domain` targets resolve at the tunnel egress, so they have no address here.
+    pub fn as_socketaddr(&self) -> Option<SocketAddr> {
+        match self {
+            TunnelTarget::Addr(addr) => Some(*addr),
+            TunnelTarget::Domain(..) => None,
         }
     }
 }
