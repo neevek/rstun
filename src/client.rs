@@ -497,56 +497,66 @@ impl Client {
         login_info: &LoginInfo,
         connect_timeout: Duration,
     ) -> Result<Connection> {
-        let login_cfg = self.prepare_login_config().await?;
-        let endpoint = {
-            let endpoint = lock_state(&self.inner_state).endpoint.clone();
-            if let Some(endpoint) = endpoint {
-                match endpoint.local_addr() {
-                    Ok(local_addr) if local_addr.is_ipv6() == login_cfg.remote_addr.is_ipv6() => {
-                        Some(endpoint)
+        let result = async {
+            let login_cfg = self.prepare_login_config().await?;
+            let endpoint = {
+                let endpoint = lock_state(&self.inner_state).endpoint.clone();
+                if let Some(endpoint) = endpoint {
+                    match endpoint.local_addr() {
+                        Ok(local_addr)
+                            if local_addr.is_ipv6() == login_cfg.remote_addr.is_ipv6() =>
+                        {
+                            Some(endpoint)
+                        }
+                        Ok(local_addr) => {
+                            warn!(
+                                "[{tunnel}] recreate endpoint, reason=address family changed, local_addr={local_addr}, remote_addr={}",
+                                login_cfg.remote_addr
+                            );
+                            let reset = self
+                                .clear_cached_endpoint_if_idle(tunnel, "address family changed");
+                            if reset { None } else { Some(endpoint) }
+                        }
+                        Err(err) => {
+                            warn!(
+                                "[{tunnel}] recreate endpoint, reason=local_addr unavailable, err={err}"
+                            );
+                            let reset = self.clear_cached_endpoint_if_idle(
+                                tunnel,
+                                "endpoint local_addr failed",
+                            );
+                            if reset { None } else { Some(endpoint) }
+                        }
                     }
-                    Ok(local_addr) => {
-                        warn!(
-                            "[{tunnel}] recreate endpoint, reason=address family changed, local_addr={local_addr}, remote_addr={}",
-                            login_cfg.remote_addr
-                        );
-                        let reset =
-                            self.clear_cached_endpoint_if_idle(tunnel, "address family changed");
-                        if reset { None } else { Some(endpoint) }
-                    }
-                    Err(err) => {
-                        warn!(
-                            "[{tunnel}] recreate endpoint, reason=local_addr unavailable, err={err}"
-                        );
-                        let reset = self
-                            .clear_cached_endpoint_if_idle(tunnel, "endpoint local_addr failed");
-                        if reset { None } else { Some(endpoint) }
-                    }
+                } else {
+                    None
                 }
+            };
+            let endpoint = if let Some(endpoint) = endpoint {
+                endpoint
             } else {
-                None
-            }
-        };
-        let endpoint = if let Some(endpoint) = endpoint {
-            endpoint
-        } else {
-            let endpoint = Self::create_client_endpoint(
-                login_cfg.local_addr,
-                login_cfg.quinn_client_cfg.clone(),
-            )?;
-            inner_state!(self, endpoint) = Some(endpoint.clone());
-            endpoint
-        };
+                let endpoint = Self::create_client_endpoint(
+                    login_cfg.local_addr,
+                    login_cfg.quinn_client_cfg.clone(),
+                )?;
+                inner_state!(self, endpoint) = Some(endpoint.clone());
+                endpoint
+            };
 
-        let result = self
-            .login(tunnel, &endpoint, &login_cfg, login_info, connect_timeout)
-            .await;
+            self.login(tunnel, &endpoint, &login_cfg, login_info, connect_timeout)
+                .await
+        }
+        .await;
         if let Err(err) = &result
             && !self.should_quit()
         {
-            warn!(
-                "[{tunnel}] connect/login failed, will recreate endpoint, err={err}"
-            );
+            let msg = format!("connect/login failed, will recreate endpoint, err={err:?}");
+            warn!("[{tunnel}] {msg}");
+            self.post_event(TunnelEvent::new(
+                TunnelEventType::Log(msg),
+                chrono::Local::now().format(TIME_FORMAT).to_string(),
+                tunnel.clone(),
+            ));
             self.clear_cached_endpoint_if_idle(tunnel, "connect/login failed");
         }
         result
@@ -1685,6 +1695,44 @@ mod tests {
             &event.event_type,
             TunnelEventType::State(TunnelState::Connecting)
         ));
+    }
+
+    #[tokio::test]
+    async fn connect_failure_posts_tunnel_log_event() {
+        let mut client = Client::new(ClientConfig {
+            cipher: "invalid-cipher".to_string(),
+            ..ClientConfig::default()
+        });
+        let receiver = client.register_for_events();
+        let descriptor = TunnelDescriptor {
+            id: TunnelId::Network(0),
+            proto: UpstreamType::Tcp,
+            mode: TunnelMode::Out,
+        };
+        let login_info = LoginInfo {
+            password: String::new(),
+            tunnel: Tunnel::ChannelBased(UpstreamType::Tcp),
+            tcp_timeout_ms: 0,
+            udp_timeout_ms: 0,
+        };
+
+        client
+            .connect_once(&descriptor, &login_info, Duration::from_millis(1))
+            .await
+            .expect_err("invalid cipher should fail before connecting");
+
+        for _ in 0..3 {
+            let event = receiver
+                .recv_timeout(Duration::from_millis(100))
+                .expect("event should arrive");
+            if let TunnelEventType::Log(msg) = &event.event_type
+                && msg.contains("connect/login failed")
+            {
+                assert!(msg.contains("err="));
+                return;
+            }
+        }
+        panic!("expected log event");
     }
 
     #[test]
