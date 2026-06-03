@@ -498,7 +498,10 @@ impl Server {
                 let sess = sess.clone();
                 tokio::spawn(async move {
                     sess.sender.send(UdpMessage::Quit).await.ok();
-                    debug!("[server] dropped udp session, remote_addr={}", sess.conn.remote_address());
+                    debug!(
+                        "[server] dropped udp session, remote_addr={}",
+                        sess.conn.remote_address()
+                    );
                 });
                 false
             } else {
@@ -511,7 +514,10 @@ impl Server {
                 let sess = sess.clone();
                 tokio::spawn(async move {
                     sess.sender.send(StreamMessage::Quit).await.ok();
-                    debug!("[server] dropped tcp session, remote_addr={}", sess.conn.remote_address());
+                    debug!(
+                        "[server] dropped tcp session, remote_addr={}",
+                        sess.conn.remote_address()
+                    );
                 });
                 false
             } else {

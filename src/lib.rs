@@ -286,6 +286,8 @@ pub struct ClientConfig {
     pub quic_receive_window: u32,
     pub stream_receive_window: u32,
     pub quic_send_window: u64,
+    /// Custom SNI hostnames presented on the wire (round-robin). Empty = disabled.
+    pub sni_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -425,6 +427,27 @@ pub type ChannelUdpConnectFuture =
 pub type ChannelUdpConnector =
     Arc<dyn Fn(ChannelUdpConnectCtx) -> ChannelUdpConnectFuture + Send + Sync>;
 
+/// Trims and drops empty entries; rejects IP literals (RFC 6066 forbids them in SNI).
+fn parse_sni_names(sni: &str) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for raw in sni.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match rustls::pki_types::ServerName::try_from(name) {
+            Ok(rustls::pki_types::ServerName::DnsName(_)) => names.push(name.to_string()),
+            Ok(_) => {
+                log_and_bail!("custom SNI must be a DNS hostname, not an IP literal: {name}");
+            }
+            Err(_) => {
+                log_and_bail!("invalid custom SNI hostname: {name}");
+            }
+        }
+    }
+    Ok(names)
+}
+
 impl ClientConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn create(
@@ -436,6 +459,7 @@ impl ClientConfig {
         udp_mappings: &str,
         dot: &str,
         dns: &str,
+        sni: &str,
         workers: usize,
         wait_before_retry_ms: u64,
         mut quic_timeout_ms: u64,
@@ -502,6 +526,7 @@ impl ClientConfig {
             hop_interval_ms,
             dot_servers: dot.split(',').map(|s| s.to_string()).collect(),
             dns_servers: dns.split(',').map(|s| s.to_string()).collect(),
+            sni_names: parse_sni_names(sni)?,
             ..ClientConfig::default()
         };
 
@@ -648,6 +673,7 @@ pub mod android {
         judpMappings: JString,
         jdotServer: JString,
         jdnsServer: JString,
+        jsniNames: JString,
         jpassword: JString,
         jcertFilePath: JString,
         jcipher: JString,
@@ -661,6 +687,7 @@ pub mod android {
         let udp_mappings = convert_jstring(&mut env, judpMappings);
         let dot_server = convert_jstring(&mut env, jdotServer);
         let dns_server = convert_jstring(&mut env, jdnsServer);
+        let sni_names = convert_jstring(&mut env, jsniNames);
         let password = convert_jstring(&mut env, jpassword);
         let cert_file_path = convert_jstring(&mut env, jcertFilePath);
         let cipher = convert_jstring(&mut env, jcipher);
@@ -674,6 +701,7 @@ pub mod android {
             &udp_mappings,
             &dot_server,
             &dns_server,
+            &sni_names,
             jworkers as usize,
             jwaitBeforeRetryMs as u64,
             jquicTimeoutMs as u64,
@@ -792,5 +820,41 @@ pub mod android {
         } else {
             String::from("")
         }
+    }
+}
+
+#[cfg(test)]
+mod sni_tests {
+    use super::parse_sni_names;
+
+    #[test]
+    fn empty_input_yields_no_sni_names() {
+        assert!(parse_sni_names("").unwrap().is_empty());
+        assert!(parse_sni_names("   ").unwrap().is_empty());
+        assert!(parse_sni_names(",, ,").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_and_trims_dns_names() {
+        assert_eq!(
+            parse_sni_names("www.bing.com, www.apple.com ,cdn.example.net").unwrap(),
+            vec![
+                "www.bing.com".to_string(),
+                "www.apple.com".to_string(),
+                "cdn.example.net".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_ip_literal_sni() {
+        assert!(parse_sni_names("1.1.1.1").is_err());
+        assert!(parse_sni_names("www.bing.com,8.8.8.8").is_err());
+        assert!(parse_sni_names("[2606:4700:4700::1111]").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_hostname() {
+        assert!(parse_sni_names("not a host").is_err());
     }
 }

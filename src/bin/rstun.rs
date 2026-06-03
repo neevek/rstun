@@ -30,6 +30,7 @@ fn run_client(args: ClientArgs) {
         &args.udp_mappings,
         &args.dot,
         &args.dns,
+        &args.sni_names,
         args.workers,
         args.wait_before_retry_ms,
         args.quic_timeout_ms,
@@ -262,6 +263,17 @@ struct ClientArgs {
         hide_default_value = true
     )]
     dns: String,
+
+    /// Comma-separated custom SNI hostnames sent on the wire.
+    /// When set, the TLS ClientHello presents one of these (round-robin) instead of the real
+    /// server domain; the certificate is still verified against the real domain. Empty disables it.
+    #[arg(
+        long,
+        verbatim_doc_comment,
+        default_value = "",
+        hide_default_value = true
+    )]
+    sni_names: String,
 
     /// Log level
     #[arg(short = 'l', long, default_value_t = String::from("I"),

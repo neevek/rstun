@@ -24,7 +24,7 @@ use rustls::{
     client::danger::ServerCertVerified,
     crypto::{CryptoProvider, ring::cipher_suite},
 };
-use rustls_platform_verifier::{self, BuilderVerifierExt};
+use rustls_platform_verifier::{self, BuilderVerifierExt, Verifier as PlatformVerifier};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::{
@@ -104,7 +104,7 @@ struct LoginConfig {
     local_addr: SocketAddr,
     remote_addr: SocketAddr,
     quinn_client_cfg: quinn::ClientConfig,
-    domain: String,
+    sni_name: String,
 }
 
 enum ChannelUpstream<S: AsyncStream> {
@@ -123,6 +123,7 @@ pub struct Client {
     inner_state: Arc<Mutex<State>>,
     traffic_reporter_once: Arc<Once>,
     next_tunnel_id: Arc<AtomicUsize>,
+    sni_rotation: Arc<AtomicUsize>,
 }
 
 macro_rules! inner_state {
@@ -142,19 +143,38 @@ fn lock_state(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
 }
 
 impl Client {
-    pub fn new(config: ClientConfig) -> Self {
+    pub fn new(mut config: ClientConfig) -> Self {
         INIT.call_once(|| {
             if let Err(err) = rustls::crypto::ring::default_provider().install_default() {
                 warn!("[client] failed to install rustls crypto provider, err={err:?}");
             }
         });
 
+        // Guard every entry path (CLI, JNI, direct struct): drop empty/invalid names.
+        config.sni_names = Self::sanitize_sni_names(config.sni_names);
+
         Client {
             config,
             inner_state: Arc::new(Mutex::new(State::new())),
             traffic_reporter_once: Arc::new(Once::new()),
             next_tunnel_id: Arc::new(AtomicUsize::new(0)),
+            sni_rotation: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn sanitize_sni_names(names: Vec<String>) -> Vec<String> {
+        let mut valid = Vec::with_capacity(names.len());
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match rustls::pki_types::ServerName::try_from(trimmed) {
+                Ok(rustls::pki_types::ServerName::DnsName(_)) => valid.push(trimmed.to_string()),
+                _ => warn!("ignoring invalid custom SNI name: {trimmed}"),
+            }
+        }
+        valid
     }
 
     pub fn start_tunneling(&mut self) {
@@ -429,7 +449,9 @@ impl Client {
                 .notify({
                     let tunnel_descriptor = tunnel_descriptor.clone();
                     move |err: &anyhow::Error, dur: Duration| {
-                        warn!("[{tunnel_descriptor}] connect failed, retry in {dur:?}, err={err:?}");
+                        warn!(
+                            "[{tunnel_descriptor}] connect failed, retry in {dur:?}, err={err:?}"
+                        );
                     }
                 })
                 .await;
@@ -713,10 +735,12 @@ impl Client {
             self.config.quic_send_window,
         );
 
-        let (tls_client_cfg, domain) = self.parse_client_config_and_domain()?;
+        let (tls_client_cfg, verify_name) = self.parse_client_config_and_domain()?;
         let quic_client_cfg = Arc::new(QuicClientConfig::try_from(tls_client_cfg)?);
         let mut client_cfg = quinn::ClientConfig::new(quic_client_cfg);
         client_cfg.transport_config(Arc::new(transport_cfg));
+
+        let sni_name = self.select_sni_name(&verify_name);
 
         let remote_addr = self.parse_server_addr().await?;
         let local_addr = socket_addr_with_unspecified_ip_port(remote_addr.is_ipv6());
@@ -724,8 +748,19 @@ impl Client {
             local_addr,
             remote_addr,
             quinn_client_cfg: client_cfg,
-            domain,
+            sni_name,
         })
+    }
+
+    fn select_sni_name(&self, verify_name: &str) -> String {
+        let names = &self.config.sni_names;
+        if names.is_empty() {
+            return verify_name.to_string();
+        }
+        let idx = self.sni_rotation.fetch_add(1, Ordering::Relaxed) % names.len();
+        let sni = names[idx].clone();
+        debug!("using custom SNI '{sni}' (verifying against '{verify_name}')");
+        sni
     }
 
     async fn login(
@@ -752,7 +787,7 @@ impl Client {
             .as_str(),
         );
 
-        let connecting = endpoint.connect(*remote_addr, login_cfg.domain.as_str())?;
+        let connecting = endpoint.connect(*remote_addr, login_cfg.sni_name.as_str())?;
         let conn = self
             .run_login_stage(
                 connecting,
@@ -1275,10 +1310,14 @@ impl Client {
                     None => self.config.server_addr.to_string(),
                 };
 
-                let client_config = self
-                    .create_client_config_builder(&cipher)?
-                    .with_platform_verifier()?
-                    .with_no_client_auth();
+                let builder = self.create_client_config_builder(&cipher)?;
+                let client_config = if self.config.sni_names.is_empty() {
+                    builder.with_platform_verifier()?.with_no_client_auth()
+                } else {
+                    let inner: Arc<dyn rustls::client::danger::ServerCertVerifier> =
+                        Arc::new(PlatformVerifier::new(self.get_crypto_provider(&cipher))?);
+                    self.wrap_with_custom_sni_verifier(builder, inner, &domain)?
+                };
 
                 return Ok((client_config, domain));
             }
@@ -1293,9 +1332,7 @@ impl Client {
 
             static ONCE: Once = Once::new();
             ONCE.call_once(|| {
-                warn!(
-                    "no certificate provided for verification, assuming domain \"localhost\""
-                );
+                warn!("no certificate provided for verification, assuming domain \"localhost\"");
             });
             return Ok((client_config, "localhost".to_string()));
         }
@@ -1324,12 +1361,35 @@ impl Client {
             None => self.config.server_addr.to_string(),
         };
 
-        Ok((
-            self.create_client_config_builder(&cipher)?
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-            domain_or_ip,
-        ))
+        let builder = self.create_client_config_builder(&cipher)?;
+        let client_config = if self.config.sni_names.is_empty() {
+            builder.with_root_certificates(roots).with_no_client_auth()
+        } else {
+            let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                Arc::new(roots),
+                self.get_crypto_provider(&cipher),
+            )
+            .build()
+            .context("failed to build certificate verifier")?;
+            self.wrap_with_custom_sni_verifier(builder, inner, &domain_or_ip)?
+        };
+
+        Ok((client_config, domain_or_ip))
+    }
+
+    fn wrap_with_custom_sni_verifier(
+        &self,
+        builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+        inner: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+        verify_name: &str,
+    ) -> Result<rustls::ClientConfig> {
+        let real_name = rustls::pki_types::ServerName::try_from(verify_name.to_string())
+            .with_context(|| format!("invalid server name for verification: {verify_name}"))?;
+        let verifier = Arc::new(CustomSniVerifier::new(inner, real_name));
+        Ok(builder
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth())
     }
 
     pub fn get_state(&self) -> ClientState {
@@ -1557,13 +1617,78 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
     ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            warn!("==================================== WARNING ====================================");
+            warn!(
+                "==================================== WARNING ===================================="
+            );
             warn!("connecting without verifying the server certificate is DANGEROUS");
             warn!("provide the self-signed certificate or connect with a domain name to verify");
             warn!("this is intended for TESTING only");
-            warn!("=================================================================================");
+            warn!(
+                "================================================================================="
+            );
         });
         Ok(ServerCertVerified::assertion())
+    }
+}
+
+/// Verifies the certificate against the real domain (`real_name`) while a custom
+/// SNI is on the wire. Delegates to a real `inner` verifier — NOT a skip verifier.
+#[derive(Debug)]
+struct CustomSniVerifier {
+    inner: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    real_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl CustomSniVerifier {
+    fn new(
+        inner: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+        real_name: rustls::pki_types::ServerName<'static>,
+    ) -> Self {
+        Self { inner, real_name }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CustomSniVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _wire_server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> std::prelude::v1::Result<ServerCertVerified, rustls::Error> {
+        // Verify against the real domain, not the custom SNI name sent on the wire.
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            &self.real_name,
+            ocsp_response,
+            now,
+        )
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::prelude::v1::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::prelude::v1::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+    {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
     }
 }
 
@@ -1571,6 +1696,7 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
 mod tests {
     use super::*;
     use crate::SUPPORTED_CIPHER_SUITE_STRS;
+    use rustls::client::danger::ServerCertVerifier as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -1677,6 +1803,7 @@ mod tests {
             quic_receive_window: 0,
             stream_receive_window: 0,
             quic_send_window: 0,
+            sni_names: Vec::new(),
         };
         let client = Client::new(config);
         let receiver = client.register_for_events();
@@ -1756,6 +1883,7 @@ mod tests {
             quic_receive_window: 0,
             stream_receive_window: 0,
             quic_send_window: 0,
+            sni_names: Vec::new(),
         };
         let client = Client::new(config);
         let receiver = client.register_for_events();
@@ -1861,5 +1989,175 @@ mod tests {
             filtered,
             vec!["1.1.1.1".to_string(), "resolver.example".to_string()]
         );
+    }
+
+    fn client_with_sni_names(sni_names: Vec<String>) -> Client {
+        Client::new(ClientConfig {
+            sni_names,
+            ..ClientConfig::default()
+        })
+    }
+
+    #[test]
+    fn select_sni_name_falls_back_to_verify_name_when_unset() {
+        let client = client_with_sni_names(Vec::new());
+        assert_eq!(
+            client.select_sni_name("real.example.com"),
+            "real.example.com"
+        );
+        // repeated calls keep returning the real name
+        assert_eq!(
+            client.select_sni_name("real.example.com"),
+            "real.example.com"
+        );
+    }
+
+    #[test]
+    fn sanitize_sni_names_trims_and_drops_invalid() {
+        let out = Client::sanitize_sni_names(vec![
+            "  a.example.com  ".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            "1.2.3.4".to_string(),
+            "not a host".to_string(),
+            "b.example.com".to_string(),
+        ]);
+        assert_eq!(
+            out,
+            vec!["a.example.com".to_string(), "b.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn select_sni_name_rotates_round_robin() {
+        let client = client_with_sni_names(vec![
+            "a.example.com".to_string(),
+            "b.example.com".to_string(),
+            "c.example.com".to_string(),
+        ]);
+        let seq: Vec<String> = (0..7)
+            .map(|_| client.select_sni_name("real.example.com"))
+            .collect();
+        assert_eq!(
+            seq,
+            vec![
+                "a.example.com",
+                "b.example.com",
+                "c.example.com",
+                "a.example.com",
+                "b.example.com",
+                "c.example.com",
+                "a.example.com",
+            ]
+        );
+    }
+
+    /// Inner verifier stub that records the server name it was asked to verify and
+    /// returns a configurable verdict, so we can assert what `CustomSniVerifier`
+    /// forwards.
+    #[derive(Debug)]
+    struct RecordingVerifier {
+        seen_name: Mutex<Option<String>>,
+        accept: bool,
+    }
+
+    impl rustls::client::danger::ServerCertVerifier for RecordingVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &rustls::pki_types::CertificateDer<'_>,
+            _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+            server_name: &rustls::pki_types::ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: rustls::pki_types::UnixTime,
+        ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+            let name = match server_name {
+                rustls::pki_types::ServerName::DnsName(dns) => dns.as_ref().to_string(),
+                other => format!("{other:?}"),
+            };
+            *self.seen_name.lock().unwrap() = Some(name);
+            if self.accept {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(rustls::Error::General("rejected by stub".to_string()))
+            }
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+        {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &rustls::pki_types::CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error>
+        {
+            Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            vec![rustls::SignatureScheme::ED25519]
+        }
+    }
+
+    fn dummy_cert() -> rustls::pki_types::CertificateDer<'static> {
+        rustls::pki_types::CertificateDer::from(vec![0u8; 4])
+    }
+
+    #[test]
+    fn custom_sni_verifier_verifies_against_real_name() {
+        let inner = Arc::new(RecordingVerifier {
+            seen_name: Mutex::new(None),
+            accept: true,
+        });
+        let real_name = rustls::pki_types::ServerName::try_from("real.example.com").unwrap();
+        let verifier = CustomSniVerifier::new(inner.clone(), real_name);
+
+        let wire_sni = rustls::pki_types::ServerName::try_from("alt.cdn.example").unwrap();
+        let result = verifier.verify_server_cert(
+            &dummy_cert(),
+            &[],
+            &wire_sni,
+            &[],
+            rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1)),
+        );
+
+        assert!(result.is_ok());
+        // The inner (real) verifier must have been asked to verify the real domain,
+        // never the custom SNI name presented on the wire.
+        assert_eq!(
+            inner.seen_name.lock().unwrap().as_deref(),
+            Some("real.example.com")
+        );
+    }
+
+    #[test]
+    fn custom_sni_verifier_propagates_inner_rejection() {
+        // A failing inner verifier (e.g. bad/mismatched cert) must still cause the
+        // wrapper to reject — custom SNI must never weaken certificate verification.
+        let inner = Arc::new(RecordingVerifier {
+            seen_name: Mutex::new(None),
+            accept: false,
+        });
+        let real_name = rustls::pki_types::ServerName::try_from("real.example.com").unwrap();
+        let verifier = CustomSniVerifier::new(inner, real_name);
+
+        let wire_sni = rustls::pki_types::ServerName::try_from("alt.cdn.example").unwrap();
+        let result = verifier.verify_server_cert(
+            &dummy_cert(),
+            &[],
+            &wire_sni,
+            &[],
+            rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1)),
+        );
+
+        assert!(result.is_err());
     }
 }
