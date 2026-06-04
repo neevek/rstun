@@ -516,12 +516,12 @@ impl UdpTunnel {
             .map_err(|e| anyhow!("read udp tunnel target failed: {e}"))?;
         let ipv6 = target_family_is_ipv6(&target, default_upstream);
 
-        let mut buf = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
         let mut local_addr = None;
         loop {
+            let mut payload = BUFFER_POOL.alloc_and_fill(UDP_PACKET_SIZE);
             match tokio::time::timeout(
                 Duration::from_millis(udp_timeout_ms),
-                TunnelMessage::recv_raw_from(&mut quic_recv, &mut buf),
+                TunnelMessage::recv_raw_from(&mut quic_recv, &mut payload),
             )
             .await
             {
@@ -533,7 +533,7 @@ impl UdpTunnel {
                         &reply_tx,
                         ipv6,
                     )?;
-                    let payload = BUFFER_POOL.alloc_from_slice(&buf[..packet_len as usize]);
+                    payload.set_filled_len(packet_len as usize);
                     udp_sender
                         .send(UdpMessage::Packet(UdpPacket {
                             payload,
