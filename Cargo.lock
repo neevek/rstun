@@ -1580,6 +1580,7 @@ dependencies = [
  "rustls-platform-verifier 0.6.0",
  "serde",
  "serde_json",
+ "socket2 0.5.10",
  "tokio",
  "x509-parser",
 ]

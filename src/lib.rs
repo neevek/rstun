@@ -1,6 +1,8 @@
 mod client;
 mod heartbeat;
+mod hole_punch;
 mod pem_util;
+mod registry;
 mod server;
 mod socket_protector;
 mod tcp;
@@ -13,9 +15,13 @@ use anyhow::{Context, Result};
 use byte_pool::BytePool;
 pub use client::Client;
 pub use client::ClientState;
+pub use hole_punch::{PunchRole, Puncher};
 use lazy_static::lazy_static;
 use log::warn;
 use quinn::{IdleTimeout, TransportConfig, VarInt, congestion};
+pub use registry::{
+    IncomingRelay, RegistryEntry, RegistryMessage, RegistrySession, RelayHandle, RelayStream,
+};
 use rs_utilities::log_and_bail;
 use rustls::crypto::ring::cipher_suite;
 use serde::Deserialize;
@@ -206,6 +212,9 @@ pub enum TunnelType {
     UdpIn(UdpTunnelInInfo),
     DynamicUpstreamTcpOut(quinn::Connection),
     DynamicUpstreamUdpOut(quinn::Connection),
+    /// Registry registration: the login bidi stream is reused as the control
+    /// stream and handed up to `serve()` (no heartbeat task).
+    Registry(quinn::Connection, quinn::SendStream, quinn::RecvStream),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -264,6 +273,10 @@ pub struct TunnelConfig {
 pub(crate) enum Tunnel {
     NetworkBased(TunnelConfig),
     ChannelBased(UpstreamType),
+    /// Registry registration. Appended variant: existing decoders never produce
+    /// it, and a server built without registry support fails to decode it (the
+    /// client surfaces that as "server does not support the registry").
+    Registry,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -315,6 +328,12 @@ pub struct ServerConfig {
     /// Optional callback for channel-based UDP tunnels. When provided, it can decide how to
     /// serve accepted QUIC UDP channels, including chaining them to another QUIC client.
     pub channel_udp_connector: Option<ChannelUdpConnector>,
+
+    /// Optional hook to authorize registry registrations. Called with the
+    /// registration `(key, value)`; returning `Err` rejects the registration.
+    /// rstun itself never interprets keys or values — this is where an embedder
+    /// enforces meaning (e.g. verify a signature binding the key to the value).
+    pub registry_validator: Option<RegistryValidator>,
 
     /// 0.0.0.0:3515
     pub dashboard_server: String,
@@ -409,6 +428,11 @@ pub struct ChannelTcpConnectCtx {
 pub type ChannelTcpConnectFuture = Pin<Box<dyn Future<Output = Result<TcpStream>> + Send>>;
 pub type ChannelTcpConnector =
     Arc<dyn Fn(ChannelTcpConnectCtx) -> ChannelTcpConnectFuture + Send + Sync>;
+
+/// Authorizes a registry registration. Receives the `(key, value)` a client
+/// wants to register; returning `Err` rejects it with that message. rstun calls
+/// this without interpreting the contents — the embedder defines validity.
+pub type RegistryValidator = Arc<dyn Fn(&str, &[u8]) -> Result<()> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelUdpConnectCtx {

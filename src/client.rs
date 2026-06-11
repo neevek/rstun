@@ -2,7 +2,9 @@ use crate::{
     ClientConfig, LoginInfo, SelectedCipherSuite, TcpServer, Tunnel, TunnelConfig, TunnelMode,
     UpstreamType, build_quic_transport_config,
     heartbeat::{self, HeartbeatConfig},
-    pem_util, socket_addr_with_unspecified_ip_port,
+    pem_util,
+    registry::RegistrySession,
+    socket_addr_with_unspecified_ip_port,
     tcp::{AsyncStream, StreamReceiver, StreamRequest, tcp_tunnel::TcpTunnel},
     tunnel_event_bus::{
         TunnelDescriptor, TunnelEvent, TunnelEventBus, TunnelEventType, TunnelId, TunnelStat,
@@ -492,6 +494,9 @@ impl Client {
                         .await;
                         inner_state!(self, connections).remove(&conn.stable_id());
                     }
+                    Tunnel::Registry => {
+                        unreachable!("registry uses the dedicated registry client path");
+                    }
                 },
 
                 Err(e) => {
@@ -597,6 +602,61 @@ impl Client {
         )?;
         endpoint.set_default_client_config(quinn_client_cfg);
         Ok(endpoint)
+    }
+
+    /// Connect to an rstun server as a registry client and log in with
+    /// `Tunnel::Registry`. The login bidi stream is reused as the control stream
+    /// and returned in the session; no heartbeat task is started on either side
+    /// (liveness comes from QUIC keep-alive). The caller drives the returned
+    /// session and never touches the crate-private `Tunnel` type.
+    pub async fn registry_connect(&self) -> Result<RegistrySession> {
+        // A registry connection has no heartbeat task, so QUIC keep-alive is the
+        // only liveness mechanism — and that is only configured when
+        // quic_timeout_ms > 0 (see build_quic_transport_config). Refuse a config
+        // that would leave the session unable to detect a dead peer.
+        if self.config.quic_timeout_ms == 0 {
+            bail!("registry requires quic_timeout_ms > 0 (needed for QUIC keep-alive)");
+        }
+
+        let login_cfg = self.prepare_login_config().await?;
+        let endpoint =
+            Self::create_client_endpoint(login_cfg.local_addr, login_cfg.quinn_client_cfg.clone())?;
+        let connect_timeout = Self::connect_attempt_timeout_for(0);
+        let remote_addr = login_cfg.remote_addr;
+
+        let conn = tokio::time::timeout(
+            connect_timeout,
+            endpoint.connect(remote_addr, login_cfg.sni_name.as_str())?,
+        )
+        .await
+        .context("registry connect timed out")?
+        .context("registry connect failed")?;
+
+        let (mut quic_send, mut quic_recv) = conn
+            .open_bi()
+            .await
+            .context("failed to open registry control stream")?;
+
+        let login_info = LoginInfo {
+            password: self.config.password.clone(),
+            tunnel: Tunnel::Registry,
+            tcp_timeout_ms: self.config.tcp_timeout_ms,
+            udp_timeout_ms: self.config.udp_timeout_ms,
+        };
+        TunnelMessage::send(&mut quic_send, &TunnelMessage::ReqLogin(login_info)).await?;
+
+        match TunnelMessage::recv(&mut quic_recv).await {
+            Ok(TunnelMessage::RespSuccess(_)) => {}
+            Ok(TunnelMessage::RespFailure(msg)) => {
+                bail!("registry login rejected: {msg}");
+            }
+            Ok(other) => bail!("registry: unexpected login response: {other}"),
+            // A server without registry support can't decode Tunnel::Registry and
+            // drops the stream before replying — surface that as a clear error.
+            Err(e) => bail!("server does not support the registry (or login failed): {e}"),
+        }
+
+        Ok(RegistrySession::new(endpoint, conn, quic_send, quic_recv))
     }
 
     async fn handle_network_based_tunnel(
@@ -750,6 +810,17 @@ impl Client {
             quinn_client_cfg: client_cfg,
             sni_name,
         })
+    }
+
+    /// Expose the quinn client config, resolved server address, and SNI this
+    /// client would use for a registry connection — so an embedder can run a
+    /// reflexive-address query or a hole-punch over a *separate* socket against
+    /// the same rendezvous (e.g. `Puncher::reflexive`). Generic: no mesh concepts.
+    pub async fn registry_endpoint_config(
+        &self,
+    ) -> Result<(quinn::ClientConfig, std::net::SocketAddr, String)> {
+        let cfg = self.prepare_login_config().await?;
+        Ok((cfg.quinn_client_cfg, cfg.remote_addr, cfg.sni_name))
     }
 
     fn select_sni_name(&self, verify_name: &str) -> String {
@@ -1548,6 +1619,9 @@ impl Client {
             },
             (Tunnel::ChannelBased(_), ConnectInput::Network) => {
                 unreachable!("Channel-based tunnel requires ConnectInput::Channel");
+            }
+            (Tunnel::Registry, _) => {
+                unreachable!("registry uses the dedicated registry client path");
             }
         }
     }

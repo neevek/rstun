@@ -1,4 +1,5 @@
 use crate::heartbeat;
+use crate::registry::service::{self, Registry};
 use crate::tcp::tcp_tunnel::TcpTunnel;
 use crate::tcp::{StreamMessage, StreamSender};
 use crate::tunnel_message::{ServerCapabilities, TunnelMessage};
@@ -40,6 +41,7 @@ struct State {
     endpoint: Option<Endpoint>,
     tcp_sessions: Vec<ConnectedTcpInSession>,
     udp_sessions: Vec<ConnectedUdpInSession>,
+    registry: Registry,
 }
 
 impl State {
@@ -49,6 +51,7 @@ impl State {
             endpoint: None,
             tcp_sessions: Vec::new(),
             udp_sessions: Vec::new(),
+            registry: service::new_registry(),
         }
     }
 }
@@ -110,6 +113,17 @@ impl Server {
         Ok(addr)
     }
 
+    /// The actual bound address (resolves an ephemeral `:0` port). Valid after
+    /// `bind()` and before `serve()` takes ownership of the endpoint.
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.inner_state
+            .lock()
+            .unwrap()
+            .endpoint
+            .as_ref()
+            .and_then(|e| e.local_addr().ok())
+    }
+
     fn load_quinn_server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
         let (certs, key) =
             Self::read_certs_and_key(config.cert_path.as_str(), config.key_path.as_str())
@@ -148,6 +162,8 @@ impl Server {
             loop {
                 interval.tick().await;
                 Self::clear_expired_sessions(state.clone());
+                let registry = state.lock().unwrap().registry.clone();
+                service::prune(&registry);
             }
         });
 
@@ -265,6 +281,18 @@ impl Server {
                             .await
                             .ok();
                         }
+                        TunnelType::Registry(conn, quic_send, quic_recv) => {
+                            let registry = state.lock().unwrap().registry.clone();
+                            service::serve(
+                                registry,
+                                conn,
+                                quic_send,
+                                quic_recv,
+                                config.registry_validator.clone(),
+                            )
+                            .await
+                            .ok();
+                        }
                     }
 
                     Ok::<(), anyhow::Error>(())
@@ -318,6 +346,26 @@ impl Server {
                     config.udp_timeout_ms
                 );
 
+                // Registry connections reuse the login bidi stream as the
+                // control stream and run no heartbeat task (liveness comes from
+                // QUIC keep-alive, see build_quic_transport_config).
+                if matches!(login_info.tunnel, Tunnel::Registry) {
+                    let server_capabilities = Self::build_server_capabilities();
+                    TunnelMessage::send(
+                        &mut quic_send,
+                        &TunnelMessage::RespSuccess(server_capabilities.clone()),
+                    )
+                    .await?;
+                    info!("[{tunnel_label}] registry connection, remote_addr={remote_addr}");
+                    return Ok((
+                        TunnelType::Registry(conn, quic_send, quic_recv),
+                        TimeoutConfig {
+                            tcp_timeout_ms,
+                            udp_timeout_ms,
+                        },
+                    ));
+                }
+
                 let heartbeat_conn = conn.clone();
                 let tunnel_type = match login_info.tunnel {
                     Tunnel::NetworkBased(tunnel_config) => {
@@ -328,6 +376,7 @@ impl Server {
                         UpstreamType::Tcp => TunnelType::DynamicUpstreamTcpOut(conn),
                         UpstreamType::Udp => TunnelType::DynamicUpstreamUdpOut(conn),
                     },
+                    Tunnel::Registry => unreachable!("handled above"),
                 };
 
                 let server_capabilities = Self::build_server_capabilities();

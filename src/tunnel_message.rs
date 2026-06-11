@@ -19,6 +19,9 @@ pub enum TunnelMessage {
     RespHeartbeat(u64),
     RespFailure(String),
     RespSuccess(ServerCapabilities),
+    /// Registry traffic (appended variant; never reorder the variants above).
+    /// All registry messages are nested here so the core enum gains one entry.
+    Registry(crate::registry::RegistryMessage),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -69,6 +72,7 @@ impl LoginInfo {
                     }
                 }
             }
+            Tunnel::Registry => format!("Registry →  {remote_addr}"),
         }
     }
 }
@@ -82,6 +86,7 @@ impl Display for LoginInfo {
             Tunnel::NetworkBased(cfg) => {
                 f.write_str(format!("{}_{}", cfg.upstream.upstream_type, cfg.mode).as_str())
             }
+            Tunnel::Registry => f.write_str("Registry"),
         }
     }
 }
@@ -100,6 +105,7 @@ impl Display for TunnelMessage {
                 )
                 .as_str(),
             ),
+            Self::Registry(msg) => write!(f, "registry:{msg}"),
         }
     }
 }
