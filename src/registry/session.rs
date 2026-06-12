@@ -5,6 +5,7 @@ use crate::registry::relay::{self, IncomingRelay, RelayIncoming, RelayOpen, Rela
 use anyhow::{Context, Result, bail};
 use log::debug;
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -150,5 +151,18 @@ impl RegistrySession {
     /// True once the underlying QUIC connection has closed.
     pub fn is_closed(&self) -> bool {
         self.conn.close_reason().is_some()
+    }
+
+    /// Cleanly close the registry connection so the rendezvous unregisters this
+    /// client promptly (instead of waiting out the idle timeout). Sends a QUIC
+    /// CONNECTION_CLOSE and waits for this connection to finish closing — the
+    /// rendezvous acks in ~1 RTT — bounded so a wedged path can't hang shutdown.
+    ///
+    /// Note: `conn.closed()` (per-connection), not `endpoint.wait_idle()` — a
+    /// live `RelayHandle` clone would keep the endpoint non-idle and stall the
+    /// full timeout. The background accept task ends on its own when `conn` closes.
+    pub async fn shutdown(&self) {
+        self.conn.close(0u32.into(), b"shutdown");
+        let _ = tokio::time::timeout(Duration::from_millis(500), self.conn.closed()).await;
     }
 }
